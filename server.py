@@ -132,7 +132,8 @@ def _make_offline_frame(cam_id: str) -> bytes:
 # ------------------------------------------------------------------ #
 
 _ws_clients: set[WebSocket] = set()
-_ws_lock = asyncio.Lock()
+# 延迟初始化：在事件循环启动后的 startup() 中创建，避免模块级 asyncio.Lock() 绑定错误循环
+_ws_lock: asyncio.Lock | None = None
 
 
 @app.websocket("/ws")
@@ -156,7 +157,7 @@ async def websocket_endpoint(ws: WebSocket):
 
 async def _broadcast_loop():
     """后台协程：从告警 Queue 读取并广播给所有 WebSocket 客户端"""
-    loop = asyncio.get_event_loop()
+    loop = asyncio.get_running_loop()   # Python 3.10+ 推荐，替代已弃用的 get_event_loop()
     while True:
         try:
             alert = await loop.run_in_executor(
@@ -183,6 +184,8 @@ async def _broadcast_loop():
 
 @app.on_event("startup")
 async def startup():
+    global _ws_lock
+    _ws_lock = asyncio.Lock()   # 在事件循环内创建，确保绑定到正确的 loop
     asyncio.create_task(_broadcast_loop())
     logger.info("WebSocket 广播任务已启动")
 

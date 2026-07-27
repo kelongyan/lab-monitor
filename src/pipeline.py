@@ -22,8 +22,12 @@ from .calibrator import TransitCalibrator
 
 logger = logging.getLogger("pipeline")
 
-_RTSP_MAX_RETRIES = 10
-_RTSP_RETRY_DELAY = 3.0
+# _leave_times 条目的过期时间：超过该时间未到达下一个摄像头视为已离开场景
+_LEAVE_EXPIRY_SECONDS = 3600
+# RTSP 重连配置：指数退避策略（无最大重试次数限制）
+_RTSP_INITIAL_DELAY = 3.0
+_RTSP_MAX_DELAY = 60.0
+_RTSP_BACKOFF_FACTOR = 1.5
 
 
 def _is_rtsp(source: str) -> bool:
@@ -108,27 +112,32 @@ class CameraPipeline(threading.Thread):
         logger.info("[%s] 文件流水线结束", self.camera_id)
 
     def _run_rtsp(self) -> None:
-        retries = 0
-        while not self._stop_event.is_set() and retries < _RTSP_MAX_RETRIES:
-            logger.info("[%s] 连接 RTSP（第 %d 次）: %s", self.camera_id, retries + 1, self.source)
+        """RTSP 流处理：无限重连+指数退避，消除网络抖动导致的永久下线"""
+        retry_delay = _RTSP_INITIAL_DELAY
+        while not self._stop_event.is_set():
+            logger.info("[%s] 连接 RTSP: %s", self.camera_id, self.source)
             cap = cv2.VideoCapture(self.source)
             if not cap.isOpened():
-                retries += 1
-                logger.warning("[%s] RTSP 连接失败，%ds 后重试", self.camera_id, _RTSP_RETRY_DELAY)
+                logger.warning("[%s] RTSP 连接失败，%.1fs 后重试", self.camera_id, retry_delay)
                 if self.frame_hub:
                     self.frame_hub.mark_offline(self.camera_id)
-                self._stop_event.wait(_RTSP_RETRY_DELAY)
+                self._stop_event.wait(retry_delay)
+                # 指数退避：每次失败延迟增长 1.5 倍，上限 60 秒
+                retry_delay = min(retry_delay * _RTSP_BACKOFF_FACTOR, _RTSP_MAX_DELAY)
                 continue
+
             logger.info("[%s] RTSP 连接成功", self.camera_id)
-            retries = 0
+            retry_delay = _RTSP_INITIAL_DELAY  # 连接成功后重置退避
             self._read_loop(cap)
             cap.release()
+
             if self._stop_event.is_set():
                 break
-            logger.warning("[%s] RTSP 流中断，%ds 后重连", self.camera_id, _RTSP_RETRY_DELAY)
+            logger.warning("[%s] RTSP 流中断，%.1fs 后重连", self.camera_id, retry_delay)
             if self.frame_hub:
                 self.frame_hub.mark_offline(self.camera_id)
-            self._stop_event.wait(_RTSP_RETRY_DELAY)
+            self._stop_event.wait(retry_delay)
+
         if self.frame_hub:
             self.frame_hub.mark_offline(self.camera_id)
         logger.info("[%s] RTSP 流水线结束", self.camera_id)
@@ -140,6 +149,9 @@ class CameraPipeline(threading.Thread):
                 break
             self._frame_idx += 1
             self._process_frame(frame)
+            # 每500帧清理一次过期的离开记录，防止长时间运行内存泄漏
+            if self._frame_idx % 500 == 0:
+                self._cleanup_stale_leave_times()
             if self.frame_hub:
                 self.frame_hub.push_frame(self.camera_id, frame)
             if self.display:
@@ -166,6 +178,7 @@ class CameraPipeline(threading.Thread):
         for track in tracks:
             tid = track["track_id"]
             bbox = track["bbox"]
+            conf = track["conf"]
 
             # 限频提取特征
             last_reid = self._reid_frame_counter.get(tid, -999)
@@ -194,19 +207,29 @@ class CameraPipeline(threading.Thread):
                     self.alerter.resolve(gid, self.camera_id)
                     logger.info("[%s] ✓ 身份确认（多帧）: %s", self.camera_id, gid)
                 else:
-                    # 尚未确认，但缓冲帧够了且完全无匹配 → 注册新身份
+                    # 尚未确认，但缓冲帧够了且完全无匹配 → 注册（或归并）身份
                     if len(self._validator._buffers.get(tid, [])) >= self._validator._buffer_size:
                         avg_feat = self._validator.get_avg_feature(tid)
                         if avg_feat is not None:
-                            gid = self.store.register(avg_feat)
-                            self._validator._confirmed[tid] = gid
-                            logger.info("[%s] 注册新身份（多帧平均）: %s", self.camera_id, gid)
+                            # 原子性查重+注册（P1-5）：防止多路并发重复注册同一人
+                            gid, is_new = self.store.register_if_new(avg_feat)
+                            # 通过公开接口确认身份，同时清理候选脏状态（P1-5）
+                            self._validator.confirm(tid, gid)
+                            if is_new:
+                                logger.info("[%s] 注册新身份（多帧平均）: %s", self.camera_id, gid)
+                            else:
+                                logger.info("[%s] 跨摄归并身份: %s", self.camera_id, gid)
 
                 if gid:
                     self._track_to_global[tid] = gid
 
             if gid:
-                self.store.update_appearance(gid, self.camera_id, feat, bbox)
+                # 计算帧质量分（bbox 面积 × 检测置信度），指导特征滑动平均权重（P1-3）
+                w = bbox[2] - bbox[0]
+                h = bbox[3] - bbox[1]
+                area_score = min(1.0, (w * h) / (128.0 * 256.0))
+                quality = area_score * min(1.0, conf)
+                self.store.update_appearance(gid, self.camera_id, feat, bbox, quality_score=quality)
 
         # 绘制定位框和身份/追踪 ID 标签
         for track in tracks:
@@ -278,9 +301,22 @@ class CameraPipeline(threading.Thread):
             last_camera=self.camera_id,
             expected_cameras=expected_cams,
             deadline_offset=max_deadline,
-            last_bbox=rec.appearances[-1]["bbox"] if rec.appearances else [],
+            # P2-4：先拍快照再访问，规避并发修改时的 IndexError
+            last_bbox=list(rec.appearances)[-1]["bbox"] if rec.appearances else [],
         )
         logger.debug(
             "[%s] Person %s 离开，预期在 %s 出现（校准后 %.0fs 内）",
             self.camera_id, gid, expected_cams, max_deadline,
         )
+
+    def _cleanup_stale_leave_times(self) -> None:
+        """清理超过 _LEAVE_EXPIRY_SECONDS 的离开记录，防止内存泄漏和校准数据污染"""
+        now = time.time()
+        stale = [
+            gid for gid, (ts, _) in self._leave_times.items()
+            if now - ts > _LEAVE_EXPIRY_SECONDS
+        ]
+        for gid in stale:
+            self._leave_times.pop(gid, None)
+        if stale:
+            logger.debug("[%s] 清理 %d 条过期离开记录", self.camera_id, len(stale))

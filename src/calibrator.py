@@ -74,7 +74,8 @@ class TransitCalibrator:
             return default_expected, default_tolerance
 
         mean = sum(samples) / len(samples)
-        variance = sum((x - mean) ** 2 for x in samples) / len(samples)
+        # 使用 Bessel 校正（样本方差），避免小样本下低估标准差
+        variance = sum((x - mean) ** 2 for x in samples) / (len(samples) - 1)
         std = math.sqrt(variance)
 
         calibrated_expected = mean
@@ -97,7 +98,9 @@ class TransitCalibrator:
             if not samples:
                 continue
             mean = sum(samples) / len(samples)
-            variance = sum((x - mean) ** 2 for x in samples) / len(samples)
+            # Bessel 校正：与 calibrated_window() 保持一致
+            n = len(samples)
+            variance = sum((x - mean) ** 2 for x in samples) / max(n - 1, 1)
             result[key] = {
                 "count": len(samples),
                 "mean_seconds": round(mean, 1),

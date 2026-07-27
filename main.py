@@ -10,7 +10,7 @@ import threading
 from pathlib import Path
 
 from src.detector import PersonDetector
-from src.reid import ReIDExtractor
+from src.reid import build_reid_extractor
 from src.identity_store import IdentityStore
 from src.topology import CameraTopology
 from src.alerter import AlertManager, AlertBroadcaster
@@ -71,7 +71,7 @@ def main(display: bool = False, web: bool = True, web_port: int = 8000) -> None:
     # ---- 初始化共享组件 ----
     logger.info("加载模型中（首次运行会自动下载权重）...")
     detector       = PersonDetector(model_name="yolov8n.pt", conf_thresh=0.4)
-    reid_extractor = ReIDExtractor(device="cpu")
+    reid_extractor = build_reid_extractor(device="cpu")
     identity_store = IdentityStore()
     topology       = CameraTopology(TOPO_CFG)
     frame_hub      = FrameHub()

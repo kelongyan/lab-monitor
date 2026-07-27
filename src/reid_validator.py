@@ -109,6 +109,15 @@ class ReIDValidator:
         self._hit_count.pop(track_id, None)
         self._confirmed.pop(track_id, None)
 
+    def confirm(self, track_id: int, global_id: str) -> None:
+        """
+        外部强制确认身份（P1-5）：用于新身份注册后直接设定，替代直接写 _confirmed。
+        同时清理候选状态，避免留下脏数据（_hit_count / _candidate 对应的 stale 记录）。
+        """
+        self._confirmed[track_id] = global_id
+        self._candidate.pop(track_id, None)
+        self._hit_count.pop(track_id, None)
+
     def get_avg_feature(self, track_id: int) -> np.ndarray | None:
         """获取当前缓冲区的平均特征（供注册新身份使用）"""
         buf = self._buffers.get(track_id)

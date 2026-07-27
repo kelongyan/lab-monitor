@@ -74,6 +74,20 @@ class AlertManager:
         self._log_path.parent.mkdir(parents=True, exist_ok=True)
         self._notifier = notifier
         self._broadcaster = broadcaster
+        # P2-3：持久文件句柄（line buffering），避免每次 open/close 开销
+        try:
+            self._log_file = open(self._log_path, "a", encoding="utf-8", buffering=1)
+        except OSError as e:
+            logger.error("无法打开告警日志文件 %s: %s，将跳过日志写入", self._log_path, e)
+            self._log_file = None
+
+    def __del__(self):
+        """析构时关闭文件句柄"""
+        if hasattr(self, "_log_file") and self._log_file:
+            try:
+                self._log_file.close()
+            except Exception:
+                pass
 
     # ------------------------------------------------------------------ #
     # 开启监听                                                              #
@@ -132,24 +146,26 @@ class AlertManager:
         triggered = []
         warned = []
 
+        # 将所有状态修改都放在锁内，避免与 resolve() 的竞态
         with self._lock:
-            entries = list(self._watches.values())
+            for entry in list(self._watches.values()):
+                if entry.triggered:
+                    continue
+                elapsed = now - entry.last_seen
+                window = entry.deadline - entry.last_seen  # 总窗口秒数
 
-        for entry in entries:
-            if entry.triggered:
-                continue
-            elapsed = now - entry.last_seen
-            window = entry.deadline - entry.last_seen  # 总窗口秒数
+                # Stage 1: WARNING（到达 70% 时刻）
+                if not entry.warned and elapsed >= window * _WARNING_RATIO:
+                    entry.warned = True
+                    warned.append(entry)
 
-            # Stage 1: WARNING（到达 70% 时刻）
-            if not entry.warned and elapsed >= window * _WARNING_RATIO:
-                entry.warned = True
-                warned.append(entry)
+                # Stage 2: ALERT（超过 deadline）
+                if now >= entry.deadline:
+                    entry.triggered = True
+                    triggered.append(entry)
 
-            # Stage 2: ALERT（超过 deadline）
-            if now >= entry.deadline:
-                entry.triggered = True
-                triggered.append(entry)
+            # 清理也在锁内完成，确保原子性
+            self._watches = {gid: e for gid, e in self._watches.items() if not e.triggered}
 
         # 处理 WARNING
         for entry in warned:
@@ -160,11 +176,10 @@ class AlertManager:
             if self._broadcaster:
                 self._broadcaster.push(self._build_alert(entry, stage="WARNING"))
 
-        # 处理 ALERT
+        # 处理 ALERT（IO 操作在锁外执行，不阻塞其他线程）
         for entry in triggered:
             alert = self._build_alert(entry, stage="ALERT")
             self._write_log(alert)
-            triggered_alerts = triggered  # 用于返回
             logger.warning(
                 "⚠ ALERT: person %s missing! Last seen at %s, expected in %s",
                 entry.global_id, entry.last_camera, entry.expected_cameras,
@@ -176,9 +191,6 @@ class AlertManager:
                     logger.error("通知发送失败: %s", e)
             if self._broadcaster:
                 self._broadcaster.push(alert)
-
-        with self._lock:
-            self._watches = {gid: e for gid, e in self._watches.items() if not e.triggered}
 
         return [self._build_alert(e, stage="ALERT") for e in triggered]
 
@@ -201,5 +213,10 @@ class AlertManager:
         }
 
     def _write_log(self, alert: dict) -> None:
-        with open(self._log_path, "a", encoding="utf-8") as f:
-            f.write(json.dumps(alert, ensure_ascii=False) + "\n")
+        if self._log_file is None:
+            return
+        try:
+            self._log_file.write(json.dumps(alert, ensure_ascii=False) + "\n")
+            # line buffering (buffering=1) 已保证每行写完后自动 flush
+        except OSError as e:
+            logger.error("告警日志写入失败: %s", e)

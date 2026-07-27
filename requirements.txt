@@ -3,6 +3,10 @@
 # 2. pip install -r requirements.txt
 
 ultralytics>=8.0.0
-scipy>=1.13.0
 fastapi>=0.100.0
 uvicorn[standard]>=0.24.0
+
+# P1 优化新增：OSNet ReID 模型（torchreid 依赖 gdown + tensorboard）
+torchreid>=0.2.5
+gdown>=6.0.0
+tensorboard>=2.0.0

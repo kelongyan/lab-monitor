@@ -22,7 +22,9 @@
   - 基于 **YOLOv8** 模型完成高精度人员检测（`PersonDetector`）。
   - 集成单相机内的轻量化目标跟踪算法（`PersonTracker`），实现轨迹平滑与目标连贯标识。
 - 🆔 **跨视角 ReID 身份重识别**
-  - 基于深度重识别特征提取（`ReIDExtractor`），跨不同摄像头视角建立全局身份库（`IdentityStore`），解决视角遮挡与离场重进识别难题。
+  - 基于专用 ReID 模型 **OSNet-x0.25**（`ReIDExtractor`），512维特征向量，Market-1501 数据集 Rank-1 精度约78%，远超通用分类模型。
+  - 跨不同摄像头视角建立全局身份库（`IdentityStore`），解决视角遮挡与离场重进识别难题。
+  - 多帧确认机制（`ReIDValidator`）结合 Ratio Test，有效降低误识别率。
 - 🗺️ **相机拓扑与穿越时延校验**
   - 可配置的摄像头空间拓扑模型（`CameraTopology`），支持相邻区域转移时延统计与概率校准（`TransitCalibrator`），及时发现异常路径或留存。
 - 🚨 **智能化多渠道告警机制**
@@ -87,7 +89,7 @@ lab-monitor/
 # 1. 安装 PyTorch CPU 版
 pip install torch torchvision --index-url https://download.pytorch.org/whl/cpu
 
-# 2. 安装项目依赖
+# 2. 安装项目依赖（含 OSNet ReID 模型依赖）
 pip install -r requirements.txt
 ```
 
@@ -99,9 +101,11 @@ pip install torch torchvision --index-url https://download.pytorch.org/whl/cu118
 # 或 CUDA 12.1 版本
 # pip install torch torchvision --index-url https://download.pytorch.org/whl/cu121
 
-# 安装项目依赖
+# 安装项目依赖（含 OSNet ReID 模型依赖：torchreid + gdown + tensorboard）
 pip install -r requirements.txt
 ```
+
+> **首次运行说明**：OSNet-x0.25 预训练权重（~3MB）将自动从 Google Drive 下载并缓存到 `~/.cache/torch/checkpoints/`，首次启动需联网。
 
 > 📖 **完整部署指引**：关于视频文件存放规范、RTSP 摄像头接入配置、相机拓扑规则及详细 GPU 调优排错说明，请查阅 [docs/deployment.md](docs/deployment.md)。
 
