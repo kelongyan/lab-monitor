@@ -74,6 +74,8 @@ class AlertManager:
         self._log_path.parent.mkdir(parents=True, exist_ok=True)
         self._notifier = notifier
         self._broadcaster = broadcaster
+        # P0-3：冷却字典初始化于 __init__，避免 hasattr 动态创建 + 内存泄漏
+        self._intrusion_cooldown: dict[str, float] = {}
         # P2-3：持久文件句柄（line buffering），避免每次 open/close 开销
         try:
             self._log_file = open(self._log_path, "a", encoding="utf-8", buffering=1)
@@ -152,12 +154,15 @@ class AlertManager:
         now = time.time()
         key = f"intrusion_{camera_id}_{global_id}_{roi_name}"
         with self._lock:
-            if not hasattr(self, "_intrusion_cooldown"):
-                self._intrusion_cooldown = {}
-            # 10 秒冷却防刷屏
+            # 10 秒冷却防刷屏；同时清理 >60s 的过期 key，防止 Trk_N 无限累积（内存泄漏修复）
             if now - self._intrusion_cooldown.get(key, 0) < 10.0:
                 return None
             self._intrusion_cooldown[key] = now
+            # 清理超过 60 秒的旧记录（仅当字典非空时执行，避免每帧开销）
+            if len(self._intrusion_cooldown) > 200:
+                expired = [k for k, ts in self._intrusion_cooldown.items() if now - ts > 60.0]
+                for k in expired:
+                    del self._intrusion_cooldown[k]
 
         alert_id = f"alert_roi_{int(now*1000)}"
         alert = {
@@ -246,6 +251,7 @@ class AlertManager:
         elapsed = time.time() - entry.last_seen
         risk = "HIGH" if elapsed > 120 else ("MEDIUM" if elapsed > 60 else "LOW")
         return {
+            "alert_id": f"alert_{int(time.time() * 1000)}",  # P2: 补充缺失字段，前端截图路径依赖此字段
             "alert_type": "MISSING_PERSON",
             "stage": stage,           # "WARNING" or "ALERT"
             "global_id": entry.global_id,

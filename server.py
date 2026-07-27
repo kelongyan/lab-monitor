@@ -37,6 +37,14 @@ _identity_store = None
 _calibrator = None
 _pipelines = None
 
+# ROI 文件读-改-写互斥锁，防止并发 POST 请求竞态覆盖配置（startup() 中初始化）
+_roi_file_lock: asyncio.Lock | None = None
+
+# ROI 配置约束
+_ROI_MAX_VERTICES = 64     # 每个多边形最多顶点数
+_ROI_COORD_MIN = 0.0       # 归一化坐标下限
+_ROI_COORD_MAX = 1.0       # 归一化坐标上限
+
 
 def init_server(frame_hub, broadcaster, identity_store, calibrator=None, pipelines=None):
     global _frame_hub, _broadcaster, _identity_store, _calibrator, _pipelines
@@ -82,28 +90,55 @@ async def save_roi(request: Request):
         camera_id = body.get("camera_id")
         if not camera_id:
             return JSONResponse({"status": "error", "error": "缺少 camera_id 参数"}, status_code=400)
-            
-        polygon = body.get("polygon", [])
-        name = body.get("name", "自定义电子围栏")
-        
-        roi_file = Path(__file__).parent / "config" / "roi.json"
-        current = {}
-        if roi_file.exists():
-            try:
-                current = json.loads(roi_file.read_text(encoding="utf-8"))
-            except Exception:
-                current = {}
-        
-        if polygon:
-            current[camera_id] = [{
-                "name": name,
-                "polygon": polygon
-            }]
-        else:
-            current.pop(camera_id, None)
 
-        roi_file.write_text(json.dumps(current, ensure_ascii=False, indent=2), encoding="utf-8")
-        logger.info("保存 ROI 配置成功: camera_id=%s, polygon_count=%d", camera_id, len(polygon))
+        # P0-2a: camera_id 白名单校验 —— 只允许已配置的摄像头
+        valid_cam_ids: set[str] = set()
+        if _pipelines:
+            valid_cam_ids = {p.camera_id for p in _pipelines if hasattr(p, "camera_id")}
+        if valid_cam_ids and camera_id not in valid_cam_ids:
+            return JSONResponse(
+                {"status": "error", "error": f"未知摄像头 ID: {camera_id}"},
+                status_code=400,
+            )
+
+        polygon = body.get("polygon", [])
+        name = str(body.get("name", "自定义电子围栏"))[:64]  # 名称最长 64 字符
+
+        # P0-2b: polygon 顶点数上限 + 坐标范围 [0, 1] 校验
+        if polygon:
+            if len(polygon) > _ROI_MAX_VERTICES:
+                return JSONResponse(
+                    {"status": "error", "error": f"多边形顶点数超限（最多 {_ROI_MAX_VERTICES} 个）"},
+                    status_code=400,
+                )
+            for pt in polygon:
+                if (not isinstance(pt, (list, tuple)) or len(pt) != 2
+                        or not (_ROI_COORD_MIN <= float(pt[0]) <= _ROI_COORD_MAX)
+                        or not (_ROI_COORD_MIN <= float(pt[1]) <= _ROI_COORD_MAX)):
+                    return JSONResponse(
+                        {"status": "error", "error": "polygon 坐标必须在 [0, 1] 范围内"},
+                        status_code=400,
+                    )
+
+        # P0-2c: 读-改-写加锁，防止并发 POST 竞态覆盖（_roi_file_lock 在 startup() 初始化）
+        roi_file = Path(__file__).parent / "config" / "roi.json"
+        lock = _roi_file_lock or asyncio.Lock()  # startup 未完成时降级为临时锁
+        async with lock:
+            current = {}
+            if roi_file.exists():
+                try:
+                    current = json.loads(roi_file.read_text(encoding="utf-8"))
+                except Exception:
+                    current = {}
+
+            if polygon:
+                current[camera_id] = [{"name": name, "polygon": polygon}]
+            else:
+                current.pop(camera_id, None)
+
+            roi_file.write_text(json.dumps(current, ensure_ascii=False, indent=2), encoding="utf-8")
+
+        logger.info("保存 ROI 配置成功: camera_id=%s, polygon_points=%d", camera_id, len(polygon))
 
         # 动态通知运行中的 CameraPipelines
         if _pipelines:
@@ -150,9 +185,11 @@ async def get_alerts():
     return JSONResponse({"alerts": _broadcaster.recent()})
 
 
+from fastapi import Query
+
 @app.get("/api/alerts/history")
 async def get_alert_history(
-    limit: int = 100,
+    limit: int = Query(default=100, ge=1, le=500),  # P1: 上限 500 防止内存爆炸
     risk_level: str | None = None,
     camera_id: str | None = None,
     alert_type: str | None = None,
@@ -191,9 +228,17 @@ async def get_alert_history(
 
 @app.get("/api/alerts/export")
 async def export_alerts_csv():
+    import time as pytime
     from fastapi.responses import Response
+
+    # P1: CSV 字段公式注入防护 —— Excel 会把 =/@/+/- 开头的值当作公式执行
+    def _safe_csv(v) -> str:
+        s = str(v) if v is not None else ""
+        if s and s[0] in ('=', '+', '-', '@', '\t', '\r'):
+            s = "'" + s   # 在 Excel 中强制视为文本
+        return s
+
     log_file = Path(__file__).parent / "outputs" / "alerts.jsonl"
-    
     csv_rows = ["Alert ID,Timestamp,Stage,Type,Risk Level,Global ID,Camera,Elapsed Seconds"]
     if log_file.exists():
         try:
@@ -204,10 +249,15 @@ async def export_alerts_csv():
                         continue
                     try:
                         item = json.loads(line)
-                        import time as pytime
-                        ts_str = pytime.strftime("%Y-%m-%d %H:%M:%S", pytime.localtime(item.get("timestamp", 0)))
+                        ts_str = pytime.strftime(
+                            "%Y-%m-%d %H:%M:%S",
+                            pytime.localtime(item.get("timestamp", 0))
+                        )
                         csv_rows.append(
-                            f'"{item.get("alert_id")}","{ts_str}","{item.get("stage")}","{item.get("alert_type","TIMEOUT")}","{item.get("risk_level")}","{item.get("global_id")}","{item.get("last_camera")}","{item.get("elapsed_seconds")}"'
+                            f'"{_safe_csv(item.get("alert_id"))}","{ts_str}",'
+                            f'"{_safe_csv(item.get("stage"))}","{_safe_csv(item.get("alert_type","TIMEOUT"))}",'
+                            f'"{_safe_csv(item.get("risk_level"))}","{_safe_csv(item.get("global_id"))}",'
+                            f'"{_safe_csv(item.get("last_camera"))}","{_safe_csv(item.get("elapsed_seconds"))}"'
                         )
                     except Exception:
                         continue
@@ -232,22 +282,22 @@ async def get_identities():
 
 @app.get("/api/identities/{global_id}")
 async def get_identity_detail(global_id: str):
+    import time as pytime  # P2: 移出循环体，避免重复导入
     if _identity_store is None:
         return JSONResponse({"error": "Identity store unavailable"}, status_code=503)
-    
+
     rec = _identity_store.get(global_id)
     if rec is None:
         return JSONResponse({"error": "Identity not found"}, status_code=404)
-    
+
     # 抽取并格式化出现轨迹（按照摄像头变化压缩关键节点）
     raw_apps = list(rec.appearances)
     trajectory = []
     last_cam = None
-    
+
     for app_item in raw_apps:
         cam = app_item.get("camera")
         ts = app_item.get("time", 0.0)
-        import time as pytime
         time_str = pytime.strftime("%H:%M:%S", pytime.localtime(ts)) if ts else "未知"
         
         # 仅在跨相机切换或首条记录时保留主要轨迹点
@@ -390,8 +440,9 @@ async def _broadcast_loop():
 
 @app.on_event("startup")
 async def startup():
-    global _ws_lock
-    _ws_lock = asyncio.Lock()   # 在事件循环内创建，确保绑定到正确的 loop
+    global _ws_lock, _roi_file_lock
+    _ws_lock = asyncio.Lock()       # 在事件循环内创建，确保绑定到正确的 loop
+    _roi_file_lock = asyncio.Lock() # ROI 文件写入锁，防止并发竞态
     asyncio.create_task(_broadcast_loop())
     logger.info("WebSocket 广播任务已启动")
 

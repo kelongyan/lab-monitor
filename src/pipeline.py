@@ -237,7 +237,8 @@ class CameraPipeline(threading.Thread):
                     logger.info("[%s] ✓ 身份确认（多帧）: %s", self.camera_id, gid)
                 else:
                     # 尚未确认，但缓冲帧够了且完全无匹配 → 注册（或归并）身份
-                    if len(self._validator._buffers.get(tid, [])) >= self._validator._buffer_size:
+                    # P2: 使用公开接口 buffer_len()，替代直接访问私有 _buffers
+                    if self._validator.buffer_len(tid) >= self._validator._buffer_size:
                         avg_feat = self._validator.get_avg_feature(tid)
                         if avg_feat is not None:
                             # 原子性查重+注册（P1-5）：防止多路并发重复注册同一人
@@ -293,7 +294,8 @@ class CameraPipeline(threading.Thread):
                 label_text = f"ID:{gid} | Q:{quality:.2f}"
             else:
                 color = (129, 185, 16)  # BGR 翡翠绿
-                buf_len = len(self._validator._buffers.get(tid, []))
+                # P2: 用公开方法 buffer_len() 替代访问私有 _buffers
+                buf_len = self._validator.buffer_len(tid)
                 label_text = f"Trk:{tid} [{buf_len}/3] | Q:{quality:.2f}"
 
             cv2.rectangle(frame, (x1, y1), (x2, y2), color, 3 if is_intrusion else 2)

@@ -141,3 +141,7 @@ class ReIDValidator:
         avg = np.mean(np.stack(list(buf)), axis=0)
         norm = np.linalg.norm(avg)
         return avg / norm if norm > 1e-8 else None
+
+    def buffer_len(self, track_id: int) -> int:
+        """P2: 公开接口替代直接访问 _buffers 私有成员（供 pipeline.py 展示缓冲进度）"""
+        return len(self._buffers.get(track_id, []))
