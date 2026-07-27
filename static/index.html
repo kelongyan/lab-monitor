@@ -71,7 +71,7 @@
         <div class="stat-icon-wrapper" style="background: rgba(217, 119, 6, 0.12); color: var(--warning); font-size: 12px; font-weight: 700;">预警</div>
         <div class="stat-info">
           <div class="stat-value" id="stat-warnings" style="color: var(--warning);">0</div>
-          <div class="stat-title">预预警跟踪事件</div>
+          <div class="stat-title">预警跟踪事件</div>
         </div>
       </div>
 
@@ -141,9 +141,15 @@
 
     <!-- 动态告警卡片列表 -->
     <div id="alert-list">
-      <div class="empty-state" id="no-alert">
-        <div style="font-size: 24px; margin-bottom: 8px; opacity: 0.4;">OK</div>
-        目前全网系统运行正常，无异常预警
+      <div class="secure-empty-box" id="no-alert">
+        <div class="secure-shield-icon">🛡️</div>
+        <div class="secure-empty-title">全域防线感知安防正常</div>
+        <div class="secure-empty-sub">
+          <span>全网节点巡检中</span>
+          <span>·</span>
+          <span style="color: var(--success); font-weight: 700;">0 风险隐患 detected</span>
+        </div>
+        <div class="secure-live-tag">SYSTEM OPERATIONAL</div>
       </div>
     </div>
 

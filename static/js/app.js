@@ -51,11 +51,11 @@ function bindEvents() {
     }
   });
 
-  // 顶部卡片 & 按钮绑定
-  const cardPersons = document.getElementById('card-stat-persons');
-  if (cardPersons) {
-    cardPersons.addEventListener('click', openIdentitySearchModal);
-  }
+  // 顶部卡片 & 按钮绑定（stat card 与 header 按钮都绑定同一个处理器）
+  ['card-stat-persons', 'card-stat-persons-btn'].forEach(id => {
+    const el = document.getElementById(id);
+    if (el) el.addEventListener('click', openIdentitySearchModal);
+  });
 
   const btnTopology = document.getElementById('btn-open-topology');
   if (btnTopology) {

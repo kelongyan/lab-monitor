@@ -16,7 +16,7 @@ export function getCachedCameras() {
 export function setFocusCamera(camId) {
   if (!camId) return;
   currentFocusCamId = camId;
-  if (currentGridMode === 'auto' || currentGridMode === 2) {
+  if (currentGridMode === 'auto' || currentGridMode === '2') {
     setGridMode('1n');
   } else {
     renderCamGrid(cachedCameras, true);
@@ -82,7 +82,7 @@ export function renderCamGrid(cameras, forceRefresh = false) {
   grid.innerHTML = '';
   grid.removeAttribute('style');
 
-  if (currentGridMode === 1) {
+  if (currentGridMode === '1') {
     grid.style.display = 'flex';
     grid.style.flexDirection = 'column';
 
@@ -123,12 +123,14 @@ export function renderCamGrid(cameras, forceRefresh = false) {
     const sideBox = document.createElement('div');
     sideBox.className = 'layout-1n-side';
     sideCams.forEach(c => {
-      const cardWrap = document.createElement('div');
-      cardWrap.style.cursor = 'pointer';
-      cardWrap.setAttribute('data-action', 'focus');
-      cardWrap.setAttribute('data-cam', escapeAttr(c.camera_id));
-      cardWrap.innerHTML = buildSingleCamCardHTML(c, false);
-      sideBox.appendChild(cardWrap.firstElementChild);
+      const temp = document.createElement('div');
+      temp.innerHTML = buildSingleCamCardHTML(c, false);
+      const card = temp.firstElementChild;   // cam-card div
+      // 直接把 data-action/data-cam 写到 cam-card 上，避免包裹层被 firstElementChild 丢弃
+      card.setAttribute('data-action', 'focus');
+      card.setAttribute('data-cam', escapeAttr(c.camera_id));
+      card.style.cursor = 'pointer';
+      sideBox.appendChild(card);
     });
     grid.appendChild(sideBox);
 
