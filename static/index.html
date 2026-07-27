@@ -32,6 +32,88 @@
     --text-dim: #64748b;
   }
 
+  /* 大厂正规浅色主题 (Enterprise Executive Light Theme) */
+  html[data-theme="light"] {
+    --bg-base: #f1f5f9;
+    --bg-card: #ffffff;
+    --bg-card-hover: #f8fafc;
+    --border-card: rgba(203, 213, 225, 0.9);
+    --border-card-glow: rgba(2, 132, 199, 0.4);
+    
+    --primary: #0284c7;
+    --primary-light: #0369a1;
+    --primary-glow: rgba(2, 132, 199, 0.15);
+    --success: #059669;
+    --success-glow: rgba(5, 150, 105, 0.15);
+    --warning: #d97706;
+    --warning-glow: rgba(217, 119, 6, 0.15);
+    --danger: #dc2626;
+    --danger-glow: rgba(220, 38, 38, 0.15);
+    --purple: #7c3aed;
+
+    --text-main: #0f172a;
+    --text-muted: #475569;
+    --text-dim: #94a3b8;
+  }
+
+  html[data-theme="light"] body {
+    background-image: 
+      radial-gradient(circle at 50% 0%, rgba(2, 132, 199, 0.05) 0%, transparent 60%),
+      linear-gradient(to bottom, #f8fafc, #f1f5f9);
+  }
+
+  html[data-theme="light"] header {
+    background: rgba(255, 255, 255, 0.92);
+    border-bottom-color: rgba(203, 213, 225, 0.8);
+  }
+
+  html[data-theme="light"] .brand-title-group h1 {
+    background: linear-gradient(to right, #0f172a, #334155);
+    -webkit-background-clip: text;
+    -webkit-text-fill-color: transparent;
+  }
+
+  html[data-theme="light"] .action-btn {
+    background: #ffffff;
+    border-color: rgba(203, 213, 225, 0.8);
+    box-shadow: 0 1px 3px rgba(15, 23, 42, 0.05);
+  }
+
+  html[data-theme="light"] .stat-card,
+  html[data-theme="light"] .reid-metrics-bar,
+  html[data-theme="light"] .cam-card,
+  html[data-theme="light"] .sidebar-panel,
+  html[data-theme="light"] .modal-container {
+    background: #ffffff;
+    border-color: rgba(203, 213, 225, 0.8);
+    box-shadow: 0 4px 16px rgba(15, 23, 42, 0.04);
+  }
+
+  html[data-theme="light"] .tech-topo-table-wrap,
+  html[data-theme="light"] .tech-num-box,
+  html[data-theme="light"] .tech-cam-input,
+  html[data-theme="light"] .roi-input-field {
+    background: #f8fafc;
+    border-color: rgba(203, 213, 225, 0.8);
+    color: #0f172a;
+  }
+
+  html[data-theme="light"] .modal-header {
+    background: #f8fafc;
+    border-bottom-color: rgba(203, 213, 225, 0.8);
+  }
+
+  html[data-theme="light"] .modal-close-btn {
+    background: #f1f5f9;
+    border-color: rgba(203, 213, 225, 0.8);
+    color: #475569;
+  }
+
+  html[data-theme="light"] .alert-card {
+    background: #ffffff;
+    border-color: rgba(203, 213, 225, 0.8);
+  }
+
   * { box-sizing: border-box; margin: 0; padding: 0; }
   
   body {
@@ -1355,6 +1437,9 @@
   </div>
 
   <div class="header-actions">
+    <button class="action-btn" id="theme-toggle-btn" onclick="toggleTheme()">
+      <span id="theme-btn-text">切换浅色</span>
+    </button>
     <button class="action-btn" id="sound-toggle-btn" onclick="toggleSound()">
       <span id="sound-text">声音告警: 关闭</span>
     </button>
@@ -1599,6 +1684,29 @@
 
 <script>
 const BASE = window.location.origin;
+
+// ---- 深浅色主题无缝切换 ----
+let currentTheme = localStorage.getItem('theme') || 'dark';
+
+function initTheme() {
+  const textEl = document.getElementById('theme-btn-text');
+  if (currentTheme === 'light') {
+    document.documentElement.setAttribute('data-theme', 'light');
+    if (textEl) textEl.textContent = '切换深色';
+  } else {
+    document.documentElement.removeAttribute('data-theme');
+    if (textEl) textEl.textContent = '切换浅色';
+  }
+}
+
+function toggleTheme() {
+  currentTheme = currentTheme === 'dark' ? 'light' : 'dark';
+  localStorage.setItem('theme', currentTheme);
+  initTheme();
+  showToast(`已成功切换至 ${currentTheme === 'light' ? '正规浅色' : '深邃玄青'}主题`, 'info');
+}
+
+document.addEventListener('DOMContentLoaded', initTheme);
 
 // ---- P0-1: XSS 防护工具函数 ----
 // 用于 innerHTML 插入：将 HTML 特殊字符转义为实体
