@@ -1,14 +1,9 @@
-<p align="center">
-  <img src="docs/images/qlu.png" alt="齐鲁工业大学 Logo" height="50">
-  &nbsp;&nbsp;&nbsp;&nbsp;
-  <img src="docs/images/chaosuan.png" alt="国家超算中心 Logo" height="50">
-</p>
-
-# Lab-Monitor 实验室/超算中心智能监控预警系统
+# <img src="docs/images/qlu.png" alt="齐鲁工业大学 Logo" height="38" valign="middle"> <img src="docs/images/chaosuan.png" alt="国家超算中心 Logo" height="38" valign="middle"> Lab-Monitor 实验室/超算中心智能监控预警系统
 
 <p align="center">
   <b>基于计算机视觉与 ReID 的多摄像头实时监控、跨视角目标追踪及智能化告警平台</b>
 </p>
+
 
 
 ---
@@ -47,7 +42,9 @@ lab-monitor/
 │   ├── topology.json        # 摄像头拓扑与预估穿越时间配置
 │   └── notify.json          # 告警通知渠道配置（Console / Email）
 ├── docs/                    # 项目文档与资源
-│   └── images/              # 效果截图等资源
+│   ├── deployment.md        # 详细部署与 GPU 配置指南
+│   └── images/              # 效果截图与 Logo 资源
+
 │       └── readme.png
 ├── src/                     # 核心源码目录
 │   ├── alerter.py           # 告警管理与广播器
@@ -83,15 +80,31 @@ lab-monitor/
 
 ### 2. 安装依赖
 
-推荐在虚拟环境中安装项目依赖：
+推荐使用 `conda` 或 `venv` 虚拟环境。根据硬件选择 **CPU** 或 **GPU (CUDA)** 依赖：
 
+#### 选项 A：CPU 版本安装 (通用)
 ```bash
-# 1. 安装 PyTorch 与 Torchvision (以 CPU 版本为例，CUDA 版本请查阅 PyTorch 官网)
+# 1. 安装 PyTorch CPU 版
 pip install torch torchvision --index-url https://download.pytorch.org/whl/cpu
 
 # 2. 安装项目依赖
 pip install -r requirements.txt
 ```
+
+#### 选项 B：NVIDIA GPU (CUDA) 版本安装 (推荐，高帧率)
+```bash
+# CUDA 11.8 版本
+pip install torch torchvision --index-url https://download.pytorch.org/whl/cu118
+
+# 或 CUDA 12.1 版本
+# pip install torch torchvision --index-url https://download.pytorch.org/whl/cu121
+
+# 安装项目依赖
+pip install -r requirements.txt
+```
+
+> 📖 **完整部署指引**：关于视频文件存放规范、RTSP 摄像头接入配置、相机拓扑规则及详细 GPU 调优排错说明，请查阅 [docs/deployment.md](docs/deployment.md)。
+
 
 ---
 
