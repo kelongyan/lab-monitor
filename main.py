@@ -109,7 +109,7 @@ def main(display: bool = False, web: bool = True, web_port: int = 8000) -> None:
 
     # ---- 启动 Web 服务器 ----
     if web:
-        web_server.init_server(frame_hub, broadcaster, identity_store, calibrator, pipelines=pipelines)
+        web_server.init_server(frame_hub, broadcaster, identity_store, calibrator, pipelines=pipelines, topology=topology)
         web_server.start_server_thread(port=web_port)
         time.sleep(0.5)
 

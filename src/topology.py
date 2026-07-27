@@ -1,9 +1,5 @@
-"""
-topology.py — 摄像头拓扑图 + 时间窗口管理
-从 config/topology.json 读取图结构，提供期望出现位置和时间窗口查询
-"""
-
 import json
+import threading
 from pathlib import Path
 from dataclasses import dataclass
 
@@ -24,25 +20,68 @@ class NextHop:
 
 class CameraTopology:
     def __init__(self, config_path: str | Path):
+        self._lock = threading.Lock()
+        self._config_path = Path(config_path)
         self._graph: dict[str, list[NextHop]] = {}
-        self._load(Path(config_path))
+        self._load(self._config_path)
 
     def _load(self, path: Path) -> None:
+        if not path.exists():
+            return
         with open(path, encoding="utf-8") as f:
             raw: dict = json.load(f)
-        for cam_id, hops in raw.items():
-            self._graph[cam_id] = [
-                NextHop(
-                    camera_id=h["next"],
-                    expected_seconds=h["expected_seconds"],
-                    tolerance_seconds=h.get("tolerance_seconds", 15.0),
-                )
-                for h in hops
-            ]
+        with self._lock:
+            self._graph.clear()
+            for cam_id, hops in raw.items():
+                self._graph[cam_id] = [
+                    NextHop(
+                        camera_id=h["next"],
+                        expected_seconds=float(h["expected_seconds"]),
+                        tolerance_seconds=float(h.get("tolerance_seconds", 15.0)),
+                    )
+                    for h in hops
+                ]
 
     def next_hops(self, camera_id: str) -> list[NextHop]:
         """返回从 camera_id 出发后可能到达的摄像头列表"""
-        return self._graph.get(camera_id, [])
+        with self._lock:
+            return list(self._graph.get(camera_id, []))
 
     def all_cameras(self) -> list[str]:
-        return list(self._graph.keys())
+        with self._lock:
+            return list(self._graph.keys())
+
+    def to_dict(self) -> dict:
+        with self._lock:
+            res = {}
+            for cam_id, hops in self._graph.items():
+                res[cam_id] = [
+                    {
+                        "next": h.camera_id,
+                        "expected_seconds": h.expected_seconds,
+                        "tolerance_seconds": h.tolerance_seconds,
+                    }
+                    for h in hops
+                ]
+            return res
+
+    def update_config(self, raw_data: dict) -> None:
+        """更新拓扑配置并持久化保存写回 config/topology.json"""
+        with self._lock:
+            self._graph.clear()
+            for cam_id, hops in raw_data.items():
+                self._graph[cam_id] = [
+                    NextHop(
+                        camera_id=h["next"],
+                        expected_seconds=float(h["expected_seconds"]),
+                        tolerance_seconds=float(h.get("tolerance_seconds", 15.0)),
+                    )
+                    for h in hops
+                ]
+
+        # 格式化持久化写回文件
+        self._config_path.write_text(
+            json.dumps(raw_data, ensure_ascii=False, indent=2),
+            encoding="utf-8"
+        )
+

@@ -32,27 +32,18 @@ app.mount("/screenshots", StaticFiles(directory=screenshots_dir), name="screensh
 
 # 运行时注入（main.py 启动前赋值）
 _frame_hub = None
-_broadcaster = None
-_identity_store = None
-_calibrator = None
-_pipelines = None
-
-# ROI 文件读-改-写互斥锁，防止并发 POST 请求竞态覆盖配置（startup() 中初始化）
-_roi_file_lock: asyncio.Lock | None = None
-
-# ROI 配置约束
-_ROI_MAX_VERTICES = 64     # 每个多边形最多顶点数
-_ROI_COORD_MIN = 0.0       # 归一化坐标下限
-_ROI_COORD_MAX = 1.0       # 归一化坐标上限
+_topology = None
 
 
-def init_server(frame_hub, broadcaster, identity_store, calibrator=None, pipelines=None):
-    global _frame_hub, _broadcaster, _identity_store, _calibrator, _pipelines
+def init_server(frame_hub, broadcaster, identity_store, calibrator=None, pipelines=None, topology=None):
+    global _frame_hub, _broadcaster, _identity_store, _calibrator, _pipelines, _topology
     _frame_hub = frame_hub
     _broadcaster = broadcaster
     _identity_store = identity_store
     _calibrator = calibrator
     _pipelines = pipelines
+    _topology = topology
+
 
 
 # ------------------------------------------------------------------ #
@@ -150,6 +141,41 @@ async def save_roi(request: Request):
     except Exception as e:
         logger.error("保存 ROI 失败: %s", e, exc_info=True)
         return JSONResponse({"status": "error", "error": str(e)}, status_code=500)
+
+
+@app.get("/api/topology")
+async def get_topology():
+    if _topology:
+        return JSONResponse(_topology.to_dict())
+    topology_file = Path(__file__).parent / "config" / "topology.json"
+    if not topology_file.exists():
+        return JSONResponse({})
+    try:
+        data = json.loads(topology_file.read_text(encoding="utf-8"))
+        return JSONResponse(data)
+    except Exception as e:
+        return JSONResponse({"error": str(e)}, status_code=500)
+
+
+@app.post("/api/topology")
+async def save_topology(request: Request):
+    try:
+        body = await request.json()
+        if not isinstance(body, dict):
+            return JSONResponse({"status": "error", "error": "数据格式必须为 JSON 对象"}, status_code=400)
+
+        topology_file = Path(__file__).parent / "config" / "topology.json"
+        topology_file.write_text(json.dumps(body, ensure_ascii=False, indent=2), encoding="utf-8")
+
+        if _topology:
+            _topology.update_config(body)
+
+        logger.info("在线更新拓扑配置成功: %d 个节点通道", len(body))
+        return JSONResponse({"status": "success", "topology": body})
+    except Exception as e:
+        logger.error("保存拓扑配置失败: %s", e, exc_info=True)
+        return JSONResponse({"status": "error", "error": str(e)}, status_code=500)
+
 
 @app.get("/api/status")
 async def get_status():
