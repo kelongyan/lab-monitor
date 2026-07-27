@@ -1,0 +1,41 @@
+/* ROI 绘图 Canvas 样式 */
+#roi-canvas-container {
+  position: relative;
+  width: 100%;
+  max-width: 640px;
+  height: 360px;
+  margin: 0 auto;
+  background: #000;
+  border-radius: 10px;
+  overflow: hidden;
+  border: 1px solid var(--border-card);
+}
+
+#roi-canvas-container img {
+  position: absolute;
+  top: 0; left: 0;
+  width: 100%; height: 100%;
+  object-fit: cover;
+  pointer-events: none;
+}
+
+#roi-canvas {
+  position: absolute;
+  top: 0; left: 0;
+  width: 100%; height: 100%;
+  cursor: crosshair;
+}
+
+.roi-input-field {
+  background: rgba(15, 23, 42, 0.8);
+  border: 1px solid var(--border-card);
+  color: var(--text-main);
+  padding: 8px 12px;
+  border-radius: 8px;
+  font-size: 13px;
+  width: 100%;
+  outline: none;
+}
+.roi-input-field:focus {
+  border-color: var(--primary);
+}

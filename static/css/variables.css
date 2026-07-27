@@ -1,0 +1,316 @@
+:root {
+  --bg-base: #0b1120;
+  --bg-card: rgba(15, 23, 42, 0.85);
+  --bg-card-hover: rgba(30, 41, 59, 0.9);
+  --border-card: rgba(255, 255, 255, 0.08);
+  --border-card-glow: rgba(2, 132, 199, 0.3);
+  
+  --primary: #0284c7;
+  --primary-light: #38bdf8;
+  --primary-glow: rgba(2, 132, 199, 0.2);
+  --success: #059669;
+  --success-glow: rgba(5, 150, 105, 0.2);
+  --warning: #d97706;
+  --warning-glow: rgba(217, 119, 6, 0.2);
+  --danger: #dc2626;
+  --danger-glow: rgba(220, 38, 38, 0.25);
+  --purple: #7c3aed;
+
+  --text-main: #f8fafc;
+  --text-muted: #94a3b8;
+  --text-dim: #64748b;
+}
+
+/* 大厂正规浅色主题 (Enterprise Executive Light Theme) */
+html[data-theme="light"] {
+  --bg-base: #f1f5f9;
+  --bg-card: #ffffff;
+  --bg-card-hover: #f8fafc;
+  --border-card: rgba(203, 213, 225, 0.9);
+  --border-card-glow: rgba(2, 132, 199, 0.4);
+  
+  --primary: #0284c7;
+  --primary-light: #0369a1;
+  --primary-glow: rgba(2, 132, 199, 0.15);
+  --success: #059669;
+  --success-glow: rgba(5, 150, 105, 0.15);
+  --warning: #d97706;
+  --warning-glow: rgba(217, 119, 6, 0.15);
+  --danger: #dc2626;
+  --danger-glow: rgba(220, 38, 38, 0.15);
+  --purple: #7c3aed;
+
+  --text-main: #0f172a;
+  --text-muted: #475569;
+  --text-dim: #94a3b8;
+}
+
+html[data-theme="light"] body {
+  background-image: 
+    radial-gradient(circle at 50% 0%, rgba(2, 132, 199, 0.05) 0%, transparent 60%),
+    linear-gradient(to bottom, #f8fafc, #f1f5f9);
+}
+
+html[data-theme="light"] header {
+  background: rgba(255, 255, 255, 0.92);
+  border-bottom-color: rgba(203, 213, 225, 0.8);
+}
+
+html[data-theme="light"] .brand-title-group h1 {
+  background: linear-gradient(to right, #0f172a, #334155);
+  -webkit-background-clip: text;
+  -webkit-text-fill-color: transparent;
+}
+
+html[data-theme="light"] .action-btn {
+  background: #ffffff;
+  border-color: rgba(203, 213, 225, 0.8);
+  box-shadow: 0 1px 3px rgba(15, 23, 42, 0.05);
+}
+
+html[data-theme="light"] .stat-card,
+html[data-theme="light"] .reid-metrics-bar,
+html[data-theme="light"] .cam-card,
+html[data-theme="light"] .sidebar-panel,
+html[data-theme="light"] .modal-container {
+  background: #ffffff;
+  border-color: rgba(203, 213, 225, 0.8);
+  box-shadow: 0 4px 16px rgba(15, 23, 42, 0.04);
+}
+
+html[data-theme="light"] .tech-topo-table-wrap,
+html[data-theme="light"] .tech-num-box,
+html[data-theme="light"] .tech-cam-input,
+html[data-theme="light"] .roi-input-field {
+  background: #f8fafc;
+  border-color: rgba(203, 213, 225, 0.8);
+  color: #0f172a;
+}
+
+html[data-theme="light"] .modal-header {
+  background: #f8fafc;
+  border-bottom-color: rgba(203, 213, 225, 0.8);
+}
+
+html[data-theme="light"] .modal-close-btn {
+  background: #f1f5f9;
+  border-color: rgba(203, 213, 225, 0.8);
+  color: #475569;
+}
+
+html[data-theme="light"] .alert-card {
+  background: #ffffff;
+  border-color: rgba(203, 213, 225, 0.8);
+  box-shadow: 0 2px 8px rgba(15, 23, 42, 0.04);
+}
+
+html[data-theme="light"] .panel-header {
+  background: #ffffff;
+  border-bottom-color: rgba(203, 213, 225, 0.8);
+}
+
+html[data-theme="light"] .panel-header h2 {
+  color: #0f172a;
+}
+
+html[data-theme="light"] .time-display {
+  background: #ffffff;
+  border-color: rgba(203, 213, 225, 0.8);
+  color: #0f172a;
+}
+
+html[data-theme="light"] .cam-card {
+  background: #ffffff;
+  border-color: rgba(203, 213, 225, 0.8);
+  box-shadow: 0 4px 14px rgba(15, 23, 42, 0.04);
+}
+
+html[data-theme="light"] .cam-header {
+  background: #f8fafc;
+  border-bottom-color: rgba(203, 213, 225, 0.8);
+}
+
+html[data-theme="light"] .cam-name {
+  color: #0f172a;
+}
+
+html[data-theme="light"] .cam-control-btn {
+  background: #ffffff;
+  border-color: rgba(203, 213, 225, 0.8);
+  color: #475569;
+}
+
+html[data-theme="light"] .cam-control-btn:hover {
+  background: #f1f5f9;
+  color: #0284c7;
+}
+
+html[data-theme="light"] .alert-type-title {
+  color: #0f172a;
+}
+
+html[data-theme="light"] .alert-item {
+  color: #475569;
+}
+
+html[data-theme="light"] .alert-item val {
+  color: #0f172a;
+}
+
+html[data-theme="light"] .alert-body-grid {
+  background: #f1f5f9;
+  border: 1px solid rgba(203, 213, 225, 0.6);
+}
+
+html[data-theme="light"] .calib-section {
+  background: #ffffff;
+  border-top-color: rgba(203, 213, 225, 0.8);
+}
+
+html[data-theme="light"] .calib-title {
+  color: #0f172a;
+}
+
+html[data-theme="light"] .calib-row {
+  background: #f1f5f9;
+  border: 1px solid rgba(203, 213, 225, 0.6);
+}
+
+html[data-theme="light"] .calib-path {
+  color: #0284c7;
+}
+
+html[data-theme="light"] .calib-stats-val {
+  color: #475569;
+}
+
+/* 浅色主题模态框与弹窗全套覆盖 */
+html[data-theme="light"] .modal-overlay {
+  background: rgba(15, 23, 42, 0.45);
+  backdrop-filter: blur(8px);
+}
+
+html[data-theme="light"] .modal-container {
+  background: #ffffff;
+  border-color: rgba(203, 213, 225, 0.9);
+  box-shadow: 0 20px 40px rgba(15, 23, 42, 0.12);
+}
+
+html[data-theme="light"] .modal-header {
+  background: #f8fafc;
+  border-bottom-color: rgba(203, 213, 225, 0.8);
+}
+
+html[data-theme="light"] .modal-title {
+  color: #0f172a;
+}
+
+html[data-theme="light"] .modal-close-btn {
+  background: #f1f5f9;
+  border-color: rgba(203, 213, 225, 0.8);
+  color: #475569;
+}
+
+html[data-theme="light"] .modal-close-btn:hover {
+  background: #fee2e2;
+  border-color: #f87171;
+  color: #dc2626;
+}
+
+html[data-theme="light"] .modal-body {
+  background: #ffffff;
+  color: #0f172a;
+}
+
+html[data-theme="light"] .timeline-content {
+  background: #f8fafc;
+  border-color: rgba(203, 213, 225, 0.8);
+}
+
+html[data-theme="light"] .timeline-cam {
+  color: #0284c7;
+}
+
+html[data-theme="light"] .timeline-time {
+  color: #64748b;
+}
+
+html[data-theme="light"] .meta-card {
+  background: #f8fafc;
+  border-color: rgba(203, 213, 225, 0.8);
+}
+
+html[data-theme="light"] .meta-card .label {
+  color: #64748b;
+}
+
+html[data-theme="light"] .meta-card .val {
+  color: #0f172a;
+}
+
+html[data-theme="light"] #roi-canvas-container {
+  background: #f1f5f9;
+  border-color: rgba(203, 213, 225, 0.9);
+}
+
+html[data-theme="light"] .roi-input-field {
+  background: #f8fafc;
+  border-color: rgba(203, 213, 225, 0.9);
+  color: #0f172a;
+}
+
+html[data-theme="light"] .empty-state {
+  color: #64748b;
+}
+
+html[data-theme="light"] .toast-message {
+  background: rgba(255, 255, 255, 0.96);
+  color: #0f172a;
+  border-color: rgba(203, 213, 225, 0.9);
+  box-shadow: 0 10px 30px rgba(15, 23, 42, 0.12);
+}
+
+html[data-theme="light"] .tech-topo-table-wrap {
+  background: #ffffff;
+  border-color: rgba(203, 213, 225, 0.9);
+  box-shadow: none;
+}
+
+html[data-theme="light"] .tech-topo-table th {
+  background: #f8fafc;
+  color: #475569;
+  border-bottom-color: rgba(203, 213, 225, 0.8);
+}
+
+html[data-theme="light"] .tech-topo-table td {
+  border-bottom-color: rgba(203, 213, 225, 0.5);
+}
+
+html[data-theme="light"] .tech-topo-table tr:hover {
+  background: rgba(2, 132, 199, 0.05);
+}
+
+html[data-theme="light"] .tech-num-box {
+  background: #f1f5f9;
+  border-color: rgba(203, 213, 225, 0.8);
+}
+
+html[data-theme="light"] .tech-num-btn {
+  background: rgba(0, 0, 0, 0.04);
+  color: #0284c7;
+}
+
+html[data-theme="light"] .tech-num-btn:hover {
+  background: #0284c7;
+  color: #ffffff;
+}
+
+html[data-theme="light"] .tech-num-input {
+  color: #0f172a;
+}
+
+html[data-theme="light"] .tech-cam-input {
+  background: #f1f5f9;
+  border-color: rgba(203, 213, 225, 0.8);
+  color: #0284c7;
+}
