@@ -14,6 +14,66 @@ from dataclasses import dataclass, field
 _MAX_APPEARANCES = 200
 
 
+class ReIDMetrics:
+    """线程安全的 ReID 检索指标统计器"""
+
+    def __init__(self, max_history: int = 100):
+        self._lock = threading.Lock()
+        self.total_searches = 0
+        self.successful_matches = 0
+        self.ratio_blocked_count = 0
+        self.sim_history = deque(maxlen=max_history)
+        self.margin_history = deque(maxlen=max_history)
+        self.latency_history = deque(maxlen=max_history)
+        self.quality_history = deque(maxlen=max_history)
+
+    def record_search(self) -> None:
+        with self._lock:
+            self.total_searches += 1
+
+    def record_match(
+        self,
+        best_sim: float,
+        second_sim: float = 0.0,
+        is_ratio_blocked: bool = False,
+        latency_ms: float = 0.0,
+    ) -> None:
+        with self._lock:
+            if is_ratio_blocked:
+                self.ratio_blocked_count += 1
+            else:
+                self.successful_matches += 1
+                self.sim_history.append(best_sim)
+                if best_sim > 0 and second_sim > 0:
+                    margin = 1.0 - (second_sim / best_sim)
+                    self.margin_history.append(margin)
+            if latency_ms > 0:
+                self.latency_history.append(latency_ms)
+
+    def record_quality(self, quality: float) -> None:
+        with self._lock:
+            self.quality_history.append(quality)
+
+    def get_summary(self, gallery_size: int = 0) -> dict:
+        with self._lock:
+            avg_sim = round(float(np.mean(self.sim_history)), 4) if self.sim_history else 0.0
+            avg_margin = round(float(np.mean(self.margin_history)), 4) if self.margin_history else 0.0
+            avg_latency = round(float(np.mean(self.latency_history)), 2) if self.latency_history else 0.0
+            avg_quality = round(float(np.mean(self.quality_history)), 4) if self.quality_history else 0.0
+            match_rate = round(self.successful_matches / max(1, self.total_searches), 4)
+            return {
+                "gallery_size": gallery_size,
+                "total_searches": self.total_searches,
+                "successful_matches": self.successful_matches,
+                "ratio_blocked_count": self.ratio_blocked_count,
+                "match_rate": match_rate,
+                "avg_top1_similarity": avg_sim,
+                "avg_ratio_margin": avg_margin,
+                "avg_latency_ms": avg_latency,
+                "avg_feature_quality": avg_quality,
+            }
+
+
 @dataclass
 class PersonRecord:
     global_id: str
@@ -29,6 +89,7 @@ class IdentityStore:
     def __init__(self):
         self._lock = threading.Lock()
         self._records: dict[str, PersonRecord] = {}
+        self.metrics = ReIDMetrics()
 
     # ------------------------------------------------------------------ #
     # 查询                                                                  #
@@ -99,6 +160,7 @@ class IdentityStore:
         quality 低（目标小/模糊）→ alpha 趋近 1 → 保守更新，避免噪声污染
         """
         quality = min(1.0, max(0.0, quality_score))
+        self.metrics.record_quality(quality)
         alpha = base_alpha + (1.0 - base_alpha) * (1.0 - quality)
         with self._lock:
             rec = self._records.get(global_id)
@@ -119,3 +181,9 @@ class IdentityStore:
     def all_ids(self) -> list[str]:
         with self._lock:
             return list(self._records.keys())
+
+    def get_metrics(self) -> dict:
+        with self._lock:
+            g_size = len(self._records)
+        return self.metrics.get_summary(gallery_size=g_size)
+

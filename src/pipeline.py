@@ -81,6 +81,22 @@ class CameraPipeline(threading.Thread):
         # Phase 4: 记录人员离开时间戳，供校准器计算通行时间
         # global_id → (leave_time, leave_camera)
         self._leave_times: dict[str, tuple[float, str]] = {}
+        self._reconnect_count = 0
+        self._rois = self._load_rois()
+
+    def _load_rois(self) -> list[dict]:
+        import json
+        roi_file = Path(__file__).parent.parent / "config" / "roi.json"
+        if not roi_file.exists():
+            return []
+        try:
+            data = json.loads(roi_file.read_text(encoding="utf-8"))
+            return data.get(self.camera_id, [])
+        except Exception:
+            return []
+
+    def reload_rois(self) -> None:
+        self._rois = self._load_rois()
 
     def stop(self) -> None:
         self._stop_event.set()
@@ -101,26 +117,27 @@ class CameraPipeline(threading.Thread):
             if not cap.isOpened():
                 logger.error("[%s] 无法打开视频文件: %s", self.camera_id, self.source)
                 if self.frame_hub:
-                    self.frame_hub.mark_offline(self.camera_id)
+                    self.frame_hub.mark_offline(self.camera_id, status_text="FILE_ERROR")
                 return
             logger.info("[%s] 开始处理文件: %s", self.camera_id, self.source)
             self._read_loop(cap)
             cap.release()
             time.sleep(0.5)
         if self.frame_hub:
-            self.frame_hub.mark_offline(self.camera_id)
+            self.frame_hub.mark_offline(self.camera_id, status_text="STOPPED")
         logger.info("[%s] 文件流水线结束", self.camera_id)
 
     def _run_rtsp(self) -> None:
         """RTSP 流处理：无限重连+指数退避，消除网络抖动导致的永久下线"""
         retry_delay = _RTSP_INITIAL_DELAY
         while not self._stop_event.is_set():
-            logger.info("[%s] 连接 RTSP: %s", self.camera_id, self.source)
+            logger.info("[%s] 连接 RTSP: %s (重连次数: %d)", self.camera_id, self.source, self._reconnect_count)
             cap = cv2.VideoCapture(self.source)
             if not cap.isOpened():
-                logger.warning("[%s] RTSP 连接失败，%.1fs 后重试", self.camera_id, retry_delay)
+                self._reconnect_count += 1
+                logger.warning("[%s] RTSP 连接失败 (已重试 %d 次)，%.1fs 后重试", self.camera_id, self._reconnect_count, retry_delay)
                 if self.frame_hub:
-                    self.frame_hub.mark_offline(self.camera_id)
+                    self.frame_hub.mark_offline(self.camera_id, status_text="RECONNECTING", reconnect_count=self._reconnect_count)
                 self._stop_event.wait(retry_delay)
                 # 指数退避：每次失败延迟增长 1.5 倍，上限 60 秒
                 retry_delay = min(retry_delay * _RTSP_BACKOFF_FACTOR, _RTSP_MAX_DELAY)
@@ -133,13 +150,14 @@ class CameraPipeline(threading.Thread):
 
             if self._stop_event.is_set():
                 break
+            self._reconnect_count += 1
             logger.warning("[%s] RTSP 流中断，%.1fs 后重连", self.camera_id, retry_delay)
             if self.frame_hub:
-                self.frame_hub.mark_offline(self.camera_id)
+                self.frame_hub.mark_offline(self.camera_id, status_text="RECONNECTING", reconnect_count=self._reconnect_count)
             self._stop_event.wait(retry_delay)
 
         if self.frame_hub:
-            self.frame_hub.mark_offline(self.camera_id)
+            self.frame_hub.mark_offline(self.camera_id, status_text="STOPPED", reconnect_count=self._reconnect_count)
         logger.info("[%s] RTSP 流水线结束", self.camera_id)
 
     def _read_loop(self, cap: cv2.VideoCapture) -> None:
@@ -153,7 +171,7 @@ class CameraPipeline(threading.Thread):
             if self._frame_idx % 500 == 0:
                 self._cleanup_stale_leave_times()
             if self.frame_hub:
-                self.frame_hub.push_frame(self.camera_id, frame)
+                self.frame_hub.push_frame(self.camera_id, frame, status_text="ONLINE")
             if self.display:
                 cv2.imshow(f"Camera {self.camera_id}", frame)
                 if cv2.waitKey(1) & 0xFF == ord("q"):
@@ -167,6 +185,17 @@ class CameraPipeline(threading.Thread):
     # ------------------------------------------------------------------ #
 
     def _process_frame(self, frame: np.ndarray) -> None:
+        h_img, w_img = frame.shape[:2]
+
+        # 绘制 ROI 危险区域边框
+        for roi in self._rois:
+            pts = np.array([[int(p[0] * w_img), int(p[1] * h_img)] for p in roi["polygon"]], np.int32)
+            pts = pts.reshape((-1, 1, 2))
+            cv2.polylines(frame, [pts], isClosed=True, color=(0, 165, 255), thickness=2)
+            roi_label = f"[ROI] {roi.get('name', '危险区')}"
+            cv2.putText(frame, roi_label, (pts[0][0][0], max(20, pts[0][0][1] - 6)),
+                        cv2.FONT_HERSHEY_SIMPLEX, 0.5, (0, 165, 255), 2)
+
         detections = self.detector.detect(frame)
         tracks = self._tracker.update(detections, frame.shape)
         current_track_ids = {t["track_id"] for t in tracks}
@@ -197,7 +226,7 @@ class CameraPipeline(threading.Thread):
             if gid is None:
                 # 用多帧平均特征做确认匹配
                 gallery = self.store.get_gallery()
-                confirmed_gid = self._validator.get_confirmed_match(tid, gallery)
+                confirmed_gid = self._validator.get_confirmed_match(tid, gallery, metrics=self.store.metrics)
 
                 if confirmed_gid:
                     gid = confirmed_gid
@@ -231,22 +260,48 @@ class CameraPipeline(threading.Thread):
                 quality = area_score * min(1.0, conf)
                 self.store.update_appearance(gid, self.camera_id, feat, bbox, quality_score=quality)
 
-        # 绘制定位框和身份/追踪 ID 标签
+        # 绘制定位框和身份/追踪 ID 标签 + ROI 校验
         for track in tracks:
             tid = track["track_id"]
             x1, y1, x2, y2 = map(int, track["bbox"])
             conf = track["conf"]
             gid = self._track_to_global.get(tid)
 
-            # 已识别出身份的用天蓝色，未识别确认的用绿色
-            color = (248, 189, 56) if gid else (129, 185, 16)  # BGR 格式
-            cv2.rectangle(frame, (x1, y1), (x2, y2), color, 2)
+            # 校验脚下中心点 (foot_x, foot_y) 是否落入 ROI 电子围栏
+            foot_x, foot_y = float((x1 + x2) / 2), float(y2)
+            is_intrusion = False
+            for roi in self._rois:
+                pts = np.array([[int(p[0] * w_img), int(p[1] * h_img)] for p in roi["polygon"]], np.int32)
+                res = cv2.pointPolygonTest(pts, (foot_x, foot_y), measureDist=False)
+                if res >= 0:
+                    is_intrusion = True
+                    self.alerter.trigger_intrusion(self.camera_id, gid or f"Trk_{tid}", roi.get("name", "危险区域"), [x1, y1, x2, y2])
+                    break
 
-            label_text = f"ID:{gid}" if gid else f"Trk:{tid} {conf:.2f}"
-            (tw, th), _ = cv2.getTextSize(label_text, cv2.FONT_HERSHEY_SIMPLEX, 0.5, 1)
+            # 计算质量分（bbox 面积 × 检测置信度）
+            w = max(0, x2 - x1)
+            h = max(0, y2 - y1)
+            area_score = min(1.0, (w * h) / (128.0 * 256.0))
+            quality = area_score * min(1.0, conf)
+
+            # 如果侵入 ROI 用亮红色高亮框，否则已识别天蓝/未识别绿
+            if is_intrusion:
+                color = (0, 0, 239)
+                label_text = f"🚨INTRUSION ID:{gid or f'Trk_{tid}'}"
+            elif gid:
+                color = (248, 189, 56)  # BGR 天蓝/亮黄
+                label_text = f"ID:{gid} | Q:{quality:.2f}"
+            else:
+                color = (129, 185, 16)  # BGR 翡翠绿
+                buf_len = len(self._validator._buffers.get(tid, []))
+                label_text = f"Trk:{tid} [{buf_len}/3] | Q:{quality:.2f}"
+
+            cv2.rectangle(frame, (x1, y1), (x2, y2), color, 3 if is_intrusion else 2)
+
+            (tw, th), _ = cv2.getTextSize(label_text, cv2.FONT_HERSHEY_SIMPLEX, 0.45, 1)
             text_y = max(th + 4, y1)
             cv2.rectangle(frame, (x1, text_y - th - 4), (x1 + tw + 6, text_y + 2), color, -1)
-            cv2.putText(frame, label_text, (x1 + 3, text_y - 2), cv2.FONT_HERSHEY_SIMPLEX, 0.5, (0, 0, 0), 1, cv2.LINE_AA)
+            cv2.putText(frame, label_text, (x1 + 3, text_y - 2), cv2.FONT_HERSHEY_SIMPLEX, 0.45, (0, 0, 0), 1, cv2.LINE_AA)
 
         self._prev_track_ids = current_track_ids
 

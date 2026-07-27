@@ -17,6 +17,8 @@ class CameraState:
     latest_frame: np.ndarray | None = None
     frame_time: float = 0.0
     is_online: bool = False
+    status_text: str = "OFFLINE"
+    reconnect_count: int = 0
     fps: float = 0.0
     _frame_times: deque = field(default_factory=lambda: deque(maxlen=30))
 
@@ -40,7 +42,7 @@ class FrameHub:
     # Pipeline → Hub                                                        #
     # ------------------------------------------------------------------ #
 
-    def push_frame(self, camera_id: str, frame: np.ndarray) -> None:
+    def push_frame(self, camera_id: str, frame: np.ndarray, status_text: str = "ONLINE") -> None:
         now = time.time()
         with self._lock:
             if camera_id not in self._states:
@@ -49,16 +51,20 @@ class FrameHub:
             s.latest_frame = frame
             s.frame_time = now
             s.is_online = True
+            s.status_text = status_text
             s._frame_times.append(now)
             # 计算实时 FPS（最近30帧）
             if len(s._frame_times) >= 2:
                 elapsed = s._frame_times[-1] - s._frame_times[0]
                 s.fps = round((len(s._frame_times) - 1) / max(elapsed, 1e-6), 1)
 
-    def mark_offline(self, camera_id: str) -> None:
+    def mark_offline(self, camera_id: str, status_text: str = "OFFLINE", reconnect_count: int = 0) -> None:
         with self._lock:
             if camera_id in self._states:
-                self._states[camera_id].is_online = False
+                s = self._states[camera_id]
+                s.is_online = False
+                s.status_text = status_text
+                s.reconnect_count = reconnect_count
 
     # ------------------------------------------------------------------ #
     # Hub → Server                                                          #
@@ -88,6 +94,8 @@ class FrameHub:
                 result.append({
                     "camera_id": s.camera_id,
                     "is_online": s.is_online,
+                    "status_text": s.status_text,
+                    "reconnect_count": s.reconnect_count,
                     "fps": s.fps,
                     "last_frame_time": s.frame_time,
                 })

@@ -87,20 +87,6 @@ def main(display: bool = False, web: bool = True, web_port: int = 8000) -> None:
     SCREENSHOT_DIR.mkdir(parents=True, exist_ok=True)
 
     # ---- 启动 Web 服务器 ----
-    if web:
-        web_server.init_server(frame_hub, broadcaster, identity_store, calibrator)
-        web_server.start_server_thread(port=web_port)
-        time.sleep(0.5)
-
-    # ---- 启动预警后台检查线程 ----
-    ticker = threading.Thread(
-        target=alert_ticker,
-        args=(alert_manager,),
-        daemon=True,
-        name="alert-ticker",
-    )
-    ticker.start()
-
     # ---- 启动各路流水线 ----
     pipelines: list[CameraPipeline] = []
     for cam_id, source in sources.items():
@@ -120,6 +106,21 @@ def main(display: bool = False, web: bool = True, web_port: int = 8000) -> None:
         pipelines.append(p)
         p.start()
         logger.info("启动摄像头 %s → %s", cam_id, source)
+
+    # ---- 启动 Web 服务器 ----
+    if web:
+        web_server.init_server(frame_hub, broadcaster, identity_store, calibrator, pipelines=pipelines)
+        web_server.start_server_thread(port=web_port)
+        time.sleep(0.5)
+
+    # ---- 启动预警后台检查线程 ----
+    ticker = threading.Thread(
+        target=alert_ticker,
+        args=(alert_manager,),
+        daemon=True,
+        name="alert-ticker",
+    )
+    ticker.start()
 
     logger.info("所有流水线已启动（%d 路）", len(pipelines))
     if web:

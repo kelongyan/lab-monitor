@@ -66,20 +66,15 @@
     gap: 14px;
   }
 
-
-
-
-  .brand-icon {
-    width: 36px;
-    height: 36px;
-    background: linear-gradient(135deg, #0284c7, #7e22ce);
-    border-radius: 10px;
-    display: flex;
-    align-items: center;
-    justify-content: center;
-    font-size: 20px;
-    box-shadow: 0 0 16px var(--primary-glow);
-    position: relative;
+  .brand-logo {
+    height: 38px;
+    width: auto;
+    object-fit: contain;
+    filter: drop-shadow(0 0 10px rgba(56, 189, 248, 0.4));
+    transition: transform 0.3s ease;
+  }
+  .brand-logo:hover {
+    transform: scale(1.05);
   }
 
   .brand-title-group h1 {
@@ -105,16 +100,43 @@
   .header-actions {
     display: flex;
     align-items: center;
-    gap: 16px;
+    gap: 10px;
+  }
+
+  .action-btn {
+    font-size: 12px;
+    font-weight: 600;
+    color: var(--text-muted);
+    background: rgba(15, 23, 42, 0.7);
+    border: 1px solid var(--border-card);
+    padding: 6px 12px;
+    border-radius: 8px;
+    cursor: pointer;
+    display: flex;
+    align-items: center;
+    gap: 6px;
+    transition: all 0.2s ease;
+  }
+
+  .action-btn:hover {
+    color: var(--text-main);
+    border-color: var(--primary);
+    background: rgba(56, 189, 248, 0.1);
+  }
+
+  .action-btn.active {
+    color: var(--success);
+    border-color: rgba(16, 185, 129, 0.4);
+    background: rgba(16, 185, 129, 0.12);
   }
 
   .time-display {
     font-family: 'JetBrains Mono', monospace;
-    font-size: 14px;
+    font-size: 13px;
     font-weight: 500;
     color: var(--text-muted);
     background: rgba(15, 23, 42, 0.6);
-    padding: 6px 14px;
+    padding: 6px 12px;
     border-radius: 8px;
     border: 1px solid var(--border-card);
   }
@@ -122,7 +144,7 @@
   .ws-badge {
     font-size: 12px;
     font-weight: 600;
-    padding: 6px 14px;
+    padding: 6px 12px;
     border-radius: 20px;
     display: flex;
     align-items: center;
@@ -234,6 +256,147 @@
     font-weight: 500;
   }
 
+  /* 视频画廊控制头 */
+  .cam-toolbar {
+    display: flex;
+    align-items: center;
+    justify-content: space-between;
+    padding: 0 4px;
+  }
+
+  .cam-toolbar-title {
+    font-size: 13px;
+    font-weight: 700;
+    color: var(--text-muted);
+    display: flex;
+    align-items: center;
+    gap: 8px;
+  }
+
+  .layout-modes {
+    display: flex;
+    align-items: center;
+    gap: 6px;
+  }
+
+  .layout-mode-btn {
+    font-size: 11px;
+    font-weight: 600;
+    padding: 4px 10px;
+    border-radius: 6px;
+    border: 1px solid var(--border-card);
+    background: rgba(15, 23, 42, 0.6);
+    color: var(--text-muted);
+    cursor: pointer;
+    transition: all 0.2s ease;
+  }
+
+  .layout-mode-btn.active, .layout-mode-btn:hover {
+    color: var(--primary);
+    border-color: var(--primary);
+    background: rgba(56, 189, 248, 0.12);
+  }
+
+  /* ReID 检索指标仪表盘 */
+  .reid-metrics-bar {
+    background: rgba(15, 23, 42, 0.7);
+    backdrop-filter: blur(12px);
+    border: 1px solid var(--border-card);
+    border-radius: 12px;
+    padding: 10px 16px;
+    display: flex;
+    align-items: center;
+    justify-content: space-between;
+    gap: 16px;
+    box-shadow: 0 4px 20px rgba(0, 0, 0, 0.25);
+    position: relative;
+    overflow: hidden;
+  }
+
+  .reid-metrics-bar::before {
+    content: '';
+    position: absolute;
+    top: 0; left: 0; right: 0;
+    height: 2px;
+    background: linear-gradient(90deg, #38bdf8, #a855f7, #10b981);
+  }
+
+  .reid-bar-title {
+    display: flex;
+    align-items: center;
+    gap: 8px;
+    font-size: 13px;
+    font-weight: 700;
+    color: var(--text-main);
+    min-width: 140px;
+  }
+
+  .reid-bar-tag {
+    font-size: 10px;
+    font-weight: 700;
+    color: #a855f7;
+    background: rgba(168, 85, 247, 0.15);
+    border: 1px solid rgba(168, 85, 247, 0.3);
+    padding: 1px 6px;
+    border-radius: 4px;
+  }
+
+  .reid-metrics-group {
+    display: flex;
+    align-items: center;
+    gap: 24px;
+    flex: 1;
+    justify-content: flex-end;
+  }
+
+  .reid-metric-item {
+    display: flex;
+    flex-direction: column;
+    gap: 2px;
+    min-width: 110px;
+  }
+
+  .reid-metric-label {
+    font-size: 11px;
+    color: var(--text-muted);
+    font-weight: 500;
+    display: flex;
+    align-items: center;
+    gap: 4px;
+  }
+
+  .reid-metric-val {
+    font-family: 'JetBrains Mono', monospace;
+    font-size: 16px;
+    font-weight: 700;
+    color: var(--primary);
+    display: flex;
+    align-items: baseline;
+    gap: 4px;
+  }
+
+  .reid-metric-sub {
+    font-size: 10px;
+    color: var(--text-dim);
+    font-weight: 500;
+  }
+
+  .reid-progress-bar {
+    width: 100%;
+    height: 4px;
+    background: rgba(255, 255, 255, 0.1);
+    border-radius: 2px;
+    margin-top: 3px;
+    overflow: hidden;
+  }
+
+  .reid-progress-fill {
+    height: 100%;
+    background: linear-gradient(90deg, #38bdf8, #10b981);
+    width: 0%;
+    transition: width 0.5s ease;
+  }
+
   /* 视频监控画廊 Grid */
   #cam-grid {
     flex: 1;
@@ -311,6 +474,12 @@
     box-shadow: 0 0 8px var(--success);
   }
 
+  .cam-status-dot.reconnecting {
+    background: var(--warning);
+    box-shadow: 0 0 8px var(--warning);
+    animation: blink 1.0s infinite;
+  }
+
   .cam-status-dot.offline {
     background: var(--danger);
     box-shadow: 0 0 8px var(--danger);
@@ -321,6 +490,28 @@
     font-weight: 700;
     letter-spacing: 0.5px;
     color: var(--text-main);
+  }
+
+  .cam-controls {
+    display: flex;
+    align-items: center;
+    gap: 6px;
+  }
+
+  .cam-control-btn {
+    background: rgba(255, 255, 255, 0.06);
+    border: 1px solid var(--border-card);
+    color: var(--text-muted);
+    border-radius: 4px;
+    padding: 2px 6px;
+    font-size: 11px;
+    cursor: pointer;
+    transition: all 0.2s ease;
+  }
+  .cam-control-btn:hover {
+    color: var(--primary);
+    background: rgba(56, 189, 248, 0.15);
+    border-color: var(--primary);
   }
 
   .cam-badges {
@@ -340,6 +531,16 @@
     display: flex;
     align-items: center;
     gap: 4px;
+  }
+
+  .rtsp-diag-badge {
+    font-family: 'JetBrains Mono', monospace;
+    font-size: 10px;
+    color: var(--warning);
+    background: rgba(245, 158, 11, 0.12);
+    border: 1px solid rgba(245, 158, 11, 0.3);
+    padding: 2px 6px;
+    border-radius: 4px;
   }
 
   .rec-circle {
@@ -365,20 +566,206 @@
     position: relative;
     width: 100%;
     flex: 1;
-    background: #000;
-    min-height: 220px;
+    background: radial-gradient(circle at center, rgba(15, 23, 42, 0.95) 0%, rgba(3, 7, 18, 1) 100%);
+    aspect-ratio: 16 / 9;
+    min-height: 200px;
     display: flex;
     align-items: center;
     justify-content: center;
     overflow: hidden;
+    box-shadow: inset 0 0 40px rgba(0, 0, 0, 0.85);
   }
 
   .cam-view img {
+    max-width: 100%;
+    max-height: 100%;
+    width: auto;
+    height: auto;
+    object-fit: contain;
+    display: block;
+    filter: drop-shadow(0 6px 16px rgba(0, 0, 0, 0.7));
+    transition: transform 0.3s cubic-bezier(0.16, 1, 0.3, 1);
+  }
+
+  /* 影院焦点大屏 Mode 1 特效 */
+  .theater-mode-container {
+    display: flex;
+    flex-direction: column;
+    height: 100%;
+    gap: 12px;
+  }
+
+  .theater-focus-card {
+    flex: 1;
+    min-height: 0;
+  }
+
+  .theater-focus-card .cam-view {
+    height: 100%;
+    aspect-ratio: auto;
+  }
+
+  .theater-focus-card .cam-view img {
+    max-height: 100%;
+  }
+
+  /* 底部快速切流轮播轨 (Quick Switcher Bar) */
+  .cam-carousel-bar {
+    height: 90px;
+    display: flex;
+    align-items: center;
+    gap: 12px;
+    overflow-x: auto;
+    padding: 6px 8px;
+    background: rgba(15, 23, 42, 0.6);
+    border: 1px solid var(--border-card);
+    border-radius: 12px;
+    flex-shrink: 0;
+  }
+
+  .cam-carousel-bar::-webkit-scrollbar {
+    height: 4px;
+  }
+  .cam-carousel-bar::-webkit-scrollbar-thumb {
+    background: var(--primary);
+    border-radius: 4px;
+  }
+
+  .carousel-thumb-item {
+    width: 125px;
+    height: 70px;
+    border-radius: 8px;
+    border: 2px solid var(--border-card);
+    background: #000;
+    overflow: hidden;
+    position: relative;
+    cursor: pointer;
+    flex-shrink: 0;
+    transition: all 0.25s ease;
+  }
+
+  .carousel-thumb-item:hover {
+    border-color: var(--primary);
+    transform: translateY(-2px);
+    box-shadow: 0 4px 12px var(--primary-glow);
+  }
+
+  .carousel-thumb-item.active {
+    border-color: var(--success);
+    box-shadow: 0 0 14px var(--success-glow);
+  }
+
+  .carousel-thumb-item img {
     width: 100%;
     height: 100%;
     object-fit: cover;
-    display: block;
   }
+
+  .carousel-thumb-tag {
+    position: absolute;
+    bottom: 4px; left: 4px; right: 4px;
+    font-family: 'JetBrains Mono', monospace;
+    font-size: 9px;
+    font-weight: 700;
+    color: white;
+    background: rgba(0, 0, 0, 0.7);
+    padding: 1px 4px;
+    border-radius: 3px;
+    text-align: center;
+    white-space: nowrap;
+    overflow: hidden;
+    text-overflow: ellipsis;
+  }
+
+  /* 1+N 主从排版 View */
+  .layout-1n-grid {
+    display: grid;
+    grid-template-columns: 2.3fr 1fr;
+    gap: 14px;
+    height: 100%;
+  }
+
+  .layout-1n-side {
+    display: flex;
+    flex-direction: column;
+    gap: 12px;
+    overflow-y: auto;
+  }
+
+  /* HUD 状态脚标 */
+  .cam-hud-tag {
+    position: absolute;
+    bottom: 8px; left: 8px;
+    font-family: 'JetBrains Mono', monospace;
+    font-size: 10px;
+    font-weight: 700;
+    color: rgba(255, 255, 255, 0.75);
+    background: rgba(0, 0, 0, 0.55);
+    backdrop-filter: blur(4px);
+    border: 1px solid rgba(255, 255, 255, 0.15);
+    padding: 2px 6px;
+    border-radius: 4px;
+    pointer-events: none;
+    z-index: 5;
+  }
+
+  /* 高科技自定义 Toast 提示组件 */
+  #toast-container {
+    position: fixed;
+    top: 24px;
+    left: 50%;
+    transform: translateX(-50%);
+    z-index: 999999;
+    display: flex;
+    flex-direction: column;
+    gap: 10px;
+    pointer-events: none;
+  }
+
+  .toast-message {
+    pointer-events: auto;
+    min-width: 320px;
+    max-width: 480px;
+    background: rgba(15, 23, 42, 0.94);
+    backdrop-filter: blur(16px);
+    border: 1px solid var(--border-card);
+    padding: 12px 18px;
+    border-radius: 12px;
+    display: flex;
+    align-items: center;
+    gap: 12px;
+    font-size: 13px;
+    font-weight: 600;
+    color: var(--text-main);
+    box-shadow: 0 10px 30px rgba(0, 0, 0, 0.6);
+    animation: toastIn 0.35s cubic-bezier(0.16, 1, 0.3, 1);
+    transition: all 0.3s ease;
+  }
+
+  .toast-message.success {
+    border-color: rgba(16, 185, 129, 0.5);
+    box-shadow: 0 0 20px rgba(16, 185, 129, 0.25);
+  }
+  .toast-message.warning {
+    border-color: rgba(245, 158, 11, 0.5);
+    box-shadow: 0 0 20px rgba(245, 158, 11, 0.25);
+  }
+  .toast-message.error {
+    border-color: rgba(239, 68, 68, 0.5);
+    box-shadow: 0 0 20px rgba(239, 68, 68, 0.3);
+  }
+
+  @keyframes toastIn {
+    from { opacity: 0; transform: translateY(-20px) scale(0.95); }
+    to { opacity: 1; transform: translateY(0) scale(1); }
+  }
+
+  .toast-fadeOut {
+    opacity: 0 !important;
+    transform: translateY(-15px) scale(0.9) !important;
+  }
+
+
 
   /* 右侧边栏 Sidebar Panel */
   .sidebar-panel {
@@ -439,7 +826,7 @@
     box-shadow: 0 0 10px var(--danger-glow);
   }
 
-  /* 告警列表容器 (防压缩核心: min-height: 0) */
+  /* 告警列表容器 */
   #alert-list {
     flex: 1;
     min-height: 0;
@@ -459,7 +846,7 @@
     border-radius: 4px;
   }
 
-  /* 告警卡片样式 (防压缩核心: flex-shrink: 0) */
+  /* 告警卡片样式 */
   .alert-card {
     flex-shrink: 0;
     min-height: fit-content;
@@ -471,12 +858,14 @@
     overflow: hidden;
     animation: slideIn 0.3s cubic-bezier(0.16, 1, 0.3, 1);
     transition: all 0.2s ease;
+    cursor: pointer;
   }
 
   .alert-card:hover {
     transform: translateX(-2px);
-    background: rgba(30, 41, 59, 0.9);
-    border-color: rgba(255, 255, 255, 0.15);
+    background: rgba(30, 41, 59, 0.95);
+    border-color: var(--primary);
+    box-shadow: 0 4px 16px rgba(0, 0, 0, 0.3);
   }
 
   .alert-card::before {
@@ -490,6 +879,7 @@
   .alert-card.MEDIUM::before { background: var(--warning); box-shadow: 0 0 10px var(--warning); }
   .alert-card.LOW::before { background: var(--success); box-shadow: 0 0 10px var(--success); }
   .alert-card.WARNING::before { background: var(--purple); box-shadow: 0 0 10px var(--purple); }
+  .alert-card.INTRUSION::before { background: #ff0055; box-shadow: 0 0 14px #ff0055; }
 
   .alert-card-header {
     display: flex;
@@ -511,6 +901,7 @@
   .alert-card.MEDIUM .alert-type-title { color: #fde047; }
   .alert-card.LOW .alert-type-title { color: #6ee7b7; }
   .alert-card.WARNING .alert-type-title { color: #c084fc; }
+  .alert-card.INTRUSION .alert-type-title { color: #ff4d88; font-weight: 800; }
 
   .alert-time-tag {
     font-family: 'JetBrains Mono', monospace;
@@ -542,6 +933,15 @@
     color: var(--text-main);
     font-weight: 600;
     font-family: 'JetBrains Mono', monospace;
+  }
+
+  .id-link {
+    color: var(--primary) !important;
+    text-decoration: underline;
+    cursor: pointer;
+  }
+  .id-link:hover {
+    color: #7dd3fc !important;
   }
 
   @keyframes slideIn {
@@ -609,6 +1009,223 @@
     color: var(--text-dim);
     font-size: 12px;
   }
+
+  /* ================================================================== */
+  /* 高科技弹窗模态框 Modals                                              */
+  /* ================================================================== */
+  .modal-overlay {
+    position: fixed;
+    top: 0; left: 0; right: 0; bottom: 0;
+    background: rgba(3, 7, 18, 0.85);
+    backdrop-filter: blur(12px);
+    z-index: 1000;
+    display: flex;
+    align-items: center;
+    justify-content: center;
+    opacity: 0;
+    pointer-events: none;
+    transition: opacity 0.25s ease;
+  }
+
+  .modal-overlay.active {
+    opacity: 1;
+    pointer-events: auto;
+  }
+
+  .modal-container {
+    background: rgba(15, 23, 42, 0.95);
+    border: 1px solid var(--border-card-glow);
+    border-radius: 16px;
+    box-shadow: 0 0 40px rgba(0, 0, 0, 0.8), 0 0 20px var(--primary-glow);
+    width: 90%;
+    max-width: 780px;
+    max-height: 85vh;
+    display: flex;
+    flex-direction: column;
+    overflow: hidden;
+    transform: scale(0.95);
+    transition: transform 0.25s cubic-bezier(0.16, 1, 0.3, 1);
+  }
+
+  .modal-overlay.active .modal-container {
+    transform: scale(1);
+  }
+
+  .modal-header {
+    padding: 16px 20px;
+    background: rgba(11, 17, 32, 0.9);
+    border-bottom: 1px solid var(--border-card);
+    display: flex;
+    align-items: center;
+    justify-content: space-between;
+  }
+
+  .modal-title {
+    font-size: 16px;
+    font-weight: 700;
+    color: var(--text-main);
+    display: flex;
+    align-items: center;
+    gap: 10px;
+  }
+
+  .modal-close-btn {
+    background: rgba(255, 255, 255, 0.08);
+    border: 1px solid var(--border-card);
+    color: var(--text-muted);
+    font-size: 16px;
+    width: 28px;
+    height: 28px;
+    border-radius: 50%;
+    cursor: pointer;
+    display: flex;
+    align-items: center;
+    justify-content: center;
+    transition: all 0.2s ease;
+  }
+  .modal-close-btn:hover {
+    color: var(--text-main);
+    background: rgba(239, 68, 68, 0.3);
+    border-color: var(--danger);
+  }
+
+  .modal-body {
+    padding: 20px;
+    overflow-y: auto;
+    flex: 1;
+    display: flex;
+    flex-direction: column;
+    gap: 16px;
+  }
+
+  /* 轨迹时间轴 Timeline */
+  .timeline {
+    position: relative;
+    padding-left: 24px;
+    margin-top: 10px;
+  }
+
+  .timeline::before {
+    content: '';
+    position: absolute;
+    left: 8px; top: 4px; bottom: 4px;
+    width: 2px;
+    background: linear-gradient(to bottom, var(--primary), var(--purple));
+  }
+
+  .timeline-node {
+    position: relative;
+    margin-bottom: 20px;
+  }
+
+  .timeline-node:last-child {
+    margin-bottom: 0;
+  }
+
+  .timeline-dot {
+    position: absolute;
+    left: -24px; top: 2px;
+    width: 14px; height: 14px;
+    border-radius: 50%;
+    background: var(--bg-base);
+    border: 2px solid var(--primary);
+    box-shadow: 0 0 8px var(--primary-glow);
+  }
+
+  .timeline-content {
+    background: rgba(30, 41, 59, 0.5);
+    border: 1px solid var(--border-card);
+    border-radius: 10px;
+    padding: 12px 16px;
+  }
+
+  .timeline-header {
+    display: flex;
+    align-items: center;
+    justify-content: space-between;
+    margin-bottom: 6px;
+  }
+
+  .timeline-cam {
+    font-size: 13px;
+    font-weight: 700;
+    color: var(--primary);
+    font-family: 'JetBrains Mono', monospace;
+  }
+
+  .timeline-time {
+    font-size: 11px;
+    color: var(--text-muted);
+    font-family: 'JetBrains Mono', monospace;
+  }
+
+  /* 快照预览图片 Frame */
+  .snapshot-preview {
+    width: 100%;
+    max-height: 320px;
+    border-radius: 10px;
+    object-fit: contain;
+    background: #000;
+    border: 1px solid var(--border-card);
+  }
+
+  .meta-grid {
+    display: grid;
+    grid-template-columns: 1fr 1fr;
+    gap: 10px;
+  }
+
+  .meta-card {
+    background: rgba(30, 41, 59, 0.4);
+    border: 1px solid var(--border-card);
+    padding: 10px 14px;
+    border-radius: 8px;
+    font-size: 12px;
+  }
+  .meta-card .label { color: var(--text-muted); margin-bottom: 4px; font-size: 11px; }
+  .meta-card .val { font-family: 'JetBrains Mono', monospace; font-weight: 700; color: var(--text-main); }
+
+  /* ROI 绘图 Canvas 样式 */
+  #roi-canvas-container {
+    position: relative;
+    width: 100%;
+    max-width: 640px;
+    height: 360px;
+    margin: 0 auto;
+    background: #000;
+    border-radius: 10px;
+    overflow: hidden;
+    border: 1px solid var(--border-card);
+  }
+
+  #roi-canvas-container img {
+    position: absolute;
+    top: 0; left: 0;
+    width: 100%; height: 100%;
+    object-fit: cover;
+    pointer-events: none;
+  }
+
+  #roi-canvas {
+    position: absolute;
+    top: 0; left: 0;
+    width: 100%; height: 100%;
+    cursor: crosshair;
+  }
+
+  .roi-input-field {
+    background: rgba(15, 23, 42, 0.8);
+    border: 1px solid var(--border-card);
+    color: var(--text-main);
+    padding: 8px 12px;
+    border-radius: 8px;
+    font-size: 13px;
+    width: 100%;
+    outline: none;
+  }
+  .roi-input-field:focus {
+    border-color: var(--primary);
+  }
 </style>
 </head>
 <body>
@@ -616,16 +1233,26 @@
 <!-- 头部 Header -->
 <header>
   <div class="brand">
-    <div class="brand-icon">🛡️</div>
+    <img src="/static/logo.png" class="brand-logo" alt="Logo">
     <div class="brand-title-group">
       <h1>超算中心多镜头智能监控预警系统</h1>
     </div>
     <span class="brand-tag">LIVE COMMAND</span>
   </div>
 
-
-
   <div class="header-actions">
+    <button class="action-btn" id="sound-toggle-btn" onclick="toggleSound()">
+      <span id="sound-icon">🔇</span> <span id="sound-text">声音告警: 关闭</span>
+    </button>
+    <button class="action-btn" onclick="openHistoryExportModal()">
+      <span>📜</span> 历史导出
+    </button>
+    <button class="action-btn" onclick="openTopologyModal()">
+      <span>🗺️</span> 拓扑地图
+    </button>
+    <button class="action-btn" onclick="openIdentitySearchModal()">
+      <span>👤</span> 人员档案
+    </button>
     <div class="time-display" id="sys-time">0000-00-00 00:00:00</div>
     <div class="ws-badge disconnected" id="ws-status">
       <div class="pulse-dot"></div>
@@ -648,11 +1275,11 @@
         </div>
       </div>
 
-      <div class="stat-card">
+      <div class="stat-card" style="cursor: pointer;" onclick="openIdentitySearchModal()">
         <div class="stat-icon-wrapper" style="background: rgba(168, 85, 247, 0.12); color: var(--purple);">👤</div>
         <div class="stat-info">
           <div class="stat-value" id="stat-ids" style="color: var(--purple);">0</div>
-          <div class="stat-title">ReID 登记人员</div>
+          <div class="stat-title">ReID 登记人员 (查看)</div>
         </div>
       </div>
 
@@ -670,6 +1297,50 @@
           <div class="stat-value" id="stat-alerts" style="color: var(--danger);">0</div>
           <div class="stat-title">累计触发告警</div>
         </div>
+      </div>
+    </div>
+
+    <!-- ReID 检索精度与性能仪表盘 -->
+    <div class="reid-metrics-bar">
+      <div class="reid-bar-title">
+        <span>🎯 ReID 检索精度</span>
+        <span class="reid-bar-tag">OSNet v2.0</span>
+      </div>
+      <div class="reid-metrics-group">
+        <div class="reid-metric-item">
+          <div class="reid-metric-label"><span>🎯 Avg Top-1 相似度</span></div>
+          <div class="reid-metric-val"><span id="reid-top1-sim">--</span><span class="reid-metric-sub" id="reid-match-rate">(匹配率 --%)</span></div>
+          <div class="reid-progress-bar"><div class="reid-progress-fill" id="reid-sim-bar"></div></div>
+        </div>
+        <div class="reid-metric-item">
+          <div class="reid-metric-label"><span>🛡️ Ratio 歧义拦截</span></div>
+          <div class="reid-metric-val" style="color: var(--warning);"><span id="reid-ratio-blocked">0</span> <span class="reid-metric-sub">次</span></div>
+          <div class="reid-metric-sub" id="reid-margin-text">确信裕度: --</div>
+        </div>
+        <div class="reid-metric-item">
+          <div class="reid-metric-label"><span>⚡ 平均检索耗时</span></div>
+          <div class="reid-metric-val" style="color: var(--success);"><span id="reid-latency">0.0</span> <span class="reid-metric-sub">ms</span></div>
+          <div class="reid-metric-sub" id="reid-searches-text">总比对: 0 次</div>
+        </div>
+        <div class="reid-metric-item">
+          <div class="reid-metric-label"><span>👥 库容量与特征质量</span></div>
+          <div class="reid-metric-val" style="color: var(--purple);"><span id="reid-gallery-size">0</span> <span class="reid-metric-sub">人</span></div>
+          <div class="reid-metric-sub" id="reid-quality-text">平均质量: --</div>
+        </div>
+      </div>
+    </div>
+
+    <!-- 视频画廊工具栏 -->
+    <div class="cam-toolbar">
+      <div class="cam-toolbar-title">
+        <span>📽️ 实时监控画廊</span>
+      </div>
+      <div class="layout-modes">
+        <span style="font-size: 11px; color: var(--text-dim);">网格布局:</span>
+        <button class="layout-mode-btn active" id="btn-grid-auto" onclick="setGridMode('auto')">自动</button>
+        <button class="layout-mode-btn" id="btn-grid-1" onclick="setGridMode(1)">🎬 影院 1x1</button>
+        <button class="layout-mode-btn" id="btn-grid-1n" onclick="setGridMode('1n')">📐 主从 1+N</button>
+        <button class="layout-mode-btn" id="btn-grid-2" onclick="setGridMode(2)">双列 2x2</button>
       </div>
     </div>
 
@@ -705,12 +1376,158 @@
   </div>
 </div>
 
+<!-- ================================================================== -->
+<!-- 模态框 1：告警详情与快照 Modals                                    -->
+<!-- ================================================================== -->
+<div class="modal-overlay" id="alert-detail-modal">
+  <div class="modal-container">
+    <div class="modal-header">
+      <div class="modal-title">
+        <span>🚨</span> <span id="modal-alert-title">告警事件排查与详细分析</span>
+      </div>
+      <button class="modal-close-btn" onclick="closeModal('alert-detail-modal')">✕</button>
+    </div>
+    <div class="modal-body" id="modal-alert-body">
+      <!-- 动态注入内容 -->
+    </div>
+  </div>
+</div>
+
+<!-- ================================================================== -->
+<!-- 模态框 2：人员轨迹时间轴 Modal                                      -->
+<!-- ================================================================== -->
+<div class="modal-overlay" id="trajectory-modal">
+  <div class="modal-container">
+    <div class="modal-header">
+      <div class="modal-title">
+        <span>🗺️</span> <span id="modal-traj-title">跨镜头轨迹追踪链</span>
+      </div>
+      <button class="modal-close-btn" onclick="closeModal('trajectory-modal')">✕</button>
+    </div>
+    <div class="modal-body" id="modal-traj-body">
+      <!-- 动态注入内容 -->
+    </div>
+  </div>
+</div>
+
+<!-- ================================================================== -->
+<!-- 模态框 3：拓扑结构 Modal                                          -->
+<!-- ================================================================== -->
+<div class="modal-overlay" id="topology-modal">
+  <div class="modal-container">
+    <div class="modal-header">
+      <div class="modal-title">
+        <span>🗺️</span> <span>实验室摄像头拓扑结构与预计通行时延</span>
+      </div>
+      <button class="modal-close-btn" onclick="closeModal('topology-modal')">✕</button>
+    </div>
+    <div class="modal-body" id="modal-topo-body">
+      <!-- 动态注入拓扑表格 -->
+    </div>
+  </div>
+</div>
+
+<!-- ================================================================== -->
+<!-- 模态框 4：历史告警检索与导出 Modal                                 -->
+<!-- ================================================================== -->
+<div class="modal-overlay" id="history-modal">
+  <div class="modal-container">
+    <div class="modal-header">
+      <div class="modal-title">
+        <span>📜</span> <span>历史告警检索与 CSV 报表导出</span>
+      </div>
+      <button class="modal-close-btn" onclick="closeModal('history-modal')">✕</button>
+    </div>
+    <div class="modal-body" id="modal-history-body">
+      <!-- 动态注入历史筛选 -->
+    </div>
+  </div>
+</div>
+
+<!-- ================================================================== -->
+<!-- 模态框 5：手动画电子围栏 ROI Modal                                 -->
+<!-- ================================================================== -->
+<div class="modal-overlay" id="roi-modal">
+  <div class="modal-container">
+    <div class="modal-header">
+      <div class="modal-title">
+        <span>✏️</span> <span id="roi-modal-title">绘制与动态调整 ROI 电子围栏</span>
+      </div>
+      <button class="modal-close-btn" onclick="closeModal('roi-modal')">✕</button>
+    </div>
+    <div class="modal-body" id="modal-roi-body">
+      <div style="font-size: 12px; color: var(--text-muted); display: flex; align-items: center; justify-content: space-between; margin-bottom: 6px;">
+        <div style="display: flex; align-items: center; gap: 8px;">
+          <span>绘制模式:</span>
+          <button class="layout-mode-btn active" id="roi-mode-freehand" onclick="setRoiDrawMode('freehand')">🎨 鼠标按住涂鸦/画线</button>
+          <button class="layout-mode-btn" id="roi-mode-click" onclick="setRoiDrawMode('click')">📍 逐点点击标记</button>
+        </div>
+        <button class="clear-btn" onclick="clearRoiPoints()">重置围栏</button>
+      </div>
+
+      <div id="roi-canvas-container">
+        <img id="roi-preview-bg" src="" alt="预览">
+        <canvas id="roi-canvas" width="640" height="360"></canvas>
+      </div>
+
+      <div style="display: flex; flex-direction: column; gap: 8px;">
+        <label style="font-size: 12px; font-weight: 600; color: var(--text-muted);">电子围栏名称标签：</label>
+        <input type="text" id="roi-name-input" class="roi-input-field" placeholder="例如：核心服务器防护区">
+      </div>
+
+      <div style="display: flex; justify-content: space-between; margin-top: 6px;">
+        <button class="action-btn" style="color: var(--danger); border-color: rgba(239, 68, 68, 0.3);" onclick="removeRoi()">🗑️ 清除该摄像头围栏</button>
+        <button class="action-btn active" onclick="saveRoiPoints()">💾 保存并立即生效</button>
+      </div>
+    </div>
+  </div>
+</div>
+
 <script>
 const BASE = window.location.origin;
 let totalAlerts = 0;
 let totalWarnings = 0;
 let ws = null;
 let camIds = [];
+let soundEnabled = false;
+let currentGridMode = 'auto';
+let cachedCameras = [];
+
+// ---- 音效与 Web Audio API ----
+let audioCtx = null;
+function toggleSound() {
+  soundEnabled = !soundEnabled;
+  const btn = document.getElementById('sound-toggle-btn');
+  const icon = document.getElementById('sound-icon');
+  const text = document.getElementById('sound-text');
+  if (soundEnabled) {
+    if (!audioCtx) audioCtx = new (window.AudioContext || window.webkitAudioContext)();
+    btn.classList.add('active');
+    icon.textContent = '🔊';
+    text.textContent = '声音告警: 开启';
+    playAlertBeep();
+  } else {
+    btn.classList.remove('active');
+    icon.textContent = '🔇';
+    text.textContent = '声音告警: 关闭';
+  }
+}
+
+function playAlertBeep() {
+  if (!soundEnabled || !audioCtx) return;
+  try {
+    const osc = audioCtx.createOscillator();
+    const gain = audioCtx.createGain();
+    osc.type = 'sine';
+    osc.frequency.setValueAtTime(880, audioCtx.currentTime);
+    gain.gain.setValueAtTime(0.15, audioCtx.currentTime);
+    gain.gain.exponentialRampToValueAtTime(0.001, audioCtx.currentTime + 0.35);
+    osc.connect(gain);
+    gain.connect(audioCtx.destination);
+    osc.start();
+    osc.stop(audioCtx.currentTime + 0.35);
+  } catch(e) {}
+}
 
 // ---- 系统实时时钟 ----
 function updateClock() {
@@ -725,46 +1542,144 @@ function updateClock() {
 setInterval(updateClock, 1000);
 updateClock();
 
-// ---- 摄像头网格渲染 ----
-function renderCamGrid(cameras) {
-  const grid = document.getElementById('cam-grid');
-  const cols = cameras.length <= 2 ? 2 : cameras.length <= 4 ? 2 : 3;
-  grid.style.gridTemplateColumns = `repeat(${cols}, 1fr)`;
-  
-  const newIds = cameras.map(c => c.camera_id);
-  if (JSON.stringify(newIds) === JSON.stringify(camIds)) return;
-  camIds = newIds;
-  
-  grid.innerHTML = '';
-  cameras.forEach(cam => {
-    const card = document.createElement('div');
-    card.className = 'cam-card';
-    card.id = `card-${cam.camera_id}`;
-    card.innerHTML = `
+let currentFocusCamId = null;
+
+function setFocusCamera(camId) {
+  currentFocusCamId = camId;
+  renderCamGrid(cachedCameras, true);
+}
+
+// ---- 网格切换 ----
+function setGridMode(mode) {
+  currentGridMode = mode;
+  document.querySelectorAll('.layout-mode-btn').forEach(b => b.classList.remove('active'));
+  const btn = document.getElementById(`btn-grid-${mode}`);
+  if (btn) btn.classList.add('active');
+  renderCamGrid(cachedCameras, true);
+}
+
+function buildSingleCamCardHTML(cam, isFocus = false) {
+  const isReconnecting = cam.status_text === 'RECONNECTING';
+  return `
+    <div class="cam-card ${isFocus ? 'theater-focus-card' : ''}" id="card-${cam.camera_id}">
       <div class="cam-header">
         <div class="cam-title-box">
-          <div class="cam-status-dot ${cam.is_online ? '' : 'offline'}" id="dot-${cam.camera_id}"></div>
+          <div class="cam-status-dot ${cam.is_online ? '' : (isReconnecting ? 'reconnecting' : 'offline')}" id="dot-${cam.camera_id}"></div>
           <span class="cam-name">${cam.camera_id.toUpperCase()}</span>
         </div>
+        <div class="cam-controls">
+          <button class="cam-control-btn" title="手动画围栏" onclick="openRoiDrawModal('${cam.camera_id}')">✏️ 围栏</button>
+          <button class="cam-control-btn" title="焦点主视角" onclick="setFocusCamera('${cam.camera_id}')">🔍 焦点</button>
+        </div>
         <div class="cam-badges">
+          ${cam.reconnect_count > 0 ? `<div class="rtsp-diag-badge" id="reconn-${cam.camera_id}">RTSP 重连: ${cam.reconnect_count}次</div>` : ''}
           <div class="cam-rec-badge"><div class="rec-circle"></div>REC</div>
           <div class="cam-fps-badge" id="fps-${cam.camera_id}">${cam.fps} FPS</div>
         </div>
       </div>
       <div class="cam-view">
-        <img src="${BASE}/stream/${cam.camera_id}" alt="${cam.camera_id}" loading="lazy">
+        <img src="${BASE}/stream/${cam.camera_id}" id="stream-img-${cam.camera_id}" alt="${cam.camera_id}" loading="lazy">
+        <div class="cam-hud-tag">LIVE | 1080P MJPEG</div>
       </div>
-    `;
-    grid.appendChild(card);
-  });
-  document.getElementById('stat-cams').textContent = cameras.length;
+    </div>
+  `;
+}
+
+// ---- 摄像头网格渲染 ----
+function renderCamGrid(cameras, forceRefresh = false) {
+  cachedCameras = cameras;
+  const grid = document.getElementById('cam-grid');
+  if (!cameras || cameras.length === 0) return;
+
+  if (!currentFocusCamId || !cameras.find(c => c.camera_id === currentFocusCamId)) {
+    currentFocusCamId = cameras[0].camera_id;
+  }
+
+  const newIds = cameras.map(c => c.camera_id);
+  if (!forceRefresh && JSON.stringify(newIds) === JSON.stringify(camIds)) return;
+  camIds = newIds;
+
+  grid.innerHTML = '';
+  grid.removeAttribute('style');
+
+  if (currentGridMode === 1) {
+    // 🎬 1x1 影院主焦模式
+    grid.style.display = 'flex';
+    grid.style.flexDirection = 'column';
+
+    const focusCam = cameras.find(c => c.camera_id === currentFocusCamId) || cameras[0];
+    const container = document.createElement('div');
+    container.className = 'theater-mode-container';
+    
+    let html = buildSingleCamCardHTML(focusCam, true);
+
+    // 底部 Quick Switcher Carousel
+    html += `<div class="cam-carousel-bar">`;
+    cameras.forEach(c => {
+      const activeCls = c.camera_id === focusCam.camera_id ? 'active' : '';
+      html += `
+        <div class="carousel-thumb-item ${activeCls}" onclick="setFocusCamera('${c.camera_id}')">
+          <img src="${BASE}/stream/${c.camera_id}" alt="${c.camera_id}">
+          <div class="carousel-thumb-tag">${c.camera_id.toUpperCase()}</div>
+        </div>
+      `;
+    });
+    html += `</div>`;
+
+    container.innerHTML = html;
+    grid.appendChild(container);
+
+  } else if (currentGridMode === '1n') {
+    // 📐 1+N 主从排版模式
+    grid.style.display = 'grid';
+    grid.style.gridTemplateColumns = '2.3fr 1fr';
+
+    const focusCam = cameras.find(c => c.camera_id === currentFocusCamId) || cameras[0];
+    const sideCams = cameras.filter(c => c.camera_id !== focusCam.camera_id);
+
+    // 左侧主焦点
+    const leftBox = document.createElement('div');
+    leftBox.innerHTML = buildSingleCamCardHTML(focusCam, true);
+    grid.appendChild(leftBox.firstElementChild);
+
+    // 右侧小镜头列表
+    const sideBox = document.createElement('div');
+    sideBox.className = 'layout-1n-side';
+    sideCams.forEach(c => {
+      const cardWrap = document.createElement('div');
+      cardWrap.style.cursor = 'pointer';
+      cardWrap.onclick = () => setFocusCamera(c.camera_id);
+      cardWrap.innerHTML = buildSingleCamCardHTML(c, false);
+      sideBox.appendChild(cardWrap.firstElementChild);
+    });
+    grid.appendChild(sideBox);
+
+  } else {
+    // 自动 & 2x2 网格模式
+    grid.style.display = 'grid';
+    if (currentGridMode === 'auto') {
+      const cols = cameras.length <= 2 ? 2 : cameras.length <= 4 ? 2 : 3;
+      grid.style.gridTemplateColumns = `repeat(${cols}, 1fr)`;
+    } else {
+      grid.style.gridTemplateColumns = `repeat(${currentGridMode}, 1fr)`;
+    }
+
+    cameras.forEach(cam => {
+      const wrap = document.createElement('div');
+      wrap.innerHTML = buildSingleCamCardHTML(cam, false);
+      grid.appendChild(wrap.firstElementChild);
+    });
+  }
+
+  document.getElementById('stat-cams').textContent = cameras.filter(c => c.is_online).length;
 }
 
 function updateCamStatus(cameras) {
   cameras.forEach(cam => {
     const dot = document.getElementById(`dot-${cam.camera_id}`);
     const fps = document.getElementById(`fps-${cam.camera_id}`);
-    if (dot) dot.className = 'cam-status-dot' + (cam.is_online ? '' : ' offline');
+    const isReconnecting = cam.status_text === 'RECONNECTING';
+    if (dot) dot.className = 'cam-status-dot' + (cam.is_online ? '' : (isReconnecting ? ' reconnecting' : ' offline'));
     if (fps) fps.textContent = cam.fps + ' FPS';
   });
 }
@@ -776,6 +1691,8 @@ function addAlert(alert) {
   if (noAlert) noAlert.remove();
 
   const isWarning = alert.stage === 'WARNING';
+  const isIntrusion = alert.alert_type === 'INTRUSION';
+
   if (isWarning) {
     totalWarnings++;
     document.getElementById('stat-warnings').textContent = totalWarnings;
@@ -783,28 +1700,34 @@ function addAlert(alert) {
     totalAlerts++;
     document.getElementById('stat-alerts').textContent = totalAlerts;
     document.getElementById('alert-badge').textContent = Math.min(totalAlerts, 99);
+    playAlertBeep();
   }
 
   const timeStr = new Date(alert.timestamp * 1000).toLocaleTimeString('zh-CN');
   const stage = alert.stage || 'ALERT';
-  const icon = stage === 'WARNING' ? '⚡' : '🚨';
+  const icon = isIntrusion ? '🚨' : (stage === 'WARNING' ? '⚡' : '⚠️');
   const card = document.createElement('div');
-  card.className = `alert-card ${stage === 'WARNING' ? 'WARNING' : alert.risk_level}`;
   
+  const alertClass = isIntrusion ? 'INTRUSION' : (stage === 'WARNING' ? 'WARNING' : alert.risk_level);
+  card.className = `alert-card ${alertClass}`;
+  card.onclick = () => openAlertDetailModal(alert);
+
+  const titleText = isIntrusion ? '🚨 ROI 危险区域非法闯入!' : (stage === 'WARNING' ? '预预警: 路径超时风险' : '异常事件: 目标超时/遗失');
+
   card.innerHTML = `
     <div class="alert-card-header">
       <div class="alert-type-title">
         <span>${icon}</span>
-        <span>${stage === 'WARNING' ? '预预警: 路径超时风险' : '异常事件: 目标遗失/超时'}</span>
+        <span>${titleText}</span>
       </div>
       <div class="alert-time-tag">${timeStr}</div>
     </div>
     <div class="alert-body-grid">
-      <div class="alert-item">目标 ID: <val>${alert.global_id}</val></div>
+      <div class="alert-item">目标 ID: <val class="id-link" onclick="event.stopPropagation(); showTrajectoryModal('${alert.global_id}')">#${alert.global_id}</val></div>
       <div class="alert-item">风险等级: <val>${alert.risk_level}</val></div>
-      <div class="alert-item">最后位置: <val>${alert.last_camera}</val></div>
-      <div class="alert-item">已用时长: <val>${alert.elapsed_seconds}s</val></div>
-      <div class="alert-item" style="grid-column: span 2;">预期连通: <val>${alert.expected_cameras.join(', ')}</val></div>
+      <div class="alert-item">位置: <val>${alert.last_camera}</val></div>
+      <div class="alert-item">${isIntrusion ? '状态' : '已用时长'}: <val>${isIntrusion ? '越界入侵' : alert.elapsed_seconds + 's'}</val></div>
+      <div class="alert-item" style="grid-column: span 2;">预期/区域: <val>${(alert.expected_cameras || []).join(', ') || '无'}</val></div>
     </div>
   `;
   list.insertBefore(card, list.firstChild);
@@ -869,6 +1792,727 @@ async function pollStatus() {
   } catch {}
 }
 
+// ---- 弹窗 Modal 逻辑 ----
+function openModal(id) {
+  document.getElementById(id).classList.add('active');
+}
+function closeModal(id) {
+  document.getElementById(id).classList.remove('active');
+}
+
+// 1. 告警详情弹窗
+function openAlertDetailModal(alert) {
+  const title = document.getElementById('modal-alert-title');
+  const body = document.getElementById('modal-alert-body');
+  title.textContent = `告警事件排查 (ID: ${alert.alert_id || 'Alert'})`;
+
+  const timeStr = new Date(alert.timestamp * 1000).toLocaleString('zh-CN');
+  const isIntrusion = alert.alert_type === 'INTRUSION';
+
+  body.innerHTML = `
+    <div style="font-size: 13px; color: var(--text-muted); line-height: 1.5;">
+      摄像头 <b style="color: var(--primary);">${alert.last_camera}</b> 于 <b style="color: var(--text-main);">${timeStr}</b> 检测到预警事件：
+    </div>
+    
+    <div class="meta-grid">
+      <div class="meta-card">
+        <div class="label">目标 Global ID</div>
+        <div class="val" style="color: var(--primary); cursor: pointer;" onclick="closeModal('alert-detail-modal'); showTrajectoryModal('${alert.global_id}')">
+          #${alert.global_id} (点击看轨迹)
+        </div>
+      </div>
+      <div class="meta-card">
+        <div class="label">告警类型/阶段</div>
+        <div class="val" style="color: ${isIntrusion ? '#ff0055' : (alert.stage === 'WARNING' ? 'var(--warning)' : 'var(--danger)')};">
+          ${isIntrusion ? '🚨 危险区闯入' : (alert.stage || 'ALERT')} (${alert.risk_level || 'HIGH'})
+        </div>
+      </div>
+      <div class="meta-card">
+        <div class="label">${isIntrusion ? '闯入状态' : '已停留/穿越用时'}</div>
+        <div class="val">${isIntrusion ? '触发电子围栏' : alert.elapsed_seconds + ' 秒'}</div>
+      </div>
+      <div class="meta-card">
+        <div class="label">预计/区域描述</div>
+        <div class="val">${(alert.expected_cameras || []).join(', ') || '无'}</div>
+      </div>
+    </div>
+
+    <div style="margin-top: 8px;">
+      <div style="font-size: 12px; font-weight: 700; color: var(--text-muted); margin-bottom: 6px;">📷 现场最后快照:</div>
+      <img src="${BASE}/screenshots/${alert.alert_id}.jpg" class="snapshot-preview" 
+           onerror="this.onerror=null; this.src='${BASE}/stream/${alert.last_camera}';" alt="现场快照">
+    </div>
+  `;
+
+  openModal('alert-detail-modal');
+}
+
+// 2. 轨迹时间轴弹窗
+async function showTrajectoryModal(global_id) {
+  const title = document.getElementById('modal-traj-title');
+  const body = document.getElementById('modal-traj-body');
+  title.textContent = `目标 #${global_id} 跨镜头通行轨迹链`;
+
+  body.innerHTML = `<div class="empty-state">加载人员轨迹数据中...</div>`;
+  openModal('trajectory-modal');
+
+  try {
+    const res = await fetch(`/api/identities/${global_id}`).then(r => r.json());
+    if (res.error) {
+      body.innerHTML = `<div class="empty-state">暂无该目标移动轨迹历史</div>`;
+      return;
+    }
+
+    const traj = res.trajectory || [];
+    if (traj.length === 0) {
+      body.innerHTML = `<div class="empty-state">未在任何摄像头中形成有效路线</div>`;
+      return;
+    }
+
+    let nodesHtml = traj.map((t, idx) => `
+      <div class="timeline-node">
+        <div class="timeline-dot"></div>
+        <div class="timeline-content">
+          <div class="timeline-header">
+            <span class="timeline-cam">节点 ${idx + 1}: ${t.camera.toUpperCase()}</span>
+            <span class="timeline-time">${t.time_str} ${t.end_time_str ? '➔ ' + t.end_time_str : ''}</span>
+          </div>
+          <div style="font-size: 11px; color: var(--text-muted);">
+            坐标范围 (BBox): [${t.bbox.map(n => Math.round(n)).join(', ')}]
+          </div>
+        </div>
+      </div>
+    `).join('');
+
+    body.innerHTML = `
+      <div class="meta-grid" style="margin-bottom: 12px;">
+        <div class="meta-card">
+          <div class="label">累计出现次数</div>
+          <div class="val">${res.total_appearances} 次抓拍</div>
+        </div>
+        <div class="meta-card">
+          <div class="label">当前所在/最后镜头</div>
+          <div class="val" style="color: var(--primary);">${res.last_camera.toUpperCase()}</div>
+        </div>
+      </div>
+      
+      <div style="font-size: 12px; font-weight: 700; color: var(--text-muted);">📍 移动路线时序链:</div>
+      <div class="timeline">
+        ${nodesHtml}
+      </div>
+    `;
+  } catch (e) {
+    body.innerHTML = `<div class="empty-state">获取轨迹失败: ${e.message}</div>`;
+  }
+}
+
+// 3. 打开人员档案搜索 Modal
+async function openIdentitySearchModal() {
+  const title = document.getElementById('modal-traj-title');
+  const body = document.getElementById('modal-traj-body');
+  title.textContent = `ReID 全局身份档案库`;
+
+  body.innerHTML = `<div class="empty-state">读取全量 ReID 身份中...</div>`;
+  openModal('trajectory-modal');
+
+  try {
+    const res = await fetch(`/api/identities`).then(r => r.json());
+    const ids = res.ids || [];
+    if (ids.length === 0) {
+      body.innerHTML = `<div class="empty-state">当前尚未登记任何 ReID 人员身份</div>`;
+      return;
+    }
+
+    body.innerHTML = `
+      <div style="font-size: 12px; color: var(--text-muted); margin-bottom: 12px;">
+        系统已自动提炼注册 <b style="color: var(--purple);">${ids.length}</b> 个全局独一无二的人员 ID。点击查看其路径：
+      </div>
+      <div style="display: grid; grid-template-columns: repeat(3, 1fr); gap: 10px;">
+        ${ids.map(id => `
+          <div class="meta-card" style="cursor: pointer;" onclick="showTrajectoryModal('${id}')">
+            <div class="label">Global ID</div>
+            <div class="val" style="color: var(--primary);">#${id}</div>
+          </div>
+        `).join('')}
+      </div>
+    `;
+  } catch(e) {
+    body.innerHTML = `<div class="empty-state">加载失败</div>`;
+  }
+}
+
+// 4. 打开拓扑结构 Modal (高科技矢量拓扑网络)
+async function openTopologyModal() {
+  const body = document.getElementById('modal-topo-body');
+  body.innerHTML = `<div class="empty-state">读取与渲染拓扑网络中...</div>`;
+  openModal('topology-modal');
+
+  try {
+    const [topoRes, statsRes] = await Promise.all([
+      fetch('/api/topology').then(r => r.json()),
+      fetch('/api/stats').then(r => r.json()).catch(() => ({ calibration: {} }))
+    ]);
+
+    const statsData = statsRes.calibration || {};
+
+    let edgesList = [];
+    let camNodesSet = new Set();
+
+    if (Array.isArray(topoRes.edges)) {
+      edgesList = topoRes.edges;
+      edgesList.forEach(e => { camNodesSet.add(e.from); camNodesSet.add(e.to); });
+    } else if (typeof topoRes === 'object' && topoRes !== null) {
+      for (const [fromCam, hops] of Object.entries(topoRes)) {
+        camNodesSet.add(fromCam);
+        if (Array.isArray(hops)) {
+          hops.forEach(h => {
+            const toCam = h.next || h.to;
+            camNodesSet.add(toCam);
+            edgesList.push({
+              from: fromCam,
+              to: toCam,
+              expected_seconds: h.expected_seconds,
+              tolerance_seconds: h.tolerance_seconds || 15
+            });
+          });
+        }
+      }
+    }
+
+    const camNodes = Array.from(camNodesSet);
+    if (camNodes.length === 0) {
+      body.innerHTML = `<div class="empty-state">未配置拓扑节点 (config/topology.json)</div>`;
+      return;
+    }
+
+    // 节点 2D 布局计算（四边排布或环形排布）
+    const nodeCoords = {};
+    const W = 700, H = 340;
+    const count = camNodes.length;
+
+    camNodes.forEach((id, idx) => {
+      // 如果 4 个节点排布成 2x2 网格矩阵
+      if (count === 4) {
+        const coords4 = [
+          { x: 160, y: 90 },   // cam_01 Top-Left
+          { x: 540, y: 90 },   // cam_02 Top-Right
+          { x: 540, y: 250 },  // cam_03 Bottom-Right
+          { x: 160, y: 250 }   // cam_04 Bottom-Left
+        ];
+        nodeCoords[id] = coords4[idx] || { x: 350, y: 170 };
+      } else {
+        // 环形排布算法
+        const angle = (idx / count) * 2 * Math.PI - Math.PI / 2;
+        nodeCoords[id] = {
+          x: Math.round(350 + 220 * Math.cos(angle)),
+          y: Math.round(170 + 110 * Math.sin(angle))
+        };
+      }
+    });
+
+    // 绘制连线 Paths
+    let pathsSvg = '';
+    let labelsSvg = '';
+
+    edgesList.forEach((e, i) => {
+      const fromPos = nodeCoords[e.from] || { x: 100, y: 100 };
+      const toPos = nodeCoords[e.to] || { x: 200, y: 200 };
+
+      // 偏移中点，做微弧线，防止双向线重叠
+      const dx = toPos.x - fromPos.x;
+      const dy = toPos.y - fromPos.y;
+      const dist = Math.sqrt(dx * dx + dy * dy);
+      const nx = -dy / (dist || 1);
+      const ny = dx / (dist || 1);
+      
+      const curveOffset = 25; // 弯曲弧度
+      const ctrlX = (fromPos.x + toPos.x) / 2 + nx * curveOffset;
+      const ctrlY = (fromPos.y + toPos.y) / 2 + ny * curveOffset;
+
+      const pathD = `M ${fromPos.x} ${fromPos.y} Q ${ctrlX} ${ctrlY} ${toPos.x} ${toPos.y}`;
+
+      // AI 校准数据
+      const statKey = `${e.from}->${e.to}`;
+      const statItem = statsData[statKey];
+      const aiTimeText = statItem ? `AI校准: ${statItem.mean_seconds}s` : `预期: ${e.expected_seconds}s`;
+
+      pathsSvg += `
+        <!-- 静态背景底线 -->
+        <path d="${pathD}" stroke="rgba(56, 189, 248, 0.2)" stroke-width="3" fill="none" />
+        <!-- 动态发光流向虚线 -->
+        <path d="${pathD}" stroke="url(#topo-line-grad)" stroke-width="2.5" stroke-dasharray="8 6" fill="none" marker-end="url(#arrow)" class="topo-flow-path" />
+      `;
+
+      // 计算标签中点
+      const labelX = (fromPos.x + toPos.x) / 2 + nx * (curveOffset * 0.75);
+      const labelY = (fromPos.y + toPos.y) / 2 + ny * (curveOffset * 0.75);
+
+      labelsSvg += `
+        <g transform="translate(${labelX}, ${labelY})">
+          <rect x="-42" y="-11" width="84" height="22" rx="11" fill="rgba(15, 23, 42, 0.9)" stroke="rgba(56, 189, 248, 0.4)" stroke-width="1"/>
+          <text x="0" y="3" text-anchor="middle" fill="#38bdf8" font-size="10" font-family="JetBrains Mono" font-weight="700">${aiTimeText}</text>
+        </g>
+      `;
+    });
+
+    // 绘制节点 SVG
+    let nodesSvg = '';
+    camNodes.forEach(id => {
+      const pos = nodeCoords[id];
+      const isOnline = cachedCameras.some(c => c.camera_id === id && c.is_online);
+      const statusColor = isOnline ? '#10b981' : '#ef4444';
+
+      nodesSvg += `
+        <g class="topo-node-group" transform="translate(${pos.x}, ${pos.y})" cursor="pointer" onclick="openCamZoomModal('${id}')">
+          <!-- 脉冲外光圈 -->
+          <circle r="32" fill="none" stroke="${statusColor}" stroke-opacity="0.3" stroke-width="2">
+            <animate attributeName="r" values="28;38;28" dur="3s" repeatCount="indefinite"/>
+            <animate attributeName="stroke-opacity" values="0.4;0.0;0.4" dur="3s" repeatCount="indefinite"/>
+          </circle>
+          <!-- 节点背景圆 -->
+          <circle r="26" fill="rgba(15, 23, 42, 0.95)" stroke="${statusColor}" stroke-width="2" box-shadow="0 0 16px ${statusColor}"/>
+          <!-- 摄像头 Icon & 标签 -->
+          <text x="0" y="-4" text-anchor="middle" font-size="14">📷</text>
+          <text x="0" y="12" text-anchor="middle" fill="#f8fafc" font-size="11" font-family="JetBrains Mono" font-weight="800">${id.toUpperCase()}</text>
+        </g>
+      `;
+    });
+
+    body.innerHTML = `
+      <style>
+        .topo-flow-path {
+          animation: topoFlow 2.5s linear infinite;
+        }
+        @keyframes topoFlow {
+          from { stroke-dashoffset: 28; }
+          to { stroke-dashoffset: 0; }
+        }
+        .topo-node-group:hover circle {
+          stroke: #38bdf8 !important;
+          filter: drop-shadow(0 0 8px #38bdf8);
+        }
+      </style>
+      
+      <div style="display: flex; align-items: center; justify-content: space-between; font-size: 12px; color: var(--text-muted); margin-bottom: 8px;">
+        <span>🌐 <b>空间拓扑感知网络</b> (点击节点图标调出摄像头监视流)</span>
+        <span style="display: flex; gap: 12px; font-size: 11px;">
+          <span>🟢 在线节点</span>
+          <span>🔵 动态通道流向</span>
+        </span>
+      </div>
+
+      <div style="background: rgba(6, 9, 19, 0.85); border: 1px solid var(--border-card-glow); border-radius: 12px; overflow: hidden; position: relative;">
+        <svg width="100%" height="340" viewBox="0 0 ${W} ${H}">
+          <defs>
+            <!-- 渐变流向线 -->
+            <linearGradient id="topo-line-grad" x1="0%" y1="0%" x2="100%" y2="100%">
+              <stop offset="0%" stop-color="#38bdf8" />
+              <stop offset="50%" stop-color="#a855f7" />
+              <stop offset="100%" stop-color="#38bdf8" />
+            </linearGradient>
+            <!-- 箭头标记定义 -->
+            <marker id="arrow" viewBox="0 0 10 10" refX="28" refY="5" markerWidth="6" markerHeight="6" orient="auto-start-reverse">
+              <path d="M 0 1 L 10 5 L 0 9 z" fill="#38bdf8"/>
+            </marker>
+          </defs>
+
+          <!-- 路径连线 -->
+          ${pathsSvg}
+          <!-- 连线耗时标签 -->
+          ${labelsSvg}
+          <!-- 摄像头节点 -->
+          ${nodesSvg}
+        </svg>
+      </div>
+
+      <div style="font-size: 11px; color: var(--text-dim); text-align: center; margin-top: 4px;">
+        提示：流向箭头展示相邻相机的允许移动次序，浮动 Badge 标签自动融合 AI 通行耗时校准。
+      </div>
+    `;
+  } catch(e) {
+    body.innerHTML = `<div class="empty-state">加载拓扑图表失败: ${e.message}</div>`;
+  }
+}
+
+// 5. 历史告警检索与导出 Modal
+async function openHistoryExportModal() {
+  const body = document.getElementById('modal-history-body');
+  body.innerHTML = `
+    <div style="display: flex; align-items: center; justify-content: space-between; gap: 10px; margin-bottom: 12px;">
+      <div style="font-size: 13px; color: var(--text-muted);">检索审计历史日志或一键导出报表：</div>
+      <a href="${BASE}/api/alerts/export" class="action-btn active" style="text-decoration: none;" download>
+        📥 导出 CSV 报表 (Excel)
+      </a>
+    </div>
+    <div id="history-logs-container">
+      <div class="empty-state">拉取日志数据中...</div>
+    </div>
+  `;
+  openModal('history-modal');
+
+  try {
+    const res = await fetch('/api/alerts/history?limit=50').then(r => r.json());
+    const alerts = res.alerts || [];
+    const container = document.getElementById('history-logs-container');
+
+    if (alerts.length === 0) {
+      container.innerHTML = `<div class="empty-state">暂无历史告警日志记录</div>`;
+      return;
+    }
+
+    container.innerHTML = `
+      <div style="display: flex; flex-direction: column; gap: 8px; max-height: 400px; overflow-y: auto;">
+        ${alerts.map(a => {
+          const tStr = new Date(a.timestamp * 1000).toLocaleString('zh-CN');
+          return `
+            <div class="calib-row" style="padding: 10px; flex-direction: column; align-items: flex-start; gap: 4px;">
+              <div style="display: flex; justify-content: space-between; width: 100%;">
+                <span style="font-weight: 700; color: ${a.alert_type === 'INTRUSION' ? '#ff0055' : 'var(--primary)'}; font-family: 'JetBrains Mono', monospace;">
+                  ${a.alert_type === 'INTRUSION' ? '🚨 ROI 电子围栏闯入' : '⚠️ ' + (a.stage || 'ALERT')}
+                </span>
+                <span style="font-size: 10px; color: var(--text-dim);">${tStr}</span>
+              </div>
+              <div style="font-size: 11px; color: var(--text-muted);">
+                目标: <b style="color: var(--text-main);">#${a.global_id}</b> | 
+                相机: <b style="color: var(--text-main);">${a.last_camera}</b> | 
+                用时: <b>${a.elapsed_seconds}s</b> | 
+                风险等级: <b style="color: ${a.risk_level === 'HIGH' ? 'var(--danger)' : 'var(--warning)'}">${a.risk_level}</b>
+              </div>
+            </div>
+          `;
+        }).join('')}
+      </div>
+    `;
+  } catch(e) {
+    document.getElementById('history-logs-container').innerHTML = `<div class="empty-state">获取历史日志失败</div>`;
+  }
+}
+
+// 6. 单镜头放大 Modal
+function openCamZoomModal(cam_id) {
+  const title = document.getElementById('modal-alert-title');
+  const body = document.getElementById('modal-alert-body');
+  title.textContent = `摄像头高清放大监视器: ${cam_id.toUpperCase()}`;
+
+  body.innerHTML = `
+    <div class="cam-view" style="height: 380px; border-radius: 12px;">
+      <img src="${BASE}/stream/${cam_id}" alt="${cam_id}">
+    </div>
+    <div style="display: flex; justify-content: flex-end; margin-top: 10px;">
+      <button class="action-btn" onclick="closeModal('alert-detail-modal')">关闭放大视角</button>
+    </div>
+  `;
+  openModal('alert-detail-modal');
+}
+
+// 7. 手动画围栏 Modal 交互逻辑
+let currentDrawingCamId = '';
+let roiPoints = []; // 归一化 [ [x1, y1], [x2, y2], ... ]
+let roiDrawMode = 'freehand'; // 'freehand' 或 'click'
+
+function setRoiDrawMode(mode) {
+  roiDrawMode = mode;
+  document.getElementById('roi-mode-freehand').classList.toggle('active', mode === 'freehand');
+  document.getElementById('roi-mode-click').classList.toggle('active', mode === 'click');
+  redrawRoiCanvas();
+}
+
+const canvas = document.getElementById('roi-canvas');
+const ctx = canvas ? canvas.getContext('2d') : null;
+
+if (canvas) {
+  let isMouseDown = false;
+  let hasDragged = false;
+
+  canvas.addEventListener('mousedown', (e) => {
+    isMouseDown = true;
+    hasDragged = false;
+    const rect = canvas.getBoundingClientRect();
+    if (rect.width <= 0 || rect.height <= 0) return;
+
+    const clickX = e.clientX - rect.left;
+    const clickY = e.clientY - rect.top;
+    const normX = parseFloat((clickX / rect.width).toFixed(4));
+    const normY = parseFloat((clickY / rect.height).toFixed(4));
+
+    if (roiDrawMode === 'freehand') {
+      // 自由涂鸦画线：按下鼠标重置曲线并开画
+      roiPoints = [[normX, normY]];
+      redrawRoiCanvas();
+    }
+  });
+
+  canvas.addEventListener('mousemove', (e) => {
+    if (!isMouseDown) return;
+    hasDragged = true;
+    const rect = canvas.getBoundingClientRect();
+    if (rect.width <= 0 || rect.height <= 0) return;
+
+    const curX = e.clientX - rect.left;
+    const curY = e.clientY - rect.top;
+    const normX = parseFloat((curX / rect.width).toFixed(4));
+    const normY = parseFloat((curY / rect.height).toFixed(4));
+
+    if (roiDrawMode === 'freehand') {
+      // 适度距离抽样，保持曲线平滑且不产生过于密集的重复点
+      const last = roiPoints[roiPoints.length - 1];
+      if (last) {
+        const dx = normX - last[0];
+        const dy = normY - last[1];
+        if (Math.sqrt(dx * dx + dy * dy) > 0.012) {
+          roiPoints.push([normX, normY]);
+          redrawRoiCanvas();
+        }
+      }
+    }
+  });
+
+  const handleDrawEnd = (e) => {
+    if (!isMouseDown) return;
+    isMouseDown = false;
+
+    if (roiDrawMode === 'click' && !hasDragged && e.type === 'mouseup') {
+      // 逐点模式：单击添加点
+      const rect = canvas.getBoundingClientRect();
+      const clickX = e.clientX - rect.left;
+      const clickY = e.clientY - rect.top;
+      const normX = parseFloat((clickX / rect.width).toFixed(4));
+      const normY = parseFloat((clickY / rect.height).toFixed(4));
+      roiPoints.push([normX, normY]);
+      redrawRoiCanvas();
+    } else if (roiDrawMode === 'freehand') {
+      redrawRoiCanvas();
+    }
+  };
+
+  canvas.addEventListener('mouseup', handleDrawEnd);
+  canvas.addEventListener('mouseleave', () => { isMouseDown = false; });
+}
+
+async function openRoiDrawModal(cam_id) {
+  currentDrawingCamId = cam_id;
+  roiPoints = [];
+  document.getElementById('roi-modal-title').textContent = `绘制围栏: ${cam_id.toUpperCase()}`;
+  document.getElementById('roi-preview-bg').src = `${BASE}/stream/${cam_id}`;
+  document.getElementById('roi-name-input').value = '核心机房防护区';
+  
+  openModal('roi-modal');
+  
+  // 预加载已有的 ROI 配置
+  try {
+    const res = await fetch('/api/roi').then(r => r.json());
+    if (res[cam_id] && res[cam_id].length > 0) {
+      const existing = res[cam_id][0];
+      document.getElementById('roi-name-input').value = existing.name || '核心机房防护区';
+      roiPoints = existing.polygon || [];
+    }
+  } catch(e) {}
+
+  setTimeout(redrawRoiCanvas, 150);
+}
+
+function clearRoiPoints() {
+  roiPoints = [];
+  redrawRoiCanvas();
+}
+
+function redrawRoiCanvas() {
+  if (!canvas || !ctx) return;
+  const w = canvas.width;
+  const h = canvas.height;
+  ctx.clearRect(0, 0, w, h);
+
+  if (roiPoints.length === 0) {
+    // 绘制引导虚线框与提示文字
+    ctx.strokeStyle = 'rgba(56, 189, 248, 0.4)';
+    ctx.lineWidth = 1.5;
+    ctx.setLineDash([6, 6]);
+    ctx.strokeRect(20, 20, w - 40, h - 40);
+    ctx.setLineDash([]);
+
+    ctx.fillStyle = '#38bdf8';
+    ctx.font = '13px "Plus Jakarta Sans", sans-serif';
+    ctx.textAlign = 'center';
+    const tip = roiDrawMode === 'freehand' 
+      ? '🎨 按住鼠标左键在画面上拖拽自由画出防区曲线' 
+      : '📍 鼠标依次点击画面添加顶点标定多边形';
+    ctx.fillText(tip, w / 2, h / 2);
+    return;
+  }
+
+  // 绘制防护多边形
+  ctx.strokeStyle = '#f59e0b';
+  ctx.fillStyle = 'rgba(245, 158, 11, 0.28)';
+  ctx.lineWidth = 2.5;
+
+  ctx.beginPath();
+  roiPoints.forEach((p, idx) => {
+    const px = p[0] * w;
+    const py = p[1] * h;
+    if (idx === 0) ctx.moveTo(px, py);
+    else ctx.lineTo(px, py);
+  });
+
+  if (roiPoints.length >= 3) {
+    ctx.closePath();
+    ctx.fill();
+  }
+  ctx.stroke();
+
+  // 绘制每个顶点红圈与序号数字
+  roiPoints.forEach((p, idx) => {
+    const px = p[0] * w;
+    const py = p[1] * h;
+    
+    ctx.fillStyle = '#ef4444';
+    ctx.beginPath();
+    ctx.arc(px, py, 6, 0, Math.PI * 2);
+    ctx.fill();
+    ctx.strokeStyle = '#ffffff';
+    ctx.lineWidth = 1.5;
+    ctx.stroke();
+
+    ctx.fillStyle = '#ffffff';
+    ctx.font = '700 10px "JetBrains Mono", monospace';
+    ctx.textAlign = 'center';
+    ctx.fillText(idx + 1, px, py - 9);
+  });
+}
+
+// ---- 全局自定义高科技 Toast 提示组件 ----
+function showToast(message, type = 'success', duration = 3000) {
+  let container = document.getElementById('toast-container');
+  if (!container) {
+    container = document.createElement('div');
+    container.id = 'toast-container';
+    document.body.appendChild(container);
+  }
+
+  const icons = {
+    success: '✅',
+    warning: '⚠️',
+    error: '❌',
+    info: 'ℹ️'
+  };
+
+  const toast = document.createElement('div');
+  toast.className = `toast-message ${type}`;
+  toast.innerHTML = `
+    <span style="font-size: 16px;">${icons[type] || 'ℹ️'}</span>
+    <span>${message}</span>
+  `;
+
+  container.appendChild(toast);
+
+  setTimeout(() => {
+    toast.classList.add('toast-fadeOut');
+    setTimeout(() => toast.remove(), 300);
+  }, duration);
+}
+
+async function saveRoiPoints() {
+  if (!currentDrawingCamId) {
+    showToast('未识别到目标摄像头，请重试打开围栏画板！', 'error');
+    return;
+  }
+
+  if (roiPoints.length > 0 && roiPoints.length < 3) {
+    showToast('多边形电子围栏至少需要 3 个顶点！', 'warning');
+    return;
+  }
+
+  const name = document.getElementById('roi-name-input').value.trim() || '自定义电子围栏';
+  try {
+    const resp = await fetch('/api/roi', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({
+        camera_id: currentDrawingCamId,
+        polygon: roiPoints,
+        name: name
+      })
+    });
+    
+    const res = await resp.json();
+
+    if (resp.ok && res.status === 'success') {
+      showToast(`摄像头 ${currentDrawingCamId.toUpperCase()} 的 ROI 围栏保存并实时生效成功！`, 'success');
+      closeModal('roi-modal');
+    } else {
+      showToast('保存失败: ' + (res.error || `HTTP ${resp.status}`), 'error');
+    }
+  } catch(e) {
+    showToast('保存请求异常: ' + e.message, 'error');
+  }
+}
+
+async function removeRoi() {
+  if (!currentDrawingCamId) {
+    showToast('未识别到目标摄像头！', 'error');
+    return;
+  }
+
+  roiPoints = [];
+  redrawRoiCanvas();
+  const name = document.getElementById('roi-name-input').value.trim();
+  try {
+    const resp = await fetch('/api/roi', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({
+        camera_id: currentDrawingCamId,
+        polygon: [],
+        name: name
+      })
+    });
+    
+    const res = await resp.json();
+
+    if (resp.ok && res.status === 'success') {
+      showToast(`已成功清除摄像头 ${currentDrawingCamId.toUpperCase()} 的电子围栏配置！`, 'success');
+      closeModal('roi-modal');
+    } else {
+      showToast('清除失败: ' + (res.error || `HTTP ${resp.status}`), 'error');
+    }
+  } catch(e) {
+    showToast('清除操作异常: ' + e.message, 'error');
+  }
+}
+
+// ---- ReID 检索指标轮询 ----
+async function pollReidMetrics() {
+  try {
+    const res = await fetch('/api/metrics/reid').then(r => r.json());
+    
+    // Top-1 相似度与匹配率
+    const simPct = (res.avg_top1_similarity * 100).toFixed(1);
+    const matchRatePct = (res.match_rate * 100).toFixed(1);
+    document.getElementById('reid-top1-sim').textContent = res.total_searches > 0 ? `${simPct}%` : '--%';
+    document.getElementById('reid-match-rate').textContent = `(匹配率 ${matchRatePct}%)`;
+    document.getElementById('reid-sim-bar').style.width = `${Math.min(100, Math.max(0, simPct))}%`;
+
+    // Ratio 歧义拦截与 margin
+    document.getElementById('reid-ratio-blocked').textContent = res.ratio_blocked_count || 0;
+    const marginPct = (res.avg_ratio_margin * 100).toFixed(1);
+    document.getElementById('reid-margin-text').textContent = `确信裕度: ${res.total_searches > 0 ? marginPct + '%' : '--'}`;
+
+    // 检索耗时
+    document.getElementById('reid-latency').textContent = res.avg_latency_ms ? res.avg_latency_ms.toFixed(1) : '0.0';
+    document.getElementById('reid-searches-text').textContent = `总比对: ${res.total_searches || 0} 次`;
+
+    // 库容量与特征质量
+    document.getElementById('reid-gallery-size').textContent = res.gallery_size || 0;
+    const qual = res.avg_feature_quality ? res.avg_feature_quality.toFixed(2) : '--';
+    document.getElementById('reid-quality-text').textContent = `平均质量: ${qual}`;
+    
+    // 同步刷新 stat-ids
+    const statIds = document.getElementById('stat-ids');
+    if (statIds) statIds.textContent = res.gallery_size || 0;
+  } catch (e) {
+    console.error('获取 ReID 检索指标失败:', e);
+  }
+}
+
 // ---- 初始化 ----
 async function init() {
   try {
@@ -878,8 +2522,10 @@ async function init() {
   connectWS();
   pollStatus();
   pollCalibStats();
+  pollReidMetrics();
   setInterval(pollStatus, 3000);
   setInterval(pollCalibStats, 15000);
+  setInterval(pollReidMetrics, 2000);
 }
 
 function clearAlerts() {

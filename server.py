@@ -25,20 +25,26 @@ logger = logging.getLogger("server")
 app = FastAPI(title="超算中心监控预警系统")
 app.mount("/static", StaticFiles(directory=Path(__file__).parent / "static"), name="static")
 
+screenshots_dir = Path(__file__).parent / "outputs" / "screenshots"
+screenshots_dir.mkdir(parents=True, exist_ok=True)
+app.mount("/screenshots", StaticFiles(directory=screenshots_dir), name="screenshots")
+
 
 # 运行时注入（main.py 启动前赋值）
 _frame_hub = None
 _broadcaster = None
 _identity_store = None
 _calibrator = None
+_pipelines = None
 
 
-def init_server(frame_hub, broadcaster, identity_store, calibrator=None):
-    global _frame_hub, _broadcaster, _identity_store, _calibrator
+def init_server(frame_hub, broadcaster, identity_store, calibrator=None, pipelines=None):
+    global _frame_hub, _broadcaster, _identity_store, _calibrator, _pipelines
     _frame_hub = frame_hub
     _broadcaster = broadcaster
     _identity_store = identity_store
     _calibrator = calibrator
+    _pipelines = pipelines
 
 
 # ------------------------------------------------------------------ #
@@ -55,6 +61,61 @@ async def index():
 # REST API                                                              #
 # ------------------------------------------------------------------ #
 
+@app.get("/api/roi")
+async def get_roi():
+    roi_file = Path(__file__).parent / "config" / "roi.json"
+    if not roi_file.exists():
+        return JSONResponse({})
+    try:
+        data = json.loads(roi_file.read_text(encoding="utf-8"))
+        return JSONResponse(data)
+    except Exception as e:
+        return JSONResponse({"error": str(e)}, status_code=500)
+
+
+from fastapi import Request
+
+@app.post("/api/roi")
+async def save_roi(request: Request):
+    try:
+        body = await request.json()
+        camera_id = body.get("camera_id")
+        if not camera_id:
+            return JSONResponse({"status": "error", "error": "缺少 camera_id 参数"}, status_code=400)
+            
+        polygon = body.get("polygon", [])
+        name = body.get("name", "自定义电子围栏")
+        
+        roi_file = Path(__file__).parent / "config" / "roi.json"
+        current = {}
+        if roi_file.exists():
+            try:
+                current = json.loads(roi_file.read_text(encoding="utf-8"))
+            except Exception:
+                current = {}
+        
+        if polygon:
+            current[camera_id] = [{
+                "name": name,
+                "polygon": polygon
+            }]
+        else:
+            current.pop(camera_id, None)
+
+        roi_file.write_text(json.dumps(current, ensure_ascii=False, indent=2), encoding="utf-8")
+        logger.info("保存 ROI 配置成功: camera_id=%s, polygon_count=%d", camera_id, len(polygon))
+
+        # 动态通知运行中的 CameraPipelines
+        if _pipelines:
+            for p in _pipelines:
+                if hasattr(p, "reload_rois"):
+                    p.reload_rois()
+
+        return JSONResponse({"status": "success", "config": current})
+    except Exception as e:
+        logger.error("保存 ROI 失败: %s", e, exc_info=True)
+        return JSONResponse({"status": "error", "error": str(e)}, status_code=500)
+
 @app.get("/api/status")
 async def get_status():
     if _frame_hub is None:
@@ -64,11 +125,101 @@ async def get_status():
     return JSONResponse({"cameras": cameras})
 
 
+@app.get("/api/metrics/reid")
+async def get_reid_metrics():
+    if _identity_store is None:
+        return JSONResponse({
+            "gallery_size": 0,
+            "total_searches": 0,
+            "successful_matches": 0,
+            "ratio_blocked_count": 0,
+            "match_rate": 0.0,
+            "avg_top1_similarity": 0.0,
+            "avg_ratio_margin": 0.0,
+            "avg_latency_ms": 0.0,
+            "avg_feature_quality": 0.0,
+        })
+    return JSONResponse(_identity_store.get_metrics())
+
+
+
 @app.get("/api/alerts")
 async def get_alerts():
     if _broadcaster is None:
         return JSONResponse({"alerts": []})
     return JSONResponse({"alerts": _broadcaster.recent()})
+
+
+@app.get("/api/alerts/history")
+async def get_alert_history(
+    limit: int = 100,
+    risk_level: str | None = None,
+    camera_id: str | None = None,
+    alert_type: str | None = None,
+):
+    log_file = Path(__file__).parent / "outputs" / "alerts.jsonl"
+    if not log_file.exists():
+        return JSONResponse({"total": 0, "alerts": []})
+    
+    alerts = []
+    try:
+        with open(log_file, "r", encoding="utf-8") as f:
+            for line in f:
+                line = line.strip()
+                if not line:
+                    continue
+                try:
+                    item = json.loads(line)
+                    if risk_level and item.get("risk_level") != risk_level:
+                        continue
+                    if camera_id and item.get("last_camera") != camera_id:
+                        continue
+                    if alert_type and item.get("alert_type") != alert_type:
+                        continue
+                    alerts.append(item)
+                except Exception:
+                    continue
+    except Exception as e:
+        return JSONResponse({"error": str(e)}, status_code=500)
+    
+    alerts.reverse()  # 逆序，最新在前
+    return JSONResponse({
+        "total": len(alerts),
+        "alerts": alerts[:limit]
+    })
+
+
+@app.get("/api/alerts/export")
+async def export_alerts_csv():
+    from fastapi.responses import Response
+    log_file = Path(__file__).parent / "outputs" / "alerts.jsonl"
+    
+    csv_rows = ["Alert ID,Timestamp,Stage,Type,Risk Level,Global ID,Camera,Elapsed Seconds"]
+    if log_file.exists():
+        try:
+            with open(log_file, "r", encoding="utf-8") as f:
+                for line in f:
+                    line = line.strip()
+                    if not line:
+                        continue
+                    try:
+                        item = json.loads(line)
+                        import time as pytime
+                        ts_str = pytime.strftime("%Y-%m-%d %H:%M:%S", pytime.localtime(item.get("timestamp", 0)))
+                        csv_rows.append(
+                            f'"{item.get("alert_id")}","{ts_str}","{item.get("stage")}","{item.get("alert_type","TIMEOUT")}","{item.get("risk_level")}","{item.get("global_id")}","{item.get("last_camera")}","{item.get("elapsed_seconds")}"'
+                        )
+                    except Exception:
+                        continue
+        except Exception:
+            pass
+
+    csv_content = "\n".join(csv_rows)
+    return Response(
+        content=csv_content.encode("utf-8-sig"),
+        media_type="text/csv",
+        headers={"Content-Disposition": 'attachment; filename="lab_alerts_history.csv"'}
+    )
 
 
 @app.get("/api/identities")
@@ -77,6 +228,61 @@ async def get_identities():
         return JSONResponse({"count": 0, "ids": []})
     ids = _identity_store.all_ids()
     return JSONResponse({"count": len(ids), "ids": ids})
+
+
+@app.get("/api/identities/{global_id}")
+async def get_identity_detail(global_id: str):
+    if _identity_store is None:
+        return JSONResponse({"error": "Identity store unavailable"}, status_code=503)
+    
+    rec = _identity_store.get(global_id)
+    if rec is None:
+        return JSONResponse({"error": "Identity not found"}, status_code=404)
+    
+    # 抽取并格式化出现轨迹（按照摄像头变化压缩关键节点）
+    raw_apps = list(rec.appearances)
+    trajectory = []
+    last_cam = None
+    
+    for app_item in raw_apps:
+        cam = app_item.get("camera")
+        ts = app_item.get("time", 0.0)
+        import time as pytime
+        time_str = pytime.strftime("%H:%M:%S", pytime.localtime(ts)) if ts else "未知"
+        
+        # 仅在跨相机切换或首条记录时保留主要轨迹点
+        if cam != last_cam or not trajectory:
+            trajectory.append({
+                "camera": cam,
+                "timestamp": ts,
+                "time_str": time_str,
+                "bbox": app_item.get("bbox")
+            })
+            last_cam = cam
+        else:
+            # 更新同一相机的最后活跃时间
+            trajectory[-1]["end_timestamp"] = ts
+            trajectory[-1]["end_time_str"] = time_str
+
+    return JSONResponse({
+        "global_id": rec.global_id,
+        "last_camera": rec.last_camera,
+        "last_seen": rec.last_seen,
+        "total_appearances": len(raw_apps),
+        "trajectory": trajectory
+    })
+
+
+@app.get("/api/topology")
+async def get_topology():
+    topo_file = Path(__file__).parent / "config" / "topology.json"
+    if not topo_file.exists():
+        return JSONResponse({"edges": []})
+    try:
+        data = json.loads(topo_file.read_text(encoding="utf-8"))
+        return JSONResponse(data)
+    except Exception as e:
+        return JSONResponse({"error": str(e)}, status_code=500)
 
 
 @app.get("/api/stats")

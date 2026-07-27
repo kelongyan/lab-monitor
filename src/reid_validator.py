@@ -4,11 +4,12 @@ reid_validator.py — 多帧 ReID 确认器（降低单帧误匹配）
 要求连续 M 帧一致才确认身份——彻底消除单帧噪声引起的误报
 """
 
+import time
 import logging
 import numpy as np
 from collections import defaultdict, deque
 
-from .reid import match_feature
+from .reid import match_feature, match_feature_detailed
 
 logger = logging.getLogger("reid_validator")
 
@@ -54,6 +55,7 @@ class ReIDValidator:
         self,
         track_id: int,
         gallery: list[tuple[str, np.ndarray]],
+        metrics=None,
     ) -> str | None:
         """
         尝试确认身份
@@ -75,7 +77,20 @@ class ReIDValidator:
             return None
         avg_feat /= norm
 
-        matched_id = match_feature(avg_feat, gallery, threshold=self._threshold)
+        t0 = time.perf_counter()
+        detail = match_feature_detailed(avg_feat, gallery, threshold=self._threshold)
+        latency_ms = (time.perf_counter() - t0) * 1000.0
+
+        if metrics is not None:
+            metrics.record_search()
+            metrics.record_match(
+                best_sim=detail.best_sim,
+                second_sim=detail.second_sim,
+                is_ratio_blocked=detail.is_ratio_blocked,
+                latency_ms=latency_ms,
+            )
+
+        matched_id = detail.matched_id
 
         if matched_id is None:
             # 没有匹配：重置候选计数

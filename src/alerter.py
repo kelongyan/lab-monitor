@@ -138,6 +138,52 @@ class AlertManager:
         return hit
 
     # ------------------------------------------------------------------ #
+    # 即时入侵告警 (ROI 电子围栏)                                            #
+    # ------------------------------------------------------------------ #
+
+    def trigger_intrusion(
+        self,
+        camera_id: str,
+        global_id: str,
+        roi_name: str,
+        bbox: list[float] = None,
+    ) -> dict | None:
+        """针对电子围栏 / 危险区域越界，触发即时 INTRUSION 告警"""
+        now = time.time()
+        key = f"intrusion_{camera_id}_{global_id}_{roi_name}"
+        with self._lock:
+            if not hasattr(self, "_intrusion_cooldown"):
+                self._intrusion_cooldown = {}
+            # 10 秒冷却防刷屏
+            if now - self._intrusion_cooldown.get(key, 0) < 10.0:
+                return None
+            self._intrusion_cooldown[key] = now
+
+        alert_id = f"alert_roi_{int(now*1000)}"
+        alert = {
+            "alert_id": alert_id,
+            "timestamp": now,
+            "stage": "ALERT",
+            "alert_type": "INTRUSION",
+            "global_id": global_id,
+            "last_camera": camera_id,
+            "expected_cameras": [f"禁止进入: {roi_name}"],
+            "elapsed_seconds": 0,
+            "risk_level": "HIGH",
+            "last_bbox": bbox or [],
+        }
+
+        # 写入日志文件
+        self._write_log(alert)
+
+        # 广播到 WebSocket
+        if self._broadcaster:
+            self._broadcaster.push(alert)
+
+        logger.warning("[%s] 🚨 电子围栏越界告警! 人员 #%s 闯入 [%s]", camera_id, global_id, roi_name)
+        return alert
+
+    # ------------------------------------------------------------------ #
     # 超时检查（由后台线程定期调用）                                          #
     # ------------------------------------------------------------------ #
 

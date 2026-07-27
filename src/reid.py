@@ -149,6 +149,54 @@ def cosine_similarity(a: np.ndarray, b: np.ndarray) -> float:
     return float(np.dot(a, b))
 
 
+from dataclasses import dataclass
+
+
+@dataclass
+class MatchDetail:
+    matched_id: str | None
+    best_sim: float = 0.0
+    second_sim: float = 0.0
+    is_ratio_blocked: bool = False
+
+
+def match_feature_detailed(
+    query: np.ndarray,
+    gallery: list[tuple[str, np.ndarray]],  # [(global_id, feat), ...]
+    threshold: float = 0.75,
+    ratio: float = 0.85,   # Ratio Test 阈值：second/best > ratio 时视为歧义拒绝
+) -> MatchDetail:
+    """
+    在 gallery 中找与 query 最相似的身份，返回详细匹配元数据 MatchDetail。
+    """
+    if not gallery:
+        return MatchDetail(matched_id=None)
+
+    ids = [gid for gid, _ in gallery]
+    feats = np.stack([f for _, f in gallery])  # (N, D)
+    sims = feats @ query                        # (N,)
+
+    # 单身份时无需 Ratio Test
+    if len(gallery) == 1:
+        best_sim = float(sims[0])
+        if best_sim >= threshold:
+            return MatchDetail(matched_id=ids[0], best_sim=best_sim)
+        return MatchDetail(matched_id=None, best_sim=best_sim)
+
+    idx = np.argsort(sims)[::-1]
+    best_sim = float(sims[idx[0]])
+    second_sim = float(sims[idx[1]])
+
+    if best_sim < threshold:
+        return MatchDetail(matched_id=None, best_sim=best_sim, second_sim=second_sim)
+
+    # Ratio Test：若第二名相似度与最佳相似度过于接近，说明有歧义，拒绝匹配
+    if best_sim > 0 and second_sim / best_sim > ratio:
+        return MatchDetail(matched_id=None, best_sim=best_sim, second_sim=second_sim, is_ratio_blocked=True)
+
+    return MatchDetail(matched_id=ids[idx[0]], best_sim=best_sim, second_sim=second_sim)
+
+
 def match_feature(
     query: np.ndarray,
     gallery: list[tuple[str, np.ndarray]],  # [(global_id, feat), ...]
@@ -159,28 +207,6 @@ def match_feature(
     在 gallery 中找与 query 最相似的身份，并通过 Ratio Test 过滤歧义匹配。
     返回 global_id 或 None（无匹配 / 歧义）
     """
-    if not gallery:
-        return None
+    detail = match_feature_detailed(query, gallery, threshold=threshold, ratio=ratio)
+    return detail.matched_id
 
-    ids = [gid for gid, _ in gallery]
-    # 批量点积（L2 归一化向量上等价于余弦相似度，比 scipy.cosine 快 3-5 倍）
-    feats = np.stack([f for _, f in gallery])  # (N, D)
-    sims = feats @ query                        # (N,)
-
-    # 单身份时无需 Ratio Test
-    if len(gallery) == 1:
-        return ids[0] if float(sims[0]) >= threshold else None
-
-    idx = np.argsort(sims)[::-1]
-    best_sim = float(sims[idx[0]])
-    second_sim = float(sims[idx[1]])
-
-    if best_sim < threshold:
-        return None
-
-    # Ratio Test：若第二名相似度与最佳相似度过于接近，说明有歧义，拒绝匹配
-    # 例：best=0.90, second=0.88 → second/best=0.978 > 0.85 → 拒绝
-    if best_sim > 0 and second_sim / best_sim > ratio:
-        return None
-
-    return ids[idx[0]]
