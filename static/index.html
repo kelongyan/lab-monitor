@@ -63,8 +63,39 @@
   .brand {
     display: flex;
     align-items: center;
-    gap: 14px;
+    gap: 16px;
   }
+
+  .brand-logos {
+    display: flex;
+    align-items: center;
+    gap: 10px;
+    background: rgba(255, 255, 255, 0.05);
+    padding: 5px 12px;
+    border-radius: 10px;
+    border: 1px solid var(--border-card);
+    backdrop-filter: blur(8px);
+    transition: all 0.3s ease;
+  }
+
+  .brand-logos:hover {
+    border-color: var(--border-card-glow);
+    box-shadow: 0 0 12px var(--primary-glow);
+  }
+
+  .header-logo {
+    height: 26px;
+    width: auto;
+    object-fit: contain;
+    filter: drop-shadow(0 2px 4px rgba(0, 0, 0, 0.4));
+  }
+
+  .logo-divider {
+    width: 1px;
+    height: 16px;
+    background: rgba(255, 255, 255, 0.2);
+  }
+
 
   .brand-icon {
     width: 36px;
@@ -613,12 +644,17 @@
 <!-- 头部 Header -->
 <header>
   <div class="brand">
-    <div class="brand-icon">🛡️</div>
+    <div class="brand-logos">
+      <img src="/static/images/qlu.png" alt="齐鲁工业大学" class="header-logo">
+      <div class="logo-divider"></div>
+      <img src="/static/images/chaosuan.png" alt="国家超算中心" class="header-logo">
+    </div>
     <div class="brand-title-group">
       <h1>超算中心多镜头智能监控预警系统</h1>
     </div>
     <span class="brand-tag">LIVE COMMAND</span>
   </div>
+
 
   <div class="header-actions">
     <div class="time-display" id="sys-time">0000-00-00 00:00:00</div>

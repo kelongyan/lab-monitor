@@ -17,11 +17,14 @@ from pathlib import Path
 import cv2
 from fastapi import FastAPI, WebSocket, WebSocketDisconnect
 from fastapi.responses import HTMLResponse, StreamingResponse, JSONResponse
+from fastapi.staticfiles import StaticFiles
 import uvicorn
 
 logger = logging.getLogger("server")
 
 app = FastAPI(title="超算中心监控预警系统")
+app.mount("/static", StaticFiles(directory=Path(__file__).parent / "static"), name="static")
+
 
 # 运行时注入（main.py 启动前赋值）
 _frame_hub = None
