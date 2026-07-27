@@ -265,10 +265,46 @@ class AlertManager:
         }
 
     def _write_log(self, alert: dict) -> None:
+        # 1. 写入 SQLite 数据库持久化（方向三）
+        try:
+            from .db import db
+            db.insert_alert(alert)
+        except Exception as e:
+            logger.error("写入 SQLite 数据库失败: %s", e)
+
+        # 2. 追加式 jsonl 文件日志
         if self._log_file is None:
             return
         try:
             self._log_file.write(json.dumps(alert, ensure_ascii=False) + "\n")
-            # line buffering (buffering=1) 已保证每行写完后自动 flush
         except OSError as e:
             logger.error("告警日志写入失败: %s", e)
+
+    def trigger_crowd_warning(self, camera_id: str, count: int, threshold: int = 5) -> dict | None:
+        """方向三业务扩展：人流密度/聚众预警"""
+        if count < threshold:
+            return None
+        now = time.time()
+        key = f"crowd_{camera_id}"
+        with self._lock:
+            if now - self._intrusion_cooldown.get(key, 0) < 30.0: # 30秒冷却
+                return None
+            self._intrusion_cooldown[key] = now
+
+        alert = {
+          "alert_id": f"alert_crowd_{int(now*1000)}",
+          "timestamp": now,
+          "stage": "WARNING",
+          "alert_type": "CROWD_DENSITY",
+          "global_id": f"Crowd_{count}",
+          "last_camera": camera_id,
+          "expected_cameras": [f"人流密集 (>= {threshold} 人)"],
+          "elapsed_seconds": 0,
+          "risk_level": "MEDIUM",
+          "last_bbox": [],
+        }
+        self._write_log(alert)
+        if self._broadcaster:
+            self._broadcaster.push(alert)
+        logger.warning("[%s] 👥 人流密度预警: 当前区域检测到 %d 人在场", camera_id, count)
+        return alert

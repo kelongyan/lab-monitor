@@ -77,7 +77,8 @@ class ReIDMetrics:
 @dataclass
 class PersonRecord:
     global_id: str
-    feature: np.ndarray          # 平均特征向量（L2归一化）
+    feature: np.ndarray          # 主平均特征向量（L2归一化）
+    feature_bank: list           # 多姿态/多光照特征向量库 [np.ndarray, ...] (最多保留 5 个)
     appearances: deque           # deque(maxlen=_MAX_APPEARANCES)，自动丢弃旧记录
     last_camera: str = ""
     last_seen: float = 0.0
@@ -100,6 +101,11 @@ class IdentityStore:
         with self._lock:
             return [(gid, rec.feature.copy()) for gid, rec in self._records.items()]
 
+    def get_full_gallery(self) -> list[tuple[str, list[np.ndarray]]]:
+        """返回所有身份及其多姿态特征向量库，用于高精度多模态比对"""
+        with self._lock:
+            return [(gid, [f.copy() for f in rec.feature_bank]) for gid, rec in self._records.items()]
+
     def get(self, global_id: str) -> PersonRecord | None:
         with self._lock:
             rec = self._records.get(global_id)
@@ -112,10 +118,12 @@ class IdentityStore:
     def register(self, feature: np.ndarray) -> str:
         """注册新身份，返回新 global_id"""
         gid = str(uuid.uuid4())[:8]
+        feat_copy = feature.copy()
         with self._lock:
             self._records[gid] = PersonRecord(
                 global_id=gid,
-                feature=feature.copy(),
+                feature=feat_copy,
+                feature_bank=[feat_copy],
                 appearances=deque(maxlen=_MAX_APPEARANCES),
             )
         return gid
@@ -126,21 +134,36 @@ class IdentityStore:
         threshold: float = 0.75,
     ) -> tuple[str, bool]:
         """
-        原子性查重+注册（P1-5）：在持有锁的情况下，先查询是否已有相似身份。
+        原子性向量化查重+注册：
+        在持有锁的情况下，利用矩阵乘法一次性计算 query 特征与所有记录主特征/特征库的相似度。
         - 有匹配 → 返回 (existing_id, False)，不重复注册
         - 无匹配 → 在锁内注册并返回 (new_id, True)
-        防止多路 pipeline 并发时为同一人生成多个 global_id。
         """
+        feat_copy = feature.copy()
         with self._lock:
-            for gid, rec in self._records.items():
-                sim = float(np.dot(feature, rec.feature))  # 均已 L2 归一化
-                if sim >= threshold:
-                    return gid, False
+            if self._records:
+                # 提取所有主特征进行矩阵点积加速
+                gids = list(self._records.keys())
+                main_feats = np.stack([self._records[g].feature for g in gids]) # (N, D)
+                sims = main_feats @ feature # (N,)
+                max_idx = int(np.argmax(sims))
+                if sims[max_idx] >= threshold:
+                    return gids[max_idx], False
+
+                # 深入检查特征库 (feature bank)
+                for gid, rec in self._records.items():
+                    if rec.feature_bank:
+                        bank_feats = np.stack(rec.feature_bank) # (K, D)
+                        bank_sims = bank_feats @ feature        # (K,)
+                        if float(np.max(bank_sims)) >= threshold:
+                            return gid, False
+
             # 未找到相似身份，在锁内注册，保证原子性
             gid = str(uuid.uuid4())[:8]
             self._records[gid] = PersonRecord(
                 global_id=gid,
-                feature=feature.copy(),
+                feature=feat_copy,
+                feature_bank=[feat_copy],
                 appearances=deque(maxlen=_MAX_APPEARANCES),
             )
             return gid, True
@@ -156,20 +179,31 @@ class IdentityStore:
     ) -> None:
         """
         记录出现事件，并用质量加权的滑动平均更新特征向量（P1-3）。
-        quality 高（目标大/清晰）→ alpha 小 → 积极吸收新特征
-        quality 低（目标小/模糊）→ alpha 趋近 1 → 保守更新，避免噪声污染
+        同时动态维护多姿态特征向量库 (Feature Bank, max_size=5)。
         """
         quality = min(1.0, max(0.0, quality_score))
         self.metrics.record_quality(quality)
         alpha = base_alpha + (1.0 - base_alpha) * (1.0 - quality)
+        feat_copy = feature.copy()
         with self._lock:
             rec = self._records.get(global_id)
             if rec is None:
                 return
-            rec.feature = alpha * rec.feature + (1 - alpha) * feature
+            
+            # 1. 更新主平均特征
+            rec.feature = alpha * rec.feature + (1 - alpha) * feat_copy
             norm = np.linalg.norm(rec.feature)
             if norm > 1e-8:
                 rec.feature /= norm
+
+            # 2. 动态维护多姿态特征库 (Bank)
+            if quality > 0.6 and len(rec.feature_bank) < 5:
+                # 若新特征与已有 bank 差异较明显 (sim < 0.92)，说明捕获到了新角度，加入 Bank
+                bank_matrix = np.stack(rec.feature_bank)
+                max_bank_sim = float(np.max(bank_matrix @ feat_copy))
+                if max_bank_sim < 0.92:
+                    rec.feature_bank.append(feat_copy)
+
             rec.last_camera = camera_id
             rec.last_seen = time.time()
             rec.appearances.append({
@@ -177,6 +211,13 @@ class IdentityStore:
                 "time": rec.last_seen,
                 "bbox": bbox,
             })
+
+            # 同步更新 SQLite 数据库（方向三）
+            try:
+                from .db import db
+                db.upsert_identity(global_id, camera_id, last_seen=rec.last_seen, appearances_count=len(rec.appearances))
+            except Exception:
+                pass
 
     def all_ids(self) -> list[str]:
         with self._lock:

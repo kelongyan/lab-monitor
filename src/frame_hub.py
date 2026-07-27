@@ -15,6 +15,7 @@ from dataclasses import dataclass, field
 class CameraState:
     camera_id: str
     latest_frame: np.ndarray | None = None
+    latest_jpeg: bytes | None = None
     frame_time: float = 0.0
     is_online: bool = False
     status_text: str = "OFFLINE"
@@ -49,6 +50,7 @@ class FrameHub:
                 self._states[camera_id] = CameraState(camera_id=camera_id)
             s = self._states[camera_id]
             s.latest_frame = frame
+            s.latest_jpeg = None # 标记新帧到来，清除旧 JPEG 编码缓存
             s.frame_time = now
             s.is_online = True
             s.status_text = status_text
@@ -71,20 +73,33 @@ class FrameHub:
     # ------------------------------------------------------------------ #
 
     def get_jpeg(self, camera_id: str, quality: int = 70) -> bytes | None:
-        """返回最新帧的 JPEG 字节，用于 MJPEG 流；摄像头离线返回 None"""
+        """返回最新帧的 JPEG 字节（带编码缓存），用于 MJPEG 流；摄像头离线返回 None"""
         with self._lock:
             s = self._states.get(camera_id)
             if s is None or s.latest_frame is None:
                 return None
+            
+            # 如果该帧已经编码过 JPEG，直接命中缓存返回，无需再次 resize + imencode
+            if s.latest_jpeg is not None:
+                return s.latest_jpeg
+
             frame = s.latest_frame.copy()
 
-        # 缩放到展示分辨率
+        # 锁外执行 OpenCV 图像缩放与 JPEG 编码，避免长时间占用锁
         h, w = frame.shape[:2]
         if w != self.DISPLAY_WIDTH:
             frame = cv2.resize(frame, (self.DISPLAY_WIDTH, self.DISPLAY_HEIGHT))
 
         _, buf = cv2.imencode(".jpg", frame, [cv2.IMWRITE_JPEG_QUALITY, quality])
-        return buf.tobytes()
+        jpeg_bytes = buf.tobytes()
+
+        # 写回缓存
+        with self._lock:
+            s = self._states.get(camera_id)
+            if s is not None and s.latest_jpeg is None:
+                s.latest_jpeg = jpeg_bytes
+
+        return jpeg_bytes
 
     def get_status(self) -> list[dict]:
         """返回所有摄像头状态，供 API 接口用"""

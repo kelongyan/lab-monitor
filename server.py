@@ -211,15 +211,63 @@ async def get_alerts():
     return JSONResponse({"alerts": _broadcaster.recent()})
 
 
-from fastapi import Query
+@app.get("/healthz")
+async def health_check():
+    """方向四：运维健康检查端点"""
+    cams_online = 0
+    if _frame_hub:
+        cams_online = len([c for c in _frame_hub.get_status() if c.get("is_online")])
+    return JSONResponse({
+        "status": "ok",
+        "service": "Lab-Monitor",
+        "cameras_online": cams_online,
+        "timestamp": time.time(),
+    })
+
+
+@app.get("/api/system/metrics")
+async def get_system_metrics():
+    """方向四：工程可观测性与运维指标接口"""
+    import os, sys
+    from src.db import db
+
+    db_stats = db.get_stats()
+    cams = _frame_hub.get_status() if _frame_hub else []
+
+    # 尝试获取 Python 进程内存
+    mem_mb = 0.0
+    try:
+        import psutil
+        process = psutil.Process(os.getpid())
+        mem_mb = round(process.memory_info().rss / 1024 / 1024, 2)
+    except Exception:
+        pass
+
+    return JSONResponse({
+        "cameras_total": len(cams),
+        "cameras_online": len([c for c in cams if c.get("is_online")]),
+        "process_memory_mb": mem_mb,
+        "reid_metrics": _identity_store.get_metrics() if _identity_store else {},
+        "database": db_stats,
+    })
+
 
 @app.get("/api/alerts/history")
 async def get_alert_history(
     limit: int = Query(default=100, ge=1, le=500),  # P1: 上限 500 防止内存爆炸
     risk_level: str | None = None,
     camera_id: str | None = None,
-    alert_type: str | None = None,
+    global_id: str | None = None,
 ):
+    """从 SQLite 数据库高效查询历史告警（具备 jsonl 回退）"""
+    from src.db import db
+    db_alerts = db.query_alerts(limit=limit, camera_id=camera_id, global_id=global_id)
+    if db_alerts:
+        if risk_level:
+            db_alerts = [a for a in db_alerts if a.get("risk_level") == risk_level]
+        return JSONResponse({"total": len(db_alerts), "alerts": db_alerts})
+
+    # 回退：读 jsonl 追加日志
     log_file = Path(__file__).parent / "outputs" / "alerts.jsonl"
     if not log_file.exists():
         return JSONResponse({"total": 0, "alerts": []})
@@ -237,15 +285,13 @@ async def get_alert_history(
                         continue
                     if camera_id and item.get("last_camera") != camera_id:
                         continue
-                    if alert_type and item.get("alert_type") != alert_type:
-                        continue
                     alerts.append(item)
                 except Exception:
                     continue
     except Exception as e:
         return JSONResponse({"error": str(e)}, status_code=500)
     
-    alerts.reverse()  # 逆序，最新在前
+    alerts.reverse()
     return JSONResponse({
         "total": len(alerts),
         "alerts": alerts[:limit]
