@@ -1861,8 +1861,15 @@ updateClock();
 let currentFocusCamId = null;
 
 function setFocusCamera(camId) {
+  if (!camId) return;
   currentFocusCamId = camId;
-  renderCamGrid(cachedCameras, true);
+  // 如果当前是平铺网格模式 (auto / 2)，点击焦点时自动切换为 1+N 主从排版，突出主视角
+  if (currentGridMode === 'auto' || currentGridMode === 2) {
+    setGridMode('1n');
+  } else {
+    renderCamGrid(cachedCameras, true);
+  }
+  showToast(`已将 ${camId.toUpperCase()} 切换为主焦点监视视角`, 'info');
 }
 
 // ---- 网格切换 ----
