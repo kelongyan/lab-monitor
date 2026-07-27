@@ -9,15 +9,23 @@ from ultralytics import YOLO
 
 
 class PersonDetector:
-    def __init__(self, model_name: str = "yolov8n.pt", conf_thresh: float = 0.4, device: str = "cpu"):
+    def __init__(self, model_name: str = "yolov8n.pt", conf_thresh: float = 0.4, device: str = None):
+        import torch
+        if device is None:
+            self.device = "cuda" if torch.cuda.is_available() else "cpu"
+        else:
+            self.device = device
+
         self.model = YOLO(model_name)
         self.conf_thresh = conf_thresh
-        self.device = device
         self._lock = threading.Lock()
+
+        # 如果运行在 CUDA 显卡（如 RTX 3090）上，使用 FP16 自动半精度加速
+        self.use_fp16 = (self.device == "cuda" or (isinstance(self.device, str) and "cuda" in self.device))
 
         # 预热并提前触发模型 fuse，避免多线程并发 predict 时产生竞态条件
         dummy = np.zeros((64, 64, 3), dtype=np.uint8)
-        self.model.predict(dummy, verbose=False)
+        self.model.predict(dummy, device=self.device, verbose=False, half=self.use_fp16)
 
     def detect(self, frame: np.ndarray) -> list[list[float]]:
         """
@@ -30,6 +38,7 @@ class PersonDetector:
                 classes=[0],          # person only
                 conf=self.conf_thresh,
                 device=self.device,
+                half=self.use_fp16,
                 verbose=False,
             )
         detections = []

@@ -128,19 +128,22 @@ class ReIDExtractorOSNet:
         return feat / norm
 
 
-def build_reid_extractor(device: str = "cpu"):
+def build_reid_extractor(device: str = None):
     """
     ReID 提取器工厂函数：优先使用 OSNet（精度高），若依赖不可用则回退 ResNet50。
-    main.py 统一调用此函数，无需关心底层实现。
+    自动检测 GPU / CUDA 设备（如 RTX 3090）。
     """
+    if device is None:
+        device = "cuda" if torch.cuda.is_available() else "cpu"
+
     try:
         extractor = ReIDExtractorOSNet(device=device)
-        logger.info("已选用 ReIDExtractorOSNet（OSNet-x0.25, 512维）")
+        logger.info("已选用 ReIDExtractorOSNet（OSNet-x0.25, 512维, device=%s）", device)
         return extractor
     except Exception as e:
         logger.warning("OSNet 初始化失败（%s），回退到 ResNet50", e)
         extractor = ReIDExtractor(device=device)
-        logger.info("已选用 ReIDExtractor（ResNet50, 2048维）")
+        logger.info("已选用 ReIDExtractor（ResNet50, 2048维, device=%s）", device)
         return extractor
 
 

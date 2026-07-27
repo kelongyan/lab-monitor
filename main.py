@@ -68,10 +68,21 @@ def main(display: bool = False, web: bool = True, web_port: int = 8000) -> None:
         logger.error("没有可用的视频源，请先添加视频文件到 videos/ 目录")
         return
 
+    # ---- 自动检测 GPU 算力 (RTX 3090 / CUDA) ----
+    import torch
+    if torch.cuda.is_available():
+        gpu_name = torch.cuda.get_device_name(0)
+        gpu_mem = round(torch.cuda.get_device_properties(0).total_memory / (1024**3), 1)
+        device = "cuda"
+        logger.info("🚀 成功检测到 GPU 硬件加速: %s (%sGB 显存)，已自动激活 CUDA + FP16 加速！", gpu_name, gpu_mem)
+    else:
+        device = "cpu"
+        logger.info("ℹ️ 未检测到 CUDA 显卡，当前运行于 CPU 模式")
+
     # ---- 初始化共享组件 ----
     logger.info("加载模型中（首次运行会自动下载权重）...")
-    detector       = PersonDetector(model_name="yolov8n.pt", conf_thresh=0.4)
-    reid_extractor = build_reid_extractor(device="cpu")
+    detector       = PersonDetector(model_name="yolov8n.pt", conf_thresh=0.4, device=device)
+    reid_extractor = build_reid_extractor(device=device)
     identity_store = IdentityStore()
     topology       = CameraTopology(TOPO_CFG)
     frame_hub      = FrameHub()
