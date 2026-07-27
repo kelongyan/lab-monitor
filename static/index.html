@@ -10,21 +10,22 @@
 <link href="https://fonts.googleapis.com/css2?family=JetBrains+Mono:wght@400;500;700&family=Plus+Jakarta+Sans:wght@400;500;600;700;800&display=swap" rel="stylesheet">
 <style>
   :root {
-    --bg-base: #060913;
-    --bg-card: rgba(15, 23, 42, 0.75);
-    --bg-card-hover: rgba(30, 41, 59, 0.85);
+    --bg-base: #0b1120;
+    --bg-card: rgba(15, 23, 42, 0.85);
+    --bg-card-hover: rgba(30, 41, 59, 0.9);
     --border-card: rgba(255, 255, 255, 0.08);
-    --border-card-glow: rgba(56, 189, 248, 0.3);
+    --border-card-glow: rgba(2, 132, 199, 0.3);
     
-    --primary: #38bdf8;
-    --primary-glow: rgba(56, 189, 248, 0.25);
-    --success: #10b981;
-    --success-glow: rgba(16, 185, 129, 0.25);
-    --warning: #f59e0b;
-    --warning-glow: rgba(245, 158, 11, 0.25);
-    --danger: #ef4444;
-    --danger-glow: rgba(239, 68, 68, 0.35);
-    --purple: #a855f7;
+    --primary: #0284c7;
+    --primary-light: #38bdf8;
+    --primary-glow: rgba(2, 132, 199, 0.2);
+    --success: #059669;
+    --success-glow: rgba(5, 150, 105, 0.2);
+    --warning: #d97706;
+    --warning-glow: rgba(217, 119, 6, 0.2);
+    --danger: #dc2626;
+    --danger-glow: rgba(220, 38, 38, 0.25);
+    --purple: #7c3aed;
 
     --text-main: #f8fafc;
     --text-muted: #94a3b8;
@@ -42,9 +43,8 @@
     flex-direction: column;
     overflow: hidden;
     background-image: 
-      radial-gradient(circle at 15% 15%, rgba(56, 189, 248, 0.07) 0%, transparent 40%),
-      radial-gradient(circle at 85% 85%, rgba(168, 85, 247, 0.07) 0%, transparent 40%),
-      linear-gradient(to bottom, rgba(6, 9, 19, 0.95), rgba(6, 9, 19, 0.98));
+      radial-gradient(circle at 50% 0%, rgba(2, 132, 199, 0.08) 0%, transparent 60%),
+      linear-gradient(to bottom, rgba(11, 17, 32, 0.95), rgba(11, 17, 32, 0.99));
   }
 
   /* 顶部导航 Header */
@@ -1349,23 +1349,23 @@
   <div class="brand">
     <img src="/static/logo.png" class="brand-logo" alt="Logo">
     <div class="brand-title-group">
-      <h1>超算中心多镜头智能监控预警系统</h1>
+      <h1>国家超算中心多镜头智能监控预警系统</h1>
     </div>
-    <span class="brand-tag">LIVE COMMAND</span>
+    <span class="brand-tag">COMMAND CENTER</span>
   </div>
 
   <div class="header-actions">
     <button class="action-btn" id="sound-toggle-btn" onclick="toggleSound()">
-      <span id="sound-icon">🔇</span> <span id="sound-text">声音告警: 关闭</span>
+      <span id="sound-text">声音告警: 关闭</span>
     </button>
     <button class="action-btn" onclick="openHistoryExportModal()">
-      <span>📜</span> 历史导出
+      历史审计日志
     </button>
     <button class="action-btn" onclick="openTopologyModal()">
-      <span>🗺️</span> 拓扑地图
+      拓扑网络架构
     </button>
     <button class="action-btn" onclick="openIdentitySearchModal()">
-      <span>👤</span> 人员档案
+      人员档案数据库
     </button>
     <div class="time-display" id="sys-time">0000-00-00 00:00:00</div>
     <div class="ws-badge disconnected" id="ws-status">
@@ -1382,34 +1382,34 @@
     <!-- 顶部四格 Stat 统计栏 -->
     <div class="stats-grid">
       <div class="stat-card">
-        <div class="stat-icon-wrapper" style="background: rgba(56, 189, 248, 0.12); color: var(--primary);">📷</div>
+        <div class="stat-icon-wrapper" style="background: rgba(2, 132, 199, 0.12); color: var(--primary-light); font-size: 14px; font-weight: 800;">CH</div>
         <div class="stat-info">
-          <div class="stat-value" id="stat-cams" style="color: var(--primary);">0</div>
-          <div class="stat-title">在线摄像头</div>
+          <div class="stat-value" id="stat-cams" style="color: var(--primary-light);">0</div>
+          <div class="stat-title">在线监控通道</div>
         </div>
       </div>
 
       <div class="stat-card" style="cursor: pointer;" onclick="openIdentitySearchModal()">
-        <div class="stat-icon-wrapper" style="background: rgba(168, 85, 247, 0.12); color: var(--purple);">👤</div>
+        <div class="stat-icon-wrapper" style="background: rgba(124, 58, 237, 0.12); color: var(--purple); font-size: 14px; font-weight: 800;">ID</div>
         <div class="stat-info">
           <div class="stat-value" id="stat-ids" style="color: var(--purple);">0</div>
-          <div class="stat-title">ReID 登记人员 (查看)</div>
+          <div class="stat-title">已注册 ReID 身份 (点击查看)</div>
         </div>
       </div>
 
       <div class="stat-card">
-        <div class="stat-icon-wrapper" style="background: rgba(245, 158, 11, 0.12); color: var(--warning);">⚡</div>
+        <div class="stat-icon-wrapper" style="background: rgba(217, 119, 6, 0.12); color: var(--warning); font-size: 14px; font-weight: 800;">WRN</div>
         <div class="stat-info">
           <div class="stat-value" id="stat-warnings" style="color: var(--warning);">0</div>
-          <div class="stat-title">预预警监控</div>
+          <div class="stat-title">预预警跟踪事件</div>
         </div>
       </div>
 
       <div class="stat-card">
-        <div class="stat-icon-wrapper" style="background: rgba(239, 68, 68, 0.12); color: var(--danger);">🚨</div>
+        <div class="stat-icon-wrapper" style="background: rgba(220, 38, 38, 0.12); color: var(--danger); font-size: 14px; font-weight: 800;">ALT</div>
         <div class="stat-info">
           <div class="stat-value" id="stat-alerts" style="color: var(--danger);">0</div>
-          <div class="stat-title">累计触发告警</div>
+          <div class="stat-title">累计触发告警数</div>
         </div>
       </div>
     </div>
@@ -1417,27 +1417,27 @@
     <!-- ReID 检索精度与性能仪表盘 -->
     <div class="reid-metrics-bar">
       <div class="reid-bar-title">
-        <span>🎯 ReID 检索精度</span>
-        <span class="reid-bar-tag">OSNet v2.0</span>
+        <span>ReID 算法实时性能监控</span>
+        <span class="reid-bar-tag">OSNet Enterprise</span>
       </div>
       <div class="reid-metrics-group">
         <div class="reid-metric-item">
-          <div class="reid-metric-label"><span>🎯 Avg Top-1 相似度</span></div>
+          <div class="reid-metric-label"><span>Top-1 平均相似度</span></div>
           <div class="reid-metric-val"><span id="reid-top1-sim">--</span><span class="reid-metric-sub" id="reid-match-rate">(匹配率 --%)</span></div>
           <div class="reid-progress-bar"><div class="reid-progress-fill" id="reid-sim-bar"></div></div>
         </div>
         <div class="reid-metric-item">
-          <div class="reid-metric-label"><span>🛡️ Ratio 歧义拦截</span></div>
+          <div class="reid-metric-label"><span>Ratio 歧义匹配拦截</span></div>
           <div class="reid-metric-val" style="color: var(--warning);"><span id="reid-ratio-blocked">0</span> <span class="reid-metric-sub">次</span></div>
           <div class="reid-metric-sub" id="reid-margin-text">确信裕度: --</div>
         </div>
         <div class="reid-metric-item">
-          <div class="reid-metric-label"><span>⚡ 平均检索耗时</span></div>
+          <div class="reid-metric-label"><span>平均特征检索耗时</span></div>
           <div class="reid-metric-val" style="color: var(--success);"><span id="reid-latency">0.0</span> <span class="reid-metric-sub">ms</span></div>
           <div class="reid-metric-sub" id="reid-searches-text">总比对: 0 次</div>
         </div>
         <div class="reid-metric-item">
-          <div class="reid-metric-label"><span>👥 库容量与特征质量</span></div>
+          <div class="reid-metric-label"><span>全局特征库容量/质量</span></div>
           <div class="reid-metric-val" style="color: var(--purple);"><span id="reid-gallery-size">0</span> <span class="reid-metric-sub">人</span></div>
           <div class="reid-metric-sub" id="reid-quality-text">平均质量: --</div>
         </div>
@@ -1447,14 +1447,14 @@
     <!-- 视频画廊工具栏 -->
     <div class="cam-toolbar">
       <div class="cam-toolbar-title">
-        <span>📽️ 实时监控画廊</span>
+        <span>实时视频监控通道 (Live Streaming Channels)</span>
       </div>
       <div class="layout-modes">
-        <span style="font-size: 11px; color: var(--text-dim);">网格布局:</span>
+        <span style="font-size: 11px; color: var(--text-dim);">视图布局:</span>
         <button class="layout-mode-btn active" id="btn-grid-auto" onclick="setGridMode('auto')">自动</button>
-        <button class="layout-mode-btn" id="btn-grid-1" onclick="setGridMode(1)">🎬 影院 1x1</button>
-        <button class="layout-mode-btn" id="btn-grid-1n" onclick="setGridMode('1n')">📐 主从 1+N</button>
-        <button class="layout-mode-btn" id="btn-grid-2" onclick="setGridMode(2)">双列 2x2</button>
+        <button class="layout-mode-btn" id="btn-grid-1" onclick="setGridMode(1)">1x1 主视角</button>
+        <button class="layout-mode-btn" id="btn-grid-1n" onclick="setGridMode('1n')">1+N 主从视图</button>
+        <button class="layout-mode-btn" id="btn-grid-2" onclick="setGridMode(2)">2x2 双列</button>
       </div>
     </div>
 
@@ -1465,23 +1465,23 @@
   <!-- 右侧告警与拓扑面板 -->
   <div class="sidebar-panel">
     <div class="panel-header">
-      <h2>⚠️ 动态告警日志 <span class="alert-counter-badge" id="alert-badge">0</span></h2>
+      <h2>智能预警事件日志 <span class="alert-counter-badge" id="alert-badge">0</span></h2>
       <button class="clear-btn" onclick="clearAlerts()">清空日志</button>
     </div>
 
     <!-- 动态告警卡片列表 -->
     <div id="alert-list">
       <div class="empty-state" id="no-alert">
-        <div style="font-size: 28px; margin-bottom: 8px; opacity: 0.5;">✨</div>
-        目前无异常预警事件
+        <div style="font-size: 24px; margin-bottom: 8px; opacity: 0.4;">OK</div>
+        目前全网系统运行正常，无异常预警
       </div>
     </div>
 
     <!-- 通行时间自适应校准面板 -->
     <div class="calib-section">
       <div class="calib-title">
-        <span>📊 镜头间通行自适应校准</span>
-        <span style="font-size: 10px; color: var(--primary);">Phase 4 AI</span>
+        <span>跨镜头通行时间自适应校准</span>
+        <span style="font-size: 10px; color: var(--primary-light);">Phase 4 AI</span>
       </div>
       <div id="calib-content">
         <div class="empty-state" style="padding: 10px 0;">数据积累中（需 5 条记录生效）</div>
@@ -1497,7 +1497,7 @@
   <div class="modal-container">
     <div class="modal-header">
       <div class="modal-title">
-        <span>🚨</span> <span id="modal-alert-title">告警事件排查与详细分析</span>
+        <span id="modal-alert-title">告警事件排查与详细分析</span>
       </div>
       <button class="modal-close-btn" onclick="closeModal('alert-detail-modal')">✕</button>
     </div>
@@ -1514,7 +1514,7 @@
   <div class="modal-container">
     <div class="modal-header">
       <div class="modal-title">
-        <span>🗺️</span> <span id="modal-traj-title">跨镜头轨迹追踪链</span>
+        <span id="modal-traj-title">跨镜头轨迹追踪链</span>
       </div>
       <button class="modal-close-btn" onclick="closeModal('trajectory-modal')">✕</button>
     </div>
@@ -1531,7 +1531,7 @@
   <div class="modal-container">
     <div class="modal-header">
       <div class="modal-title">
-        <span>🗺️</span> <span>实验室摄像头拓扑结构与预计通行时延</span>
+        <span>摄像头拓扑网络与通行时延管理</span>
       </div>
       <button class="modal-close-btn" onclick="closeModal('topology-modal')">✕</button>
     </div>
@@ -1548,7 +1548,7 @@
   <div class="modal-container">
     <div class="modal-header">
       <div class="modal-title">
-        <span>📜</span> <span>历史告警检索与 CSV 报表导出</span>
+        <span>历史告警检索与 CSV 报表导出</span>
       </div>
       <button class="modal-close-btn" onclick="closeModal('history-modal')">✕</button>
     </div>
@@ -1565,7 +1565,7 @@
   <div class="modal-container">
     <div class="modal-header">
       <div class="modal-title">
-        <span>✏️</span> <span id="roi-modal-title">绘制与动态调整 ROI 电子围栏</span>
+        <span id="roi-modal-title">ROI 电子围栏画板配置</span>
       </div>
       <button class="modal-close-btn" onclick="closeModal('roi-modal')">✕</button>
     </div>
@@ -1573,8 +1573,8 @@
       <div style="font-size: 12px; color: var(--text-muted); display: flex; align-items: center; justify-content: space-between; margin-bottom: 6px;">
         <div style="display: flex; align-items: center; gap: 8px;">
           <span>绘制模式:</span>
-          <button class="layout-mode-btn active" id="roi-mode-freehand" onclick="setRoiDrawMode('freehand')">🎨 鼠标按住涂鸦/画线</button>
-          <button class="layout-mode-btn" id="roi-mode-click" onclick="setRoiDrawMode('click')">📍 逐点点击标记</button>
+          <button class="layout-mode-btn active" id="roi-mode-freehand" onclick="setRoiDrawMode('freehand')">自由画线模式</button>
+          <button class="layout-mode-btn" id="roi-mode-click" onclick="setRoiDrawMode('click')">逐点标记模式</button>
         </div>
         <button class="clear-btn" onclick="clearRoiPoints()">重置围栏</button>
       </div>
@@ -1590,8 +1590,8 @@
       </div>
 
       <div style="display: flex; justify-content: space-between; margin-top: 6px;">
-        <button class="action-btn" style="color: var(--danger); border-color: rgba(239, 68, 68, 0.3);" onclick="removeRoi()">🗑️ 清除该摄像头围栏</button>
-        <button class="action-btn active" onclick="saveRoiPoints()">💾 保存并立即生效</button>
+        <button class="action-btn" style="color: var(--danger); border-color: rgba(220, 38, 38, 0.3);" onclick="removeRoi()">清除围栏配置</button>
+        <button class="action-btn active" onclick="saveRoiPoints()">保存围栏配置</button>
       </div>
     </div>
   </div>
@@ -1703,8 +1703,8 @@ function buildSingleCamCardHTML(cam, isFocus = false) {
           <span class="cam-name">${camIdHtml.toUpperCase()}</span>
         </div>
         <div class="cam-controls">
-          <button class="cam-control-btn" title="手动画围栏" onclick="openRoiDrawModal('${camIdAttr}')">✏️ 围栏</button>
-          <button class="cam-control-btn" title="焦点主视角" onclick="setFocusCamera('${camIdAttr}')">🔍 焦点</button>
+          <button class="cam-control-btn" title="手动画围栏" onclick="openRoiDrawModal('${camIdAttr}')">ROI 围栏</button>
+          <button class="cam-control-btn" title="焦点主视角" onclick="setFocusCamera('${camIdAttr}')">焦点</button>
         </div>
         <div class="cam-badges">
           ${cam.reconnect_count > 0 ? `<div class="rtsp-diag-badge" id="reconn-${camIdHtml}">RTSP 重连: ${escapeHtml(cam.reconnect_count)}次</div>` : ''}
@@ -1731,8 +1731,6 @@ function renderCamGrid(cameras, forceRefresh = false) {
   }
 
   const newIds = cameras.map(c => c.camera_id);
-  // P2: 仅在摄像头列表发生变化或强制刷新时重建 DOM
-  // 不重建时调用 updateCamStatus 更新状态，避免每3秒断开 MJPEG 连接
   if (!forceRefresh && JSON.stringify(newIds) === JSON.stringify(camIds)) {
     updateCamStatus(cameras);
     document.getElementById('stat-cams').textContent = cameras.filter(c => c.is_online).length;
@@ -1744,7 +1742,6 @@ function renderCamGrid(cameras, forceRefresh = false) {
   grid.removeAttribute('style');
 
   if (currentGridMode === 1) {
-    // 🎬 1x1 影院主焦模式
     grid.style.display = 'flex';
     grid.style.flexDirection = 'column';
 
@@ -1754,11 +1751,9 @@ function renderCamGrid(cameras, forceRefresh = false) {
     
     let html = buildSingleCamCardHTML(focusCam, true);
 
-    // 底部 Quick Switcher Carousel
     html += `<div class="cam-carousel-bar">`;
     cameras.forEach(c => {
       const activeCls = c.camera_id === focusCam.camera_id ? 'active' : '';
-      // P0-1: camera_id 需在 onclick 属性和 HTML 内容中均转义
       const cIdAttr = escapeAttr(c.camera_id);
       const cIdHtml = escapeHtml(c.camera_id);
       html += `
@@ -1774,19 +1769,16 @@ function renderCamGrid(cameras, forceRefresh = false) {
     grid.appendChild(container);
 
   } else if (currentGridMode === '1n') {
-    // 📐 1+N 主从排版模式
     grid.style.display = 'grid';
     grid.style.gridTemplateColumns = '2.3fr 1fr';
 
     const focusCam = cameras.find(c => c.camera_id === currentFocusCamId) || cameras[0];
     const sideCams = cameras.filter(c => c.camera_id !== focusCam.camera_id);
 
-    // 左侧主焦点
     const leftBox = document.createElement('div');
     leftBox.innerHTML = buildSingleCamCardHTML(focusCam, true);
     grid.appendChild(leftBox.firstElementChild);
 
-    // 右侧小镜头列表
     const sideBox = document.createElement('div');
     sideBox.className = 'layout-1n-side';
     sideCams.forEach(c => {
@@ -1799,7 +1791,6 @@ function renderCamGrid(cameras, forceRefresh = false) {
     grid.appendChild(sideBox);
 
   } else {
-    // 自动 & 2x2 网格模式
     grid.style.display = 'grid';
     if (currentGridMode === 'auto') {
       const cols = cameras.length <= 2 ? 2 : cameras.length <= 4 ? 2 : 3;
@@ -1849,16 +1840,14 @@ function addAlert(alert) {
 
   const timeStr = new Date(alert.timestamp * 1000).toLocaleTimeString('zh-CN');
   const stage = alert.stage || 'ALERT';
-  const icon = isIntrusion ? '🚨' : (stage === 'WARNING' ? '⚡' : '⚠️');
   const card = document.createElement('div');
 
   const alertClass = isIntrusion ? 'INTRUSION' : (stage === 'WARNING' ? 'WARNING' : alert.risk_level);
   card.className = `alert-card ${alertClass}`;
   card.onclick = () => openAlertDetailModal(alert);
 
-  const titleText = isIntrusion ? '🚨 ROI 危险区域非法闯入!' : (stage === 'WARNING' ? '预预警: 路径超时风险' : '异常事件: 目标超时/遗失');
+  const titleText = isIntrusion ? 'ROI 区域非法越界入侵' : (stage === 'WARNING' ? '路径通行超时预预警' : '目标通行超时离散');
 
-  // P0-1: 所有服务器数据字段用 escapeHtml 转义；onclick 内的 ID 用 escapeAttr
   const gidHtml = escapeHtml(alert.global_id);
   const gidAttr = escapeAttr(alert.global_id);
   const riskHtml = escapeHtml(alert.risk_level);
@@ -1869,7 +1858,6 @@ function addAlert(alert) {
   card.innerHTML = `
     <div class="alert-card-header">
       <div class="alert-type-title">
-        <span>${icon}</span>
         <span>${titleText}</span>
       </div>
       <div class="alert-time-tag">${timeStr}</div>
@@ -2240,7 +2228,7 @@ async function openTopologyModal() {
           <!-- 节点背景圆 -->
           <circle r="26" fill="rgba(15, 23, 42, 0.95)" stroke="${statusColor}" stroke-width="2" box-shadow="0 0 16px ${statusColor}"/>
           <!-- 摄像头 Icon & 标签 -->
-          <text x="0" y="-4" text-anchor="middle" font-size="14">📷</text>
+          <text x="0" y="-4" text-anchor="middle" fill="#38bdf8" font-size="10" font-family="JetBrains Mono" font-weight="800">CAM</text>
           <text x="0" y="12" text-anchor="middle" fill="#f8fafc" font-size="11" font-family="JetBrains Mono" font-weight="800">${id.toUpperCase()}</text>
         </g>
       `;
@@ -2262,10 +2250,10 @@ async function openTopologyModal() {
       </style>
       
       <div style="display: flex; align-items: center; justify-content: space-between; font-size: 12px; color: var(--text-muted); margin-bottom: 8px;">
-        <span>🌐 <b>空间拓扑感知网络</b> (点击节点图标调出摄像头监视流)</span>
+        <span><b>空间拓扑感知网络</b> (点击节点图标调出摄像头监视流)</span>
         <span style="display: flex; gap: 12px; font-size: 11px;">
-          <span>🟢 在线节点</span>
-          <span>🔵 动态通道流向</span>
+          <span style="color: var(--success);">在线节点</span>
+          <span style="color: var(--primary-light);">动态通道流向</span>
         </span>
       </div>
 
@@ -2293,11 +2281,11 @@ async function openTopologyModal() {
         </svg>
       </div>
 
-      <!-- 🛠️ 拓扑在线参数编辑表格 -->
+      <!-- 拓扑在线参数编辑表格 -->
       <div style="margin-top: 14px; border-top: 1px solid var(--border-card); padding-top: 10px;">
         <div style="display: flex; align-items: center; justify-content: space-between; margin-bottom: 8px;">
-          <span style="font-size: 12px; font-weight: 700; color: var(--text-main);">🛠️ 拓扑通道与期望通行秒数在线管理</span>
-          <button class="action-btn active" onclick="saveTopologyConfig()" style="box-shadow: 0 0 14px var(--success-glow);">💾 保存修改并实时生效</button>
+          <span style="font-size: 12px; font-weight: 700; color: var(--text-main);">拓扑通道与期望通行秒数在线管理</span>
+          <button class="action-btn active" onclick="saveTopologyConfig()">保存修改并实时生效</button>
         </div>
         <div class="tech-topo-table-wrap">
           <table class="tech-topo-table">
@@ -2329,7 +2317,7 @@ async function openTopologyModal() {
                       <button class="tech-num-btn" type="button" onclick="stepNumInput(this, 5)">+</button>
                     </div>
                   </td>
-                  <td><button class="clear-btn" type="button" onclick="this.closest('tr').remove()" style="color: var(--danger);">🗑️ 删除</button></td>
+                  <td><button class="clear-btn" type="button" onclick="this.closest('tr').remove()" style="color: var(--danger);">删除</button></td>
                 </tr>
               `).join('')}
             </tbody>
