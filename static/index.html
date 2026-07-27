@@ -69,32 +69,33 @@
   .brand-logos {
     display: flex;
     align-items: center;
-    gap: 10px;
-    background: rgba(255, 255, 255, 0.05);
-    padding: 5px 12px;
+    gap: 12px;
+    background: #ffffff;
+    padding: 5px 14px;
     border-radius: 10px;
-    border: 1px solid var(--border-card);
-    backdrop-filter: blur(8px);
+    border: 1px solid rgba(255, 255, 255, 0.9);
+    box-shadow: 0 0 16px rgba(56, 189, 248, 0.35);
     transition: all 0.3s ease;
   }
 
   .brand-logos:hover {
-    border-color: var(--border-card-glow);
-    box-shadow: 0 0 12px var(--primary-glow);
+    box-shadow: 0 0 22px rgba(56, 189, 248, 0.55);
+    transform: translateY(-1px);
   }
 
   .header-logo {
-    height: 26px;
+    height: 35px;
     width: auto;
     object-fit: contain;
-    filter: drop-shadow(0 2px 4px rgba(0, 0, 0, 0.4));
+    display: block;
   }
 
   .logo-divider {
     width: 1px;
-    height: 16px;
-    background: rgba(255, 255, 255, 0.2);
+    height: 22px;
+    background: rgba(0, 0, 0, 0.18);
   }
+
 
 
   .brand-icon {
