@@ -1,0 +1,898 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>超算中心多镜头智能监控预警平台 - Command Center</title>
+<!-- 引入 Google Fonts 高科技字体 -->
+<link rel="preconnect" href="https://fonts.googleapis.com">
+<link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+<link href="https://fonts.googleapis.com/css2?family=JetBrains+Mono:wght@400;500;700&family=Plus+Jakarta+Sans:wght@400;500;600;700;800&display=swap" rel="stylesheet">
+<style>
+  :root {
+    --bg-base: #060913;
+    --bg-card: rgba(15, 23, 42, 0.75);
+    --bg-card-hover: rgba(30, 41, 59, 0.85);
+    --border-card: rgba(255, 255, 255, 0.08);
+    --border-card-glow: rgba(56, 189, 248, 0.3);
+    
+    --primary: #38bdf8;
+    --primary-glow: rgba(56, 189, 248, 0.25);
+    --success: #10b981;
+    --success-glow: rgba(16, 185, 129, 0.25);
+    --warning: #f59e0b;
+    --warning-glow: rgba(245, 158, 11, 0.25);
+    --danger: #ef4444;
+    --danger-glow: rgba(239, 68, 68, 0.35);
+    --purple: #a855f7;
+
+    --text-main: #f8fafc;
+    --text-muted: #94a3b8;
+    --text-dim: #64748b;
+  }
+
+  * { box-sizing: border-box; margin: 0; padding: 0; }
+  
+  body {
+    background: var(--bg-base);
+    color: var(--text-main);
+    font-family: 'Plus Jakarta Sans', -apple-system, BlinkMacSystemFont, sans-serif;
+    height: 100vh;
+    display: flex;
+    flex-direction: column;
+    overflow: hidden;
+    background-image: 
+      radial-gradient(circle at 15% 15%, rgba(56, 189, 248, 0.07) 0%, transparent 40%),
+      radial-gradient(circle at 85% 85%, rgba(168, 85, 247, 0.07) 0%, transparent 40%),
+      linear-gradient(to bottom, rgba(6, 9, 19, 0.95), rgba(6, 9, 19, 0.98));
+  }
+
+  /* 顶部导航 Header */
+  header {
+    height: 64px;
+    background: rgba(11, 17, 32, 0.85);
+    backdrop-filter: blur(16px);
+    border-bottom: 1px solid var(--border-card);
+    padding: 0 24px;
+    display: flex;
+    align-items: center;
+    justify-content: space-between;
+    z-index: 100;
+  }
+
+  .brand {
+    display: flex;
+    align-items: center;
+    gap: 14px;
+  }
+
+  .brand-icon {
+    width: 36px;
+    height: 36px;
+    background: linear-gradient(135deg, #0284c7, #7e22ce);
+    border-radius: 10px;
+    display: flex;
+    align-items: center;
+    justify-content: center;
+    font-size: 20px;
+    box-shadow: 0 0 16px var(--primary-glow);
+    position: relative;
+  }
+
+  .brand-title-group h1 {
+    font-size: 17px;
+    font-weight: 700;
+    letter-spacing: 0.5px;
+    background: linear-gradient(to right, #ffffff, #94a3b8);
+    -webkit-background-clip: text;
+    -webkit-text-fill-color: transparent;
+  }
+
+  .brand-tag {
+    font-size: 10px;
+    font-weight: 700;
+    color: var(--primary);
+    background: rgba(56, 189, 248, 0.12);
+    border: 1px solid rgba(56, 189, 248, 0.3);
+    padding: 2px 8px;
+    border-radius: 20px;
+    letter-spacing: 1px;
+  }
+
+  .header-actions {
+    display: flex;
+    align-items: center;
+    gap: 16px;
+  }
+
+  .time-display {
+    font-family: 'JetBrains Mono', monospace;
+    font-size: 14px;
+    font-weight: 500;
+    color: var(--text-muted);
+    background: rgba(15, 23, 42, 0.6);
+    padding: 6px 14px;
+    border-radius: 8px;
+    border: 1px solid var(--border-card);
+  }
+
+  .ws-badge {
+    font-size: 12px;
+    font-weight: 600;
+    padding: 6px 14px;
+    border-radius: 20px;
+    display: flex;
+    align-items: center;
+    gap: 8px;
+    border: 1px solid transparent;
+    transition: all 0.3s ease;
+  }
+
+  .ws-badge.connected {
+    background: rgba(16, 185, 129, 0.12);
+    color: var(--success);
+    border-color: rgba(16, 185, 129, 0.3);
+  }
+
+  .ws-badge.disconnected {
+    background: rgba(239, 68, 68, 0.12);
+    color: var(--danger);
+    border-color: rgba(239, 68, 68, 0.3);
+  }
+
+  .pulse-dot {
+    width: 8px;
+    height: 8px;
+    border-radius: 50%;
+    position: relative;
+  }
+
+  .ws-badge.connected .pulse-dot { background: var(--success); }
+  .ws-badge.disconnected .pulse-dot { background: var(--danger); }
+
+  .ws-badge.connected .pulse-dot::after {
+    content: '';
+    position: absolute;
+    top: -2px; left: -2px; right: -2px; bottom: -2px;
+    border-radius: 50%;
+    border: 2px solid var(--success);
+    animation: pulse 2s infinite;
+  }
+
+  @keyframes pulse {
+    0% { transform: scale(1); opacity: 1; }
+    100% { transform: scale(2.5); opacity: 0; }
+  }
+
+  /* 主主体 Layout */
+  .layout {
+    display: flex;
+    flex: 1;
+    overflow: hidden;
+    padding: 16px;
+    gap: 16px;
+  }
+
+  /* 左侧视频流监控区域 */
+  .main-content {
+    flex: 1;
+    display: flex;
+    flex-direction: column;
+    gap: 16px;
+    overflow: hidden;
+  }
+
+  /* 顶部状态 Stats Grid */
+  .stats-grid {
+    display: grid;
+    grid-template-columns: repeat(4, 1fr);
+    gap: 14px;
+  }
+
+  .stat-card {
+    background: var(--bg-card);
+    backdrop-filter: blur(12px);
+    border: 1px solid var(--border-card);
+    border-radius: 12px;
+    padding: 14px 18px;
+    display: flex;
+    align-items: center;
+    gap: 16px;
+    transition: all 0.25s ease;
+  }
+
+  .stat-card:hover {
+    border-color: var(--border-card-glow);
+    transform: translateY(-2px);
+    box-shadow: 0 8px 24px rgba(0, 0, 0, 0.4);
+  }
+
+  .stat-icon-wrapper {
+    width: 44px;
+    height: 44px;
+    border-radius: 10px;
+    display: flex;
+    align-items: center;
+    justify-content: center;
+    font-size: 20px;
+  }
+
+  .stat-info .stat-value {
+    font-family: 'JetBrains Mono', monospace;
+    font-size: 24px;
+    font-weight: 700;
+    line-height: 1.1;
+  }
+
+  .stat-info .stat-title {
+    font-size: 12px;
+    color: var(--text-muted);
+    margin-top: 4px;
+    font-weight: 500;
+  }
+
+  /* 视频监控画廊 Grid */
+  #cam-grid {
+    flex: 1;
+    display: grid;
+    gap: 14px;
+    overflow-y: auto;
+    padding-right: 4px;
+  }
+
+  #cam-grid::-webkit-scrollbar {
+    width: 6px;
+  }
+  #cam-grid::-webkit-scrollbar-thumb {
+    background: rgba(255, 255, 255, 0.15);
+    border-radius: 4px;
+  }
+
+  .cam-card {
+    background: var(--bg-card);
+    backdrop-filter: blur(12px);
+    border: 1px solid var(--border-card);
+    border-radius: 12px;
+    overflow: hidden;
+    display: flex;
+    flex-direction: column;
+    position: relative;
+    transition: all 0.3s cubic-bezier(0.4, 0, 0.2, 1);
+  }
+
+  .cam-card:hover {
+    border-color: var(--primary);
+    box-shadow: 0 0 20px var(--primary-glow);
+  }
+
+  /* HUD 科技感四角对角线 */
+  .cam-card::before, .cam-card::after {
+    content: '';
+    position: absolute;
+    width: 10px;
+    height: 10px;
+    pointer-events: none;
+    z-index: 10;
+  }
+  .cam-card::before {
+    top: 0; left: 0;
+    border-top: 2px solid var(--primary);
+    border-left: 2px solid var(--primary);
+  }
+  .cam-card::after {
+    bottom: 0; right: 0;
+    border-bottom: 2px solid var(--primary);
+    border-right: 2px solid var(--primary);
+  }
+
+  .cam-header {
+    padding: 10px 16px;
+    background: rgba(15, 23, 42, 0.9);
+    border-bottom: 1px solid var(--border-card);
+    display: flex;
+    align-items: center;
+    justify-content: space-between;
+  }
+
+  .cam-title-box {
+    display: flex;
+    align-items: center;
+    gap: 10px;
+  }
+
+  .cam-status-dot {
+    width: 8px;
+    height: 8px;
+    border-radius: 50%;
+    background: var(--success);
+    box-shadow: 0 0 8px var(--success);
+  }
+
+  .cam-status-dot.offline {
+    background: var(--danger);
+    box-shadow: 0 0 8px var(--danger);
+  }
+
+  .cam-name {
+    font-size: 13px;
+    font-weight: 700;
+    letter-spacing: 0.5px;
+    color: var(--text-main);
+  }
+
+  .cam-badges {
+    display: flex;
+    align-items: center;
+    gap: 8px;
+  }
+
+  .cam-rec-badge {
+    font-size: 10px;
+    font-weight: 700;
+    color: var(--danger);
+    background: rgba(239, 68, 68, 0.12);
+    border: 1px solid rgba(239, 68, 68, 0.3);
+    padding: 2px 6px;
+    border-radius: 4px;
+    display: flex;
+    align-items: center;
+    gap: 4px;
+  }
+
+  .rec-circle {
+    width: 5px;
+    height: 5px;
+    border-radius: 50%;
+    background: var(--danger);
+    animation: blink 1.2s infinite;
+  }
+
+  @keyframes blink { 50% { opacity: 0.2; } }
+
+  .cam-fps-badge {
+    font-family: 'JetBrains Mono', monospace;
+    font-size: 11px;
+    color: var(--primary);
+    background: rgba(56, 189, 248, 0.1);
+    padding: 2px 8px;
+    border-radius: 4px;
+  }
+
+  .cam-view {
+    position: relative;
+    width: 100%;
+    flex: 1;
+    background: #000;
+    min-height: 220px;
+    display: flex;
+    align-items: center;
+    justify-content: center;
+    overflow: hidden;
+  }
+
+  .cam-view img {
+    width: 100%;
+    height: 100%;
+    object-fit: cover;
+    display: block;
+  }
+
+  /* 右侧边栏 Sidebar Panel */
+  .sidebar-panel {
+    width: 380px;
+    height: 100%;
+    max-height: 100%;
+    background: var(--bg-card);
+    backdrop-filter: blur(16px);
+    border: 1px solid var(--border-card);
+    border-radius: 16px;
+    display: flex;
+    flex-direction: column;
+    overflow: hidden;
+  }
+
+  .panel-header {
+    padding: 14px 18px;
+    background: rgba(15, 23, 42, 0.85);
+    border-bottom: 1px solid var(--border-card);
+    display: flex;
+    align-items: center;
+    justify-content: space-between;
+    flex-shrink: 0;
+  }
+
+  .panel-header h2 {
+    font-size: 14px;
+    font-weight: 700;
+    display: flex;
+    align-items: center;
+    gap: 10px;
+  }
+
+  .clear-btn {
+    font-size: 11px;
+    color: var(--text-dim);
+    background: rgba(255, 255, 255, 0.05);
+    border: 1px solid var(--border-card);
+    padding: 3px 8px;
+    border-radius: 6px;
+    cursor: pointer;
+    transition: all 0.2s ease;
+  }
+
+  .clear-btn:hover {
+    color: var(--text-main);
+    background: rgba(255, 255, 255, 0.12);
+  }
+
+  .alert-counter-badge {
+    background: linear-gradient(135deg, #ef4444, #b91c1c);
+    color: white;
+    font-family: 'JetBrains Mono', monospace;
+    font-size: 11px;
+    font-weight: 700;
+    padding: 2px 8px;
+    border-radius: 12px;
+    box-shadow: 0 0 10px var(--danger-glow);
+  }
+
+  /* 告警列表容器 (防压缩核心: min-height: 0) */
+  #alert-list {
+    flex: 1;
+    min-height: 0;
+    overflow-y: auto;
+    overflow-x: hidden;
+    padding: 14px;
+    display: flex;
+    flex-direction: column;
+    gap: 10px;
+  }
+
+  #alert-list::-webkit-scrollbar {
+    width: 5px;
+  }
+  #alert-list::-webkit-scrollbar-thumb {
+    background: rgba(255, 255, 255, 0.15);
+    border-radius: 4px;
+  }
+
+  /* 告警卡片样式 (防压缩核心: flex-shrink: 0) */
+  .alert-card {
+    flex-shrink: 0;
+    min-height: fit-content;
+    background: rgba(30, 41, 59, 0.65);
+    border: 1px solid var(--border-card);
+    border-radius: 10px;
+    padding: 10px 12px;
+    position: relative;
+    overflow: hidden;
+    animation: slideIn 0.3s cubic-bezier(0.16, 1, 0.3, 1);
+    transition: all 0.2s ease;
+  }
+
+  .alert-card:hover {
+    transform: translateX(-2px);
+    background: rgba(30, 41, 59, 0.9);
+    border-color: rgba(255, 255, 255, 0.15);
+  }
+
+  .alert-card::before {
+    content: '';
+    position: absolute;
+    left: 0; top: 0; bottom: 0;
+    width: 4px;
+  }
+
+  .alert-card.HIGH::before { background: var(--danger); box-shadow: 0 0 10px var(--danger); }
+  .alert-card.MEDIUM::before { background: var(--warning); box-shadow: 0 0 10px var(--warning); }
+  .alert-card.LOW::before { background: var(--success); box-shadow: 0 0 10px var(--success); }
+  .alert-card.WARNING::before { background: var(--purple); box-shadow: 0 0 10px var(--purple); }
+
+  .alert-card-header {
+    display: flex;
+    align-items: center;
+    justify-content: space-between;
+    margin-bottom: 6px;
+  }
+
+  .alert-type-title {
+    font-size: 12px;
+    font-weight: 700;
+    display: flex;
+    align-items: center;
+    gap: 6px;
+    line-height: 1.2;
+  }
+
+  .alert-card.HIGH .alert-type-title { color: #fca5a5; }
+  .alert-card.MEDIUM .alert-type-title { color: #fde047; }
+  .alert-card.LOW .alert-type-title { color: #6ee7b7; }
+  .alert-card.WARNING .alert-type-title { color: #c084fc; }
+
+  .alert-time-tag {
+    font-family: 'JetBrains Mono', monospace;
+    font-size: 10px;
+    color: var(--text-dim);
+    flex-shrink: 0;
+  }
+
+  .alert-body-grid {
+    display: grid;
+    grid-template-columns: 1fr 1fr;
+    gap: 4px 10px;
+    font-size: 11px;
+    background: rgba(15, 23, 42, 0.45);
+    padding: 6px 8px;
+    border-radius: 6px;
+    margin-top: 4px;
+    line-height: 1.3;
+  }
+
+  .alert-item {
+    color: var(--text-muted);
+    white-space: nowrap;
+    overflow: hidden;
+    text-overflow: ellipsis;
+  }
+
+  .alert-item val {
+    color: var(--text-main);
+    font-weight: 600;
+    font-family: 'JetBrains Mono', monospace;
+  }
+
+  @keyframes slideIn {
+    from { opacity: 0; transform: translateY(-8px); }
+    to { opacity: 1; transform: translateY(0); }
+  }
+
+  /* 校准分析区域 Calib Section */
+  .calib-section {
+    flex-shrink: 0;
+    background: rgba(15, 23, 42, 0.75);
+    border-top: 1px solid var(--border-card);
+    padding: 12px 16px;
+    max-height: 170px;
+    display: flex;
+    flex-direction: column;
+  }
+
+  .calib-title {
+    font-size: 12px;
+    font-weight: 700;
+    color: var(--text-muted);
+    margin-bottom: 10px;
+    display: flex;
+    align-items: center;
+    justify-content: space-between;
+  }
+
+  #calib-content {
+    overflow-y: auto;
+    display: flex;
+    flex-direction: column;
+    gap: 6px;
+  }
+
+  .calib-row {
+    display: flex;
+    align-items: center;
+    justify-content: space-between;
+    background: rgba(30, 41, 59, 0.4);
+    padding: 6px 10px;
+    border-radius: 6px;
+    font-size: 11px;
+  }
+
+  .calib-path {
+    font-weight: 600;
+    color: var(--primary);
+    font-family: 'JetBrains Mono', monospace;
+  }
+
+  .calib-stats-val {
+    color: var(--text-muted);
+    font-size: 10px;
+  }
+
+  .calib-stats-val highlight {
+    color: var(--text-main);
+    font-weight: 600;
+  }
+
+  .empty-state {
+    text-align: center;
+    padding: 30px 10px;
+    color: var(--text-dim);
+    font-size: 12px;
+  }
+</style>
+</head>
+<body>
+
+<!-- 头部 Header -->
+<header>
+  <div class="brand">
+    <div class="brand-icon">🛡️</div>
+    <div class="brand-title-group">
+      <h1>超算中心多镜头智能监控预警系统</h1>
+    </div>
+    <span class="brand-tag">LIVE COMMAND</span>
+  </div>
+
+  <div class="header-actions">
+    <div class="time-display" id="sys-time">0000-00-00 00:00:00</div>
+    <div class="ws-badge disconnected" id="ws-status">
+      <div class="pulse-dot"></div>
+      <span>WS 连线中...</span>
+    </div>
+  </div>
+</header>
+
+<!-- 核心 Layout -->
+<div class="layout">
+  <!-- 左侧主监控区 -->
+  <div class="main-content">
+    <!-- 顶部四格 Stat 统计栏 -->
+    <div class="stats-grid">
+      <div class="stat-card">
+        <div class="stat-icon-wrapper" style="background: rgba(56, 189, 248, 0.12); color: var(--primary);">📷</div>
+        <div class="stat-info">
+          <div class="stat-value" id="stat-cams" style="color: var(--primary);">0</div>
+          <div class="stat-title">在线摄像头</div>
+        </div>
+      </div>
+
+      <div class="stat-card">
+        <div class="stat-icon-wrapper" style="background: rgba(168, 85, 247, 0.12); color: var(--purple);">👤</div>
+        <div class="stat-info">
+          <div class="stat-value" id="stat-ids" style="color: var(--purple);">0</div>
+          <div class="stat-title">ReID 登记人员</div>
+        </div>
+      </div>
+
+      <div class="stat-card">
+        <div class="stat-icon-wrapper" style="background: rgba(245, 158, 11, 0.12); color: var(--warning);">⚡</div>
+        <div class="stat-info">
+          <div class="stat-value" id="stat-warnings" style="color: var(--warning);">0</div>
+          <div class="stat-title">预预警监控</div>
+        </div>
+      </div>
+
+      <div class="stat-card">
+        <div class="stat-icon-wrapper" style="background: rgba(239, 68, 68, 0.12); color: var(--danger);">🚨</div>
+        <div class="stat-info">
+          <div class="stat-value" id="stat-alerts" style="color: var(--danger);">0</div>
+          <div class="stat-title">累计触发告警</div>
+        </div>
+      </div>
+    </div>
+
+    <!-- 视频流监控 Grid -->
+    <div id="cam-grid"></div>
+  </div>
+
+  <!-- 右侧告警与拓扑面板 -->
+  <div class="sidebar-panel">
+    <div class="panel-header">
+      <h2>⚠️ 动态告警日志 <span class="alert-counter-badge" id="alert-badge">0</span></h2>
+      <button class="clear-btn" onclick="clearAlerts()">清空日志</button>
+    </div>
+
+    <!-- 动态告警卡片列表 -->
+    <div id="alert-list">
+      <div class="empty-state" id="no-alert">
+        <div style="font-size: 28px; margin-bottom: 8px; opacity: 0.5;">✨</div>
+        目前无异常预警事件
+      </div>
+    </div>
+
+    <!-- 通行时间自适应校准面板 -->
+    <div class="calib-section">
+      <div class="calib-title">
+        <span>📊 镜头间通行自适应校准</span>
+        <span style="font-size: 10px; color: var(--primary);">Phase 4 AI</span>
+      </div>
+      <div id="calib-content">
+        <div class="empty-state" style="padding: 10px 0;">数据积累中（需 5 条记录生效）</div>
+      </div>
+    </div>
+  </div>
+</div>
+
+<script>
+const BASE = window.location.origin;
+let totalAlerts = 0;
+let totalWarnings = 0;
+let ws = null;
+let camIds = [];
+
+// ---- 系统实时时钟 ----
+function updateClock() {
+  const now = new Date();
+  document.getElementById('sys-time').textContent = now.getFullYear() + '-' +
+    String(now.getMonth() + 1).padStart(2, '0') + '-' +
+    String(now.getDate()).padStart(2, '0') + ' ' +
+    String(now.getHours()).padStart(2, '0') + ':' +
+    String(now.getMinutes()).padStart(2, '0') + ':' +
+    String(now.getSeconds()).padStart(2, '0');
+}
+setInterval(updateClock, 1000);
+updateClock();
+
+// ---- 摄像头网格渲染 ----
+function renderCamGrid(cameras) {
+  const grid = document.getElementById('cam-grid');
+  const cols = cameras.length <= 2 ? 2 : cameras.length <= 4 ? 2 : 3;
+  grid.style.gridTemplateColumns = `repeat(${cols}, 1fr)`;
+  
+  const newIds = cameras.map(c => c.camera_id);
+  if (JSON.stringify(newIds) === JSON.stringify(camIds)) return;
+  camIds = newIds;
+  
+  grid.innerHTML = '';
+  cameras.forEach(cam => {
+    const card = document.createElement('div');
+    card.className = 'cam-card';
+    card.id = `card-${cam.camera_id}`;
+    card.innerHTML = `
+      <div class="cam-header">
+        <div class="cam-title-box">
+          <div class="cam-status-dot ${cam.is_online ? '' : 'offline'}" id="dot-${cam.camera_id}"></div>
+          <span class="cam-name">${cam.camera_id.toUpperCase()}</span>
+        </div>
+        <div class="cam-badges">
+          <div class="cam-rec-badge"><div class="rec-circle"></div>REC</div>
+          <div class="cam-fps-badge" id="fps-${cam.camera_id}">${cam.fps} FPS</div>
+        </div>
+      </div>
+      <div class="cam-view">
+        <img src="${BASE}/stream/${cam.camera_id}" alt="${cam.camera_id}" loading="lazy">
+      </div>
+    `;
+    grid.appendChild(card);
+  });
+  document.getElementById('stat-cams').textContent = cameras.length;
+}
+
+function updateCamStatus(cameras) {
+  cameras.forEach(cam => {
+    const dot = document.getElementById(`dot-${cam.camera_id}`);
+    const fps = document.getElementById(`fps-${cam.camera_id}`);
+    if (dot) dot.className = 'cam-status-dot' + (cam.is_online ? '' : ' offline');
+    if (fps) fps.textContent = cam.fps + ' FPS';
+  });
+}
+
+// ---- 告警渲染 ----
+function addAlert(alert) {
+  const list = document.getElementById('alert-list');
+  const noAlert = document.getElementById('no-alert');
+  if (noAlert) noAlert.remove();
+
+  const isWarning = alert.stage === 'WARNING';
+  if (isWarning) {
+    totalWarnings++;
+    document.getElementById('stat-warnings').textContent = totalWarnings;
+  } else {
+    totalAlerts++;
+    document.getElementById('stat-alerts').textContent = totalAlerts;
+    document.getElementById('alert-badge').textContent = Math.min(totalAlerts, 99);
+  }
+
+  const timeStr = new Date(alert.timestamp * 1000).toLocaleTimeString('zh-CN');
+  const stage = alert.stage || 'ALERT';
+  const icon = stage === 'WARNING' ? '⚡' : '🚨';
+  const card = document.createElement('div');
+  card.className = `alert-card ${stage === 'WARNING' ? 'WARNING' : alert.risk_level}`;
+  
+  card.innerHTML = `
+    <div class="alert-card-header">
+      <div class="alert-type-title">
+        <span>${icon}</span>
+        <span>${stage === 'WARNING' ? '预预警: 路径超时风险' : '异常事件: 目标遗失/超时'}</span>
+      </div>
+      <div class="alert-time-tag">${timeStr}</div>
+    </div>
+    <div class="alert-body-grid">
+      <div class="alert-item">目标 ID: <val>${alert.global_id}</val></div>
+      <div class="alert-item">风险等级: <val>${alert.risk_level}</val></div>
+      <div class="alert-item">最后位置: <val>${alert.last_camera}</val></div>
+      <div class="alert-item">已用时长: <val>${alert.elapsed_seconds}s</val></div>
+      <div class="alert-item" style="grid-column: span 2;">预期连通: <val>${alert.expected_cameras.join(', ')}</val></div>
+    </div>
+  `;
+  list.insertBefore(card, list.firstChild);
+  while (list.children.length > 30) list.removeChild(list.lastChild);
+}
+
+// ---- 通行统计渲染 ----
+async function pollCalibStats() {
+  try {
+    const res = await fetch('/api/stats').then(r => r.json());
+    const data = res.calibration || {};
+    const container = document.getElementById('calib-content');
+    const entries = Object.entries(data);
+    if (entries.length === 0) {
+      container.innerHTML = '<div class="empty-state" style="padding: 10px 0;">数据积累中（需 5 条记录生效）</div>';
+      return;
+    }
+    container.innerHTML = entries.map(([path, s]) => `
+      <div class="calib-row">
+        <span class="calib-path">${path}</span>
+        <span class="calib-stats-val">
+          均值 <highlight>${s.mean_seconds}s</highlight> (±<highlight>${s.std_seconds}s</highlight>)
+          样本 <highlight>${s.count}</highlight>
+        </span>
+      </div>
+    `).join('');
+  } catch {}
+}
+
+// ---- WebSocket ----
+function connectWS() {
+  const proto = location.protocol === 'https:' ? 'wss' : 'ws';
+  ws = new WebSocket(`${proto}://${location.host}/ws`);
+  const statusEl = document.getElementById('ws-status');
+
+  ws.onopen = () => {
+    statusEl.innerHTML = `<div class="pulse-dot"></div><span>WS 实时联线</span>`;
+    statusEl.className = 'ws-badge connected';
+  };
+  ws.onmessage = e => {
+    try { addAlert(JSON.parse(e.data)); } catch {}
+  };
+  ws.onclose = () => {
+    statusEl.innerHTML = `<div class="pulse-dot"></div><span>WS 已断开</span>`;
+    statusEl.className = 'ws-badge disconnected';
+    setTimeout(connectWS, 3000);
+  };
+  ws.onerror = () => ws.close();
+}
+
+// ---- 状态轮询 ----
+async function pollStatus() {
+  try {
+    const [statusRes, idsRes] = await Promise.all([
+      fetch('/api/status').then(r => r.json()),
+      fetch('/api/identities').then(r => r.json()),
+    ]);
+    const cameras = statusRes.cameras || [];
+    renderCamGrid(cameras);
+    updateCamStatus(cameras);
+    document.getElementById('stat-ids').textContent = idsRes.count || 0;
+  } catch {}
+}
+
+// ---- 初始化 ----
+async function init() {
+  try {
+    const res = await fetch('/api/alerts').then(r => r.json());
+    (res.alerts || []).reverse().forEach(addAlert);
+  } catch {}
+  connectWS();
+  pollStatus();
+  pollCalibStats();
+  setInterval(pollStatus, 3000);
+  setInterval(pollCalibStats, 15000);
+}
+
+function clearAlerts() {
+  const list = document.getElementById('alert-list');
+  list.innerHTML = `
+    <div class="empty-state" id="no-alert">
+      <div style="font-size: 28px; margin-bottom: 8px; opacity: 0.5;">✨</div>
+      目前无异常预警事件
+    </div>
+  `;
+  totalAlerts = 0;
+  totalWarnings = 0;
+  document.getElementById('stat-alerts').textContent = '0';
+  document.getElementById('stat-warnings').textContent = '0';
+  document.getElementById('alert-badge').textContent = '0';
+}
+
+init();
+</script>
+</body>
+</html>

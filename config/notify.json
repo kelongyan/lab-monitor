@@ -1,0 +1,15 @@
+{
+  "console": {
+    "enabled": true
+  },
+  "email": {
+    "enabled": false,
+    "smtp_host": "smtp.qq.com",
+    "smtp_port": 465,
+    "use_ssl": true,
+    "username": "your@qq.com",
+    "password": "your_auth_code",
+    "from": "your@qq.com",
+    "to": ["admin@example.com"]
+  }
+}

@@ -1,0 +1,34 @@
+# Python & Virtual Environment
+__pycache__/
+*.py[cod]
+*$py.class
+*.so
+.Python
+env/
+venv/
+.venv/
+build/
+dist/
+*.egg-info/
+
+# Weights & Models
+*.pt
+*.onnx
+*.engine
+*.tflite
+
+# Local Media & Datasets (Do not commit video files)
+videos/*
+!videos/.gitkeep
+
+# Output Logs, Screenshots & Cache
+outputs/*
+!outputs/.gitkeep
+*.log
+*.jsonl
+
+# IDE & OS
+.idea/
+.vscode/
+.DS_Store
+Thumbs.db

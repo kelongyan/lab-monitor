@@ -1,0 +1,8 @@
+# 安装顺序：
+# 1. pip install torch torchvision --index-url https://download.pytorch.org/whl/cpu
+# 2. pip install -r requirements.txt
+
+ultralytics>=8.0.0
+scipy>=1.13.0
+fastapi>=0.100.0
+uvicorn[standard]>=0.24.0

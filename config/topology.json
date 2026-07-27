@@ -1,0 +1,16 @@
+{
+  "cam_01": [
+    {"next": "cam_02", "expected_seconds": 30},
+    {"next": "cam_03", "expected_seconds": 45}
+  ],
+  "cam_02": [
+    {"next": "cam_03", "expected_seconds": 20},
+    {"next": "cam_04", "expected_seconds": 35}
+  ],
+  "cam_03": [
+    {"next": "cam_04", "expected_seconds": 25}
+  ],
+  "cam_04": [
+    {"next": "cam_01", "expected_seconds": 40}
+  ]
+}
