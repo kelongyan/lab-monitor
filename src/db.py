@@ -7,6 +7,7 @@ import sqlite3
 import json
 import time
 import logging
+import threading
 from pathlib import Path
 from typing import Any
 
@@ -16,16 +17,24 @@ DB_PATH = Path(__file__).parent.parent / "outputs" / "lab_monitor.db"
 
 
 class Database:
-    """线程安全的 SQLite 数据库管理类"""
+    """线程安全的 SQLite 数据库管理类（每个线程复用独立持久连接，消除连接创建开销）"""
 
     def __init__(self, db_path: Path = DB_PATH):
         self.db_path = db_path
         self.db_path.parent.mkdir(parents=True, exist_ok=True)
+        self._local = threading.local()   # 每个线程独立的连接槽
         self._init_db()
 
     def _get_conn(self) -> sqlite3.Connection:
-        conn = sqlite3.connect(str(self.db_path), timeout=10.0)
-        conn.row_factory = sqlite3.Row
+        """返回当前线程的持久连接，不存在则创建（一个线程只建一次连接）"""
+        conn = getattr(self._local, "conn", None)
+        if conn is None:
+            conn = sqlite3.connect(str(self.db_path), timeout=10.0)
+            conn.row_factory = sqlite3.Row
+            # WAL 模式：写操作不阻塞并发读，适合多线程混合场景
+            conn.execute("PRAGMA journal_mode=WAL")
+            conn.execute("PRAGMA synchronous=NORMAL")   # 性能/安全折中
+            self._local.conn = conn
         return conn
 
     def _init_db(self) -> None:

@@ -33,25 +33,33 @@ export function connectWS() {
   ws.onerror = () => ws.close();
 }
 
-export function addAlert(alert) {
+/**
+ * 渲染一条告警卡片
+ * @param {object} alert   - 告警数据
+ * @param {boolean} silent - true 时跳过计数器更新和告警音效（用于历史记录回填）
+ */
+export function addAlert(alert, silent = false) {
   const list = document.getElementById('alert-list');
   const noAlert = document.getElementById('no-alert');
   if (noAlert) noAlert.remove();
 
   const isWarning = alert.stage === 'WARNING';
   const isIntrusion = alert.alert_type === 'INTRUSION';
+  const isCrowd = alert.alert_type === 'CROWD_DENSITY';
 
-  if (isWarning) {
-    totalWarnings++;
-    const statWarn = document.getElementById('stat-warnings');
-    if (statWarn) statWarn.textContent = totalWarnings;
-  } else {
-    totalAlerts++;
-    const statAlert = document.getElementById('stat-alerts');
-    const badge = document.getElementById('alert-badge');
-    if (statAlert) statAlert.textContent = totalAlerts;
-    if (badge) badge.textContent = Math.min(totalAlerts, 99);
-    playAlertBeep();
+  if (!silent) {
+    if (isWarning) {
+      totalWarnings++;
+      const statWarn = document.getElementById('stat-warnings');
+      if (statWarn) statWarn.textContent = totalWarnings;
+    } else {
+      totalAlerts++;
+      const statAlert = document.getElementById('stat-alerts');
+      const badge = document.getElementById('alert-badge');
+      if (statAlert) statAlert.textContent = totalAlerts;
+      if (badge) badge.textContent = Math.min(totalAlerts, 99);
+      playAlertBeep();
+    }
   }
 
   const timeStr = new Date(alert.timestamp * 1000).toLocaleTimeString('zh-CN');
@@ -62,7 +70,11 @@ export function addAlert(alert) {
   card.className = `alert-card ${alertClass}`;
   card.addEventListener('click', () => openAlertDetailModal(alert));
 
-  const titleText = isIntrusion ? 'ROI 区域非法越界入侵' : (stage === 'WARNING' ? '路径通行超时预预警' : '目标通行超时离散');
+  let titleText;
+  if (isIntrusion)     titleText = 'ROI 区域非法越界入侵';
+  else if (isCrowd)    titleText = '区域人流密度超限预警';
+  else if (isWarning)  titleText = '路径通行超时预警';
+  else                 titleText = '目标通行超时失联';
 
   const gidHtml = escapeHtml(alert.global_id);
   const gidAttr = escapeAttr(alert.global_id);
@@ -89,11 +101,17 @@ export function addAlert(alert) {
 
   // 绑定内联点击
   const trajLink = card.querySelector('[data-action="trajectory"]');
-  if (trajLink) {
+  if (trajLink && !isCrowd) {
+    // 真实人员 ID：点击查轨迹
     trajLink.addEventListener('click', (e) => {
       e.stopPropagation();
       showTrajectoryModal(alert.global_id);
     });
+  } else if (trajLink) {
+    // CROWD_DENSITY：global_id 是 "Crowd_N" 格式，非真实人员，禁用轨迹入口
+    trajLink.style.cursor = 'default';
+    trajLink.style.textDecoration = 'none';
+    trajLink.style.color = 'var(--text-muted)';
   }
 
   list.insertBefore(card, list.firstChild);
@@ -179,9 +197,15 @@ export function clearAlerts() {
   const list = document.getElementById('alert-list');
   if (list) {
     list.innerHTML = `
-      <div class="empty-state" id="no-alert">
-        <div style="font-size: 28px; margin-bottom: 8px; opacity: 0.5;">✨</div>
-        目前无异常预警事件
+      <div class="secure-empty-box" id="no-alert">
+        <div class="secure-shield-icon">🛡️</div>
+        <div class="secure-empty-title">全域防线感知安防正常</div>
+        <div class="secure-empty-sub">
+          <span>全网节点巡检中</span>
+          <span>·</span>
+          <span style="color: var(--success); font-weight: 700;">0 风险隐患 detected</span>
+        </div>
+        <div class="secure-live-tag">SYSTEM OPERATIONAL</div>
       </div>
     `;
   }

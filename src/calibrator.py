@@ -4,10 +4,12 @@ calibrator.py — 通行时间自动校准器
 持久化到 outputs/transit_stats.json，重启后加载继续积累
 """
 
+import atexit
 import json
 import math
 import logging
 import threading
+import time
 from collections import defaultdict
 from pathlib import Path
 
@@ -27,12 +29,18 @@ class TransitCalibrator:
       - 调用 calibrated_window() 获取动态修正后的 (expected_seconds, tolerance)
     """
 
+    # 两次写盘之间的最小间隔（秒）；到期且有脏数据才真正写文件
+    _SAVE_INTERVAL = 30.0
+
     def __init__(self, stats_path: str | Path = "outputs/transit_stats.json"):
         self._lock = threading.Lock()
         self._path = Path(stats_path)
         # key: "cam_A→cam_B"  value: list of actual transit seconds
         self._data: dict[str, list[float]] = defaultdict(list)
+        self._dirty: bool = False          # 有未持久化的数据
+        self._last_save: float = 0.0       # 上次写盘的 time.time()
         self._load()
+        atexit.register(self.flush)        # 进程退出时强制落盘，防止最后一批数据丢失
 
     # ------------------------------------------------------------------ #
     # 记录实际通行时间                                                       #
@@ -48,8 +56,22 @@ class TransitCalibrator:
             # 保留最近200条，防止文件无限增大
             if len(self._data[key]) > 200:
                 self._data[key] = self._data[key][-200:]
-        logger.debug("记录通行时间 %s: %.1fs（共 %d 条）", key, actual_seconds, len(self._data[key]))
-        self._save()
+            self._dirty = True
+            count = len(self._data[key])
+        logger.debug("记录通行时间 %s: %.1fs（共 %d 条）", key, actual_seconds, count)
+        # 脏标记 + 限频：距上次写盘超过 _SAVE_INTERVAL 才真正落盘
+        if time.monotonic() - self._last_save >= self._SAVE_INTERVAL:
+            self.flush()
+
+    def flush(self) -> None:
+        """显式触发持久化（系统关闭时调用，确保数据不丢失）"""
+        with self._lock:
+            if not self._dirty:
+                return
+            data = dict(self._data)
+            self._dirty = False
+        self._last_save = time.monotonic()
+        self._write(data)
 
     # ------------------------------------------------------------------ #
     # 获取校准后的时间窗口                                                   #
@@ -114,10 +136,9 @@ class TransitCalibrator:
     # 持久化                                                                #
     # ------------------------------------------------------------------ #
 
-    def _save(self) -> None:
+    def _write(self, data: dict) -> None:
+        """实际写盘，调用方负责传入快照 data（已在锁外）"""
         self._path.parent.mkdir(parents=True, exist_ok=True)
-        with self._lock:
-            data = dict(self._data)
         try:
             with open(self._path, "w", encoding="utf-8") as f:
                 json.dump(data, f, ensure_ascii=False, indent=2)

@@ -3,7 +3,7 @@
  */
 import { initTheme } from './modules/theme.js';
 import { setGridMode, setFocusCamera } from './modules/grid.js';
-import { connectWS, pollStatus, pollCalibStats, pollReidMetrics, clearAlerts } from './modules/websocket.js';
+import { connectWS, pollStatus, pollCalibStats, pollReidMetrics, clearAlerts, addAlert } from './modules/websocket.js';
 import { 
   closeModal, 
   openIdentitySearchModal, 
@@ -117,11 +117,14 @@ async function init() {
   bindEvents();
 
   try {
-    const res = await fetch('/api/alerts').then(r => r.json());
-    (res.alerts || []).reverse().forEach(alert => {
-      // 延迟加载组件渲染
-    });
-  } catch {}
+    const res = await fetch('/api/alerts/history?limit=30').then(r => r.json());
+    if (res.alerts && res.alerts.length > 0) {
+      // silent=true：历史回填不触发计数器累加和告警音效
+      [...res.alerts].reverse().forEach(a => addAlert(a, true));
+    }
+  } catch (e) {
+    console.error('加载历史告警失败:', e);
+  }
 
   connectWS();
   pollStatus();

@@ -15,7 +15,7 @@ import threading
 from pathlib import Path
 
 import cv2
-from fastapi import FastAPI, WebSocket, WebSocketDisconnect
+from fastapi import FastAPI, WebSocket, WebSocketDisconnect, Query, Request
 from fastapi.responses import HTMLResponse, StreamingResponse, JSONResponse
 from fastapi.staticfiles import StaticFiles
 import uvicorn
@@ -33,6 +33,16 @@ app.mount("/screenshots", StaticFiles(directory=screenshots_dir), name="screensh
 # 运行时注入（main.py 启动前赋值）
 _frame_hub = None
 _topology = None
+_broadcaster = None
+_identity_store = None
+_calibrator = None
+_pipelines = None
+
+# ROI 校验常量与文件锁
+_ROI_MAX_VERTICES = 64
+_ROI_COORD_MIN = 0.0
+_ROI_COORD_MAX = 1.0
+_roi_file_lock = asyncio.Lock()
 
 
 def init_server(frame_hub, broadcaster, identity_store, calibrator=None, pipelines=None, topology=None):
@@ -393,18 +403,6 @@ async def get_identity_detail(global_id: str):
         "total_appearances": len(raw_apps),
         "trajectory": trajectory
     })
-
-
-@app.get("/api/topology")
-async def get_topology():
-    topo_file = Path(__file__).parent / "config" / "topology.json"
-    if not topo_file.exists():
-        return JSONResponse({"edges": []})
-    try:
-        data = json.loads(topo_file.read_text(encoding="utf-8"))
-        return JSONResponse(data)
-    except Exception as e:
-        return JSONResponse({"error": str(e)}, status_code=500)
 
 
 @app.get("/api/stats")

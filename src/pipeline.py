@@ -326,10 +326,6 @@ class CameraPipeline(threading.Thread):
         if gid is None:
             return
 
-        rec = self.store.get(gid)
-        if rec is None:
-            return
-
         next_hops = self.topology.next_hops(self.camera_id)
         if not next_hops:
             return
@@ -358,8 +354,8 @@ class CameraPipeline(threading.Thread):
             last_camera=self.camera_id,
             expected_cameras=expected_cams,
             deadline_offset=max_deadline,
-            # P2-4：先拍快照再访问，规避并发修改时的 IndexError
-            last_bbox=list(rec.appearances)[-1]["bbox"] if rec.appearances else [],
+            # 使用锁内安全接口读取 bbox，替代锁外裸访问 rec.appearances
+            last_bbox=self.store.get_last_bbox(gid),
         )
         logger.debug(
             "[%s] Person %s 离开，预期在 %s 出现（校准后 %.0fs 内）",

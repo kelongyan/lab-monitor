@@ -111,6 +111,14 @@ class IdentityStore:
             rec = self._records.get(global_id)
             return rec  # 调用方需在锁外使用，feature 是 ndarray 不可变即可
 
+    def get_last_bbox(self, global_id: str) -> list[float]:
+        """在锁内安全读取最后一次出现的 bbox，避免调用方在锁外访问可变的 appearances deque"""
+        with self._lock:
+            rec = self._records.get(global_id)
+            if rec is None or not rec.appearances:
+                return []
+            return list(rec.appearances[-1].get("bbox", []))
+
     # ------------------------------------------------------------------ #
     # 更新                                                                  #
     # ------------------------------------------------------------------ #
@@ -151,12 +159,19 @@ class IdentityStore:
                     return gids[max_idx], False
 
                 # 深入检查特征库 (feature bank)
-                for gid, rec in self._records.items():
-                    if rec.feature_bank:
-                        bank_feats = np.stack(rec.feature_bank) # (K, D)
-                        bank_sims = bank_feats @ feature        # (K,)
-                        if float(np.max(bank_sims)) >= threshold:
-                            return gid, False
+                # 一次性构建全局 bank 矩阵批量 matmul，避免持锁期间 N 次循环
+                all_bank_feats: list[np.ndarray] = []
+                all_bank_gids: list[str] = []
+                for g, rec in self._records.items():
+                    for f in rec.feature_bank:
+                        all_bank_feats.append(f)
+                        all_bank_gids.append(g)
+                if all_bank_feats:
+                    bank_matrix = np.stack(all_bank_feats)  # (N*K, D)
+                    bank_sims = bank_matrix @ feature        # (N*K,)
+                    max_idx = int(np.argmax(bank_sims))
+                    if bank_sims[max_idx] >= threshold:
+                        return all_bank_gids[max_idx], False
 
             # 未找到相似身份，在锁内注册，保证原子性
             gid = str(uuid.uuid4())[:8]
@@ -197,12 +212,18 @@ class IdentityStore:
                 rec.feature /= norm
 
             # 2. 动态维护多姿态特征库 (Bank)
-            if quality > 0.6 and len(rec.feature_bank) < 5:
-                # 若新特征与已有 bank 差异较明显 (sim < 0.92)，说明捕获到了新角度，加入 Bank
+            if quality > 0.6:
                 bank_matrix = np.stack(rec.feature_bank)
-                max_bank_sim = float(np.max(bank_matrix @ feat_copy))
+                bank_sims = bank_matrix @ feat_copy
+                max_bank_sim = float(np.max(bank_sims))
+                # 新特征与已有 bank 差异明显（< 0.92）才值得加入，避免重复存储
                 if max_bank_sim < 0.92:
-                    rec.feature_bank.append(feat_copy)
+                    if len(rec.feature_bank) < 5:
+                        rec.feature_bank.append(feat_copy)
+                    else:
+                        # Bank 已满：淘汰与新特征最相似（最冗余）的那个，引入新角度
+                        redundant_idx = int(np.argmax(bank_sims))
+                        rec.feature_bank[redundant_idx] = feat_copy
 
             rec.last_camera = camera_id
             rec.last_seen = time.time()

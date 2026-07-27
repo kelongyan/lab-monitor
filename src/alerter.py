@@ -10,14 +10,20 @@ import json
 import queue
 import threading
 import logging
+import uuid
+import atexit
 from dataclasses import dataclass, field
 from pathlib import Path
 from collections import deque
 
 logger = logging.getLogger("alerter")
 
-
 _WARNING_RATIO = 0.70   # deadline 的这个比例触发 WARNING
+
+
+def _new_alert_id(prefix: str = "alert") -> str:
+    """生成全局唯一的告警 ID，避免同毫秒并发时的碰撞"""
+    return f"{prefix}_{uuid.uuid4().hex[:12]}"
 
 
 @dataclass
@@ -79,17 +85,25 @@ class AlertManager:
         # P2-3：持久文件句柄（line buffering），避免每次 open/close 开销
         try:
             self._log_file = open(self._log_path, "a", encoding="utf-8", buffering=1)
+            # 注册 atexit 确保进程正常/异常退出时都能 flush+close，不依赖不可靠的 __del__
+            atexit.register(self._close_log_file)
         except OSError as e:
             logger.error("无法打开告警日志文件 %s: %s，将跳过日志写入", self._log_path, e)
             self._log_file = None
 
-    def __del__(self):
-        """析构时关闭文件句柄"""
-        if hasattr(self, "_log_file") and self._log_file:
+    def _close_log_file(self) -> None:
+        """安全关闭日志文件句柄（atexit 注册 + __del__ 共用）"""
+        f = getattr(self, "_log_file", None)
+        if f and not f.closed:
             try:
-                self._log_file.close()
+                f.flush()
+                f.close()
             except Exception:
                 pass
+            self._log_file = None
+
+    def __del__(self):
+        self._close_log_file()
 
     # ------------------------------------------------------------------ #
     # 开启监听                                                              #
@@ -164,7 +178,7 @@ class AlertManager:
                 for k in expired:
                     del self._intrusion_cooldown[k]
 
-        alert_id = f"alert_roi_{int(now*1000)}"
+        alert_id = _new_alert_id("alert_roi")
         alert = {
             "alert_id": alert_id,
             "timestamp": now,
@@ -251,7 +265,7 @@ class AlertManager:
         elapsed = time.time() - entry.last_seen
         risk = "HIGH" if elapsed > 120 else ("MEDIUM" if elapsed > 60 else "LOW")
         return {
-            "alert_id": f"alert_{int(time.time() * 1000)}",  # P2: 补充缺失字段，前端截图路径依赖此字段
+            "alert_id": _new_alert_id(),  # uuid 保证并发时不碰撞
             "alert_type": "MISSING_PERSON",
             "stage": stage,           # "WARNING" or "ALERT"
             "global_id": entry.global_id,
@@ -292,7 +306,7 @@ class AlertManager:
             self._intrusion_cooldown[key] = now
 
         alert = {
-          "alert_id": f"alert_crowd_{int(now*1000)}",
+          "alert_id": _new_alert_id("alert_crowd"),
           "timestamp": now,
           "stage": "WARNING",
           "alert_type": "CROWD_DENSITY",
