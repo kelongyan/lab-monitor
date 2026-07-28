@@ -43,22 +43,24 @@ lab-monitor/
 │   ├── sources.json         # 视频源配置（本地视频 / RTSP）
 │   ├── topology.json        # 摄像头拓扑与预估穿越时间配置
 │   └── notify.json          # 告警通知渠道配置（Console / Email）
+├── data/                    # 本地数据库持久化目录（自动生成）
+│   └── lab_monitor.db       # SQLite 数据库文件（身份履历与告警记录）
 ├── docs/                    # 项目文档与资源
 │   ├── deployment.md        # 详细部署与 GPU 配置指南
+│   ├── SYSTEM_PRINCIPLES.md # 系统核心技术原理与机制说明
 │   └── images/              # 效果截图与 Logo 资源
-
-│       └── readme.png
 ├── src/                     # 核心源码目录
 │   ├── alerter.py           # 告警管理与广播器
 │   ├── calibrator.py        # 轨迹转移时延校准器
+│   ├── db.py                # SQLite 数据库操作层
 │   ├── detector.py          # YOLOv8 目标检测器
 │   ├── frame_hub.py         # 视频帧共享缓冲区
-│   ├── identity_store.py    # 全局 ReID 身份数据库
+│   ├── identity_store.py    # 全局 ReID 身份数据库（多姿态 Feature Bank）
 │   ├── notifier.py          # 告警通知发送器
 │   ├── pipeline.py          # 多摄像头流水线逻辑
 │   ├── reid.py              # ReID 特征提取
 │   ├── reid_validator.py    # 特征校验与匹配
-│   ├── topology.py          # 相机拓扑拓扑关系
+│   ├── topology.py          # 相机拓扑关系
 │   └── tracker.py           # 目标轨迹跟踪器
 ├── static/                  # Web 前端静态资源
 ├── main.py                  # 系统主入口

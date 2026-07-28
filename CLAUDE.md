@@ -57,10 +57,10 @@ http://localhost:8000
 main.py (主线程)
   ├─ FastAPI Web Server Thread (daemon)
   │   └─ 提供 REST API、MJPEG 流、WebSocket
-  ├─ Alert Ticker Thread (2秒轮询)
-  │   └─ AlertManager.tick() → 检测滞留/越界/异常穿越
+  ├─ Alert Ticker Thread (0.5秒轮询)
+  │   └─ AlertManager.tick() → 检测滞留/MISSING_PERSON/SCENE_EXIT
   └─ N × CameraPipeline Threads (每个摄像头一个)
-      └─ 读帧 → 检测 → 跟踪 → ReID → 更新身份库 → 推送到 FrameHub
+      └─ 读帧 → 检测 → 跟踪 → ROI越界(INTRUSION) → ReID → 更新身份库 → 推送到 FrameHub
 ```
 
 ### 全局共享组件
@@ -69,11 +69,12 @@ main.py (主线程)
 
 | 组件 | 文件 | 作用 | 线程安全 |
 |------|------|------|----------|
-| `IdentityStore` | `src/identity_store.py` | 全局 ReID 身份库 | 内置锁保护（含 register_if_new 原子操作） |
+| `IdentityStore` | `src/identity_store.py` | 全局 ReID 身份库（含 feature_bank 与 ReIDMetrics） | 内置锁保护（含 register_if_new 原子操作） |
 | `FrameHub` | `src/frame_hub.py` | JPEG 帧缓冲区（供 MJPEG 流消费） | 内置锁保护 |
-| `AlertManager` | `src/alerter.py` | 告警逻辑与历史记录 | 锁内原子修改状态（P0-1 已修复竞态） |
-| `AlertBroadcaster` | `src/alerter.py` | WebSocket 告警推送 | 线程安全（asyncio） |
+| `AlertManager` | `src/alerter.py` | 告警逻辑与历史记录 | 锁内原子修改状态 |
+| `AlertBroadcaster` | `src/alerter.py` | WebSocket 告警推送 | 线程安全（asyncio.Queue / sync queue） |
 | `TransitCalibrator` | `src/calibrator.py` | 相机间穿越时延统计 | 内置锁保护 |
+| `Database` | `src/db.py` | SQLite 数据库持久化（`data/lab_monitor.db`） | 单例模式与独立连接 |
 
 ### ReID 身份识别流程
 
@@ -87,9 +88,9 @@ CameraPipeline (src/pipeline.py)
 查询身份库 (match_feature + Ratio Test)
   ↓
 匹配成功(3帧一致) → 返回已有 global_id
-匹配失败(缓冲区满) → IdentityStore.register_if_new() 原子性查重+注册
+匹配失败(缓冲区满) → IdentityStore.register_if_new() 原子性查重+注册 (支持多姿态 feature_bank)
   ↓
-更新特征 (质量加权滑动平均，alpha 随帧质量动态调整)
+更新特征 (质量加权滑动平均，alpha 随帧质量动态调整，自动维护 feature_bank)
 ```
 
 **关键参数**：
@@ -98,18 +99,20 @@ CameraPipeline (src/pipeline.py)
 - Ratio Test：`second_sim / best_sim > 0.85` 时拒绝歧义匹配（`src/reid.py`）
 - 多帧确认：连续 3 帧匹配同一 ID 才确认（`confirm_frames=3`）
 - 注册防重：`register_if_new()` 在锁内原子执行查重+注册，防多摄像头并发重复注册
+- 多姿态特征库：`feature_bank` 保存最多 5 个差异明显特征（相似度 < 0.92），提升大视角变化下的检索召回率
 
 ### 告警触发机制
 
-`AlertManager.tick()` 每 2 秒扫描所有活跃身份，检测三类异常：
+`AlertManager.tick()` 每 0.5 秒扫描所有活跃身份，支持以下告警类型：
 
-1. **滞留告警**：同一相机内停留超过预设时间窗口
-2. **越界告警**：出现在非拓扑相邻相机（跳跃式转移）
-3. **异常穿越**：转移时间超出校准统计的 ±σ 范围（基于 `TransitCalibrator` 自适应学习）
+1. **MISSING_PERSON (超时/失踪)**：人员离开某相机后，未在预期时间窗口内到达拓扑相邻相机
+2. **INTRUSION (即时越界/围栏)**：人员脚下点踩入 ROI 电子围栏危险区域（由 `cv2.pointPolygonTest` 即时触发）
+3. **SCENE_EXIT (全域消失)**：人员从所有摄像头消失超过设定期限（默认 300 秒）
+4. **CROWD_DENSITY (聚众预警)**：区域内检测到的人数超过设定阈值（默认 5 人）
 
 告警分两阶段触发：
-- **WARNING**（70% deadline）：控制台预警，WebSocket 推送，不触发外部通知
-- **ALERT**（100% deadline）：全量告警 + 邮件/外部通知
+- **WARNING**（70% deadline）：控制台预警，WebSocket 推送紫色/黄色标志，不触发外部通知
+- **ALERT**（100% deadline / INTRUSION）：全量告警 + 邮件/外部通知 + 数据库持久化
 
 > 告警逻辑在 `src/alerter.py` 中实现，时间窗口由 `config/topology.json` + `TransitCalibrator` 动态校准。
 
@@ -126,12 +129,15 @@ CameraPipeline (src/pipeline.py)
 ```
 
 ### config/topology.json
-有向图，定义相机间的邻接关系和预期穿越时间（秒）：
+按起始摄像头 ID 映射下游相邻摄像头列表，定义相机间的邻接关系和预期穿越时间（秒）：
 ```json
 {
-  "edges": [
-    {"from": "cam_01", "to": "cam_02", "expected_seconds": 30},
-    {"from": "cam_02", "to": "cam_03", "expected_seconds": 45}
+  "cam_01": [
+    {
+      "next": "cam_02",
+      "expected_seconds": 30,
+      "tolerance_seconds": 15
+    }
   ]
 }
 ```
@@ -140,28 +146,30 @@ CameraPipeline (src/pipeline.py)
 告警通知渠道配置（支持 `console` 和 `email`）：
 ```json
 {
-  "channels": [
-    {"type": "console", "enabled": true},
-    {
-      "type": "email",
-      "enabled": false,
-      "smtp_host": "smtp.qq.com",
-      "smtp_port": 465,
-      "from_email": "your@qq.com",
-      "password": "your_auth_code",
-      "to_emails": ["recipient@example.com"]
-    }
-  ]
+  "console": {
+    "enabled": true
+  },
+  "email": {
+    "enabled": false,
+    "smtp_host": "smtp.qq.com",
+    "smtp_port": 465,
+    "use_ssl": true,
+    "username": "your@qq.com",
+    "password": "your_auth_code",
+    "from": "your@qq.com",
+    "to": ["admin@example.com"]
+  }
 }
 ```
 
 ## 运行时输出
 
-`outputs/` 目录（自动创建，`.gitignore` 已忽略）：
-- `alerts.jsonl`：追加式告警日志（每行一个 JSON 对象）
-- `transit_stats.json`：穿越时延统计（用于异常检测）
-- `screenshots/`：告警截图（按 `alert_id.jpg` 命名）
-- `server.pid`：进程 PID（`start.ps1` 写入，`stop.ps1` 读取）
+`outputs/` 目录与 `data/` 目录（自动创建，`.gitignore` 已忽略）：
+- `data/lab_monitor.db`：SQLite 数据库文件，持久化身份档案与告警日志
+- `outputs/alerts.jsonl`：追加式 JSONL 告警日志文件
+- `outputs/transit_stats.json`：穿越时延统计（用于异常检测自适应校准）
+- `outputs/screenshots/`：告警截图（按 `alert_id.jpg` 命名）
+- `outputs/server.pid`：进程 PID（`start.ps1` 写入，`stop.ps1` 读取）
 
 ## 常见开发任务
 

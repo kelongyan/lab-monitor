@@ -107,13 +107,11 @@ pip install -r requirements.txt
 pip install -r requirements.txt
 ```
 
-#### 步骤 4：启用代码中的 GPU 加速
-修改 `main.py` 中的模型加载配置，将 `device` 设置为 `"cuda"` 或 `"cuda:0"`：
+#### 步骤 4：运行系统（自动触发 GPU 加速）
+`main.py` 内部会自动调用 `torch.cuda.is_available()` 检测 GPU 硬件，并自动完成 CUDA + FP16 半精度加速配置和优化参数切换（如 30fps 高帧率模式），无需手动修改代码逻辑：
 
-```python
-# main.py
-detector       = PersonDetector(model_name="yolov8n.pt", conf_thresh=0.4, device="cuda")
-reid_extractor = ReIDExtractor(device="cuda")
+```bash
+python main.py
 ```
 
 ---
@@ -142,12 +140,16 @@ reid_extractor = ReIDExtractor(device="cuda")
 ```json
 {
   "cam_01": [
-    {"next": "cam_02", "expected_seconds": 30},
-    {"next": "cam_03", "expected_seconds": 45}
-  ],
-  "cam_02": [
-    {"next": "cam_03", "expected_seconds": 20},
-    {"next": "cam_04", "expected_seconds": 35}
+    {
+      "next": "cam_02",
+      "expected_seconds": 30,
+      "tolerance_seconds": 15
+    },
+    {
+      "next": "cam_03",
+      "expected_seconds": 45,
+      "tolerance_seconds": 15
+    }
   ]
 }
 ```
