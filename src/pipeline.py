@@ -161,7 +161,15 @@ class CameraPipeline(threading.Thread):
         logger.info("[%s] RTSP 流水线结束", self.camera_id)
 
     def _read_loop(self, cap: cv2.VideoCapture) -> None:
+        # GPU 服务器：读帧速度远快于源视频帧率，需要限速避免空跑浪费 GPU 算力
+        # 上限 30fps，本地 MP4 取源视频帧率与上限的较小值
+        source_fps = cap.get(cv2.CAP_PROP_FPS) or 25.0
+        target_fps = min(source_fps, 30.0)
+        frame_interval = 1.0 / target_fps
+
         while not self._stop_event.is_set():
+            t_start = time.monotonic()
+
             ret, frame = cap.read()
             if not ret:
                 break
@@ -177,6 +185,13 @@ class CameraPipeline(threading.Thread):
                 if cv2.waitKey(1) & 0xFF == ord("q"):
                     self._stop_event.set()
                     break
+
+            # 帧率限速：sleep 剩余时间，对齐到目标帧率
+            elapsed = time.monotonic() - t_start
+            sleep_time = frame_interval - elapsed
+            if sleep_time > 0:
+                time.sleep(sleep_time)
+
         if self.display:
             cv2.destroyWindow(f"Camera {self.camera_id}")
 

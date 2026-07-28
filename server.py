@@ -431,7 +431,7 @@ async def _mjpeg_generator(cam_id: str):
             + data
             + b"\r\n"
         )
-        await asyncio.sleep(0.08)   # ~12 fps，CPU 友好
+        await asyncio.sleep(0.033)  # ~30 fps，匹配 GPU 推理速度
 
 
 @app.get("/stream/{cam_id}")
@@ -482,14 +482,21 @@ async def websocket_endpoint(ws: WebSocket):
 
 
 async def _broadcast_loop():
-    """后台协程：从告警 Queue 读取并广播给所有 WebSocket 客户端"""
-    loop = asyncio.get_running_loop()   # Python 3.10+ 推荐，替代已弃用的 get_event_loop()
+    """后台协程：从告警 Queue 读取并广播给所有 WebSocket 客户端
+    GPU 服务器优化：优先使用 asyncio.Queue（零延迟），回退到 threading.queue（兼容）
+    """
+    loop = asyncio.get_running_loop()
     while True:
         try:
-            alert = await loop.run_in_executor(
-                None,
-                lambda: (_broadcaster.queue.get(timeout=1) if _broadcaster else None),
-            )
+            # 优先路径：asyncio.Queue.get() — 真正的 async 等待，告警到达即触发，零额外延迟
+            if _broadcaster and _broadcaster._async_queue is not None:
+                alert = await _broadcaster._async_queue.get()
+            else:
+                # 回退路径：事件循环注入前的兼容模式（启动瞬间短暂使用）
+                alert = await loop.run_in_executor(
+                    None,
+                    lambda: (_broadcaster.queue.get(timeout=1) if _broadcaster else None),
+                )
             if alert is None:
                 continue
             msg = json.dumps(alert, ensure_ascii=False)
@@ -505,16 +512,19 @@ async def _broadcast_loop():
                 async with _ws_lock:
                     _ws_clients.difference_update(dead)
         except Exception:
-            await asyncio.sleep(0.5)
+            await asyncio.sleep(0.1)
 
 
 @app.on_event("startup")
 async def startup():
     global _ws_lock, _roi_file_lock
-    _ws_lock = asyncio.Lock()       # 在事件循环内创建，确保绑定到正确的 loop
-    _roi_file_lock = asyncio.Lock() # ROI 文件写入锁，防止并发竞态
+    _ws_lock = asyncio.Lock()
+    _roi_file_lock = asyncio.Lock()
+    # GPU 服务器优化：注入 event loop 到 broadcaster，激活 asyncio.Queue 零延迟模式
+    if _broadcaster:
+        _broadcaster.set_event_loop(asyncio.get_running_loop())
     asyncio.create_task(_broadcast_loop())
-    logger.info("WebSocket 广播任务已启动")
+    logger.info("WebSocket 广播任务已启动（asyncio.Queue 零延迟模式）")
 
 
 # ------------------------------------------------------------------ #

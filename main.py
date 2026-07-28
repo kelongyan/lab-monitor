@@ -41,8 +41,8 @@ def load_sources() -> dict[str, str]:
         return json.load(f)
 
 
-def alert_ticker(alert_manager: AlertManager, interval: float = 2.0) -> None:
-    """后台线程：每隔 interval 秒检查一次超时告警"""
+def alert_ticker(alert_manager: AlertManager, interval: float = 0.5) -> None:
+    """后台线程：每隔 interval 秒检查一次超时告警（GPU 服务器模式：0.5s）"""
     while True:
         alert_manager.tick()
         time.sleep(interval)

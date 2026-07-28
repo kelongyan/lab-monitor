@@ -42,18 +42,34 @@ class AlertBroadcaster:
     """
     线程安全的告警收集器：
     - 保存最近 N 条告警记录（供 Web API 查询历史）
-    - 提供 Queue 供 WebSocket 后台任务消费并推送
+    - 优先通过 asyncio.Queue 零延迟推送 WebSocket（GPU 服务器模式）
+    - 事件循环就绪前回退到 threading.queue.Queue（兼容模式）
     """
     def __init__(self, maxlen: int = 50):
         self._recent: deque[dict] = deque(maxlen=maxlen)
         self._lock = threading.Lock()
-        # sync → async 桥：server 里的后台任务从这里读告警推 WebSocket
+        # 回退 sync queue（事件循环注入前使用）
         self.queue: queue.Queue[dict] = queue.Queue()
+        # async queue：server startup() 注入 event loop 后初始化，零延迟推送
+        self._loop = None
+        self._async_queue = None
+
+    def set_event_loop(self, loop) -> None:
+        """由 FastAPI startup() 在事件循环内调用，注入 asyncio.Queue"""
+        import asyncio
+        self._loop = loop
+        self._async_queue = asyncio.Queue()
+        logger.info("AlertBroadcaster: asyncio.Queue 已就绪，告警零延迟推送模式激活")
 
     def push(self, alert: dict) -> None:
         with self._lock:
             self._recent.append(alert)
-        self.queue.put(alert)
+        # 优先通过 asyncio.Queue call_soon_threadsafe 跨线程投递（无阻塞，无延迟）
+        if self._loop is not None and self._async_queue is not None and not self._loop.is_closed():
+            self._loop.call_soon_threadsafe(self._async_queue.put_nowait, alert)
+        else:
+            # 回退：事件循环尚未就绪时用 threading.queue
+            self.queue.put(alert)
 
     def recent(self) -> list[dict]:
         with self._lock:

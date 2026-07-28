@@ -28,7 +28,7 @@ export function connectWS() {
       statusEl.innerHTML = `<div class="pulse-dot"></div><span>WS 已断开</span>`;
       statusEl.className = 'ws-badge disconnected';
     }
-    setTimeout(connectWS, 3000);
+    setTimeout(connectWS, 1000);
   };
   ws.onerror = () => ws.close();
 }

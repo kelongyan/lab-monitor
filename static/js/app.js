@@ -131,9 +131,9 @@ async function init() {
   pollCalibStats();
   pollReidMetrics();
 
-  setInterval(pollStatus, 3000);
+  setInterval(pollStatus, 1000);
   setInterval(pollCalibStats, 15000);
-  setInterval(pollReidMetrics, 2000);
+  setInterval(pollReidMetrics, 1000);
 }
 
 // 页面加载完成后启动
