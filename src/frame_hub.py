@@ -41,7 +41,12 @@ class FrameHub:
     # GPU 服务器：提高 JPEG 编码质量（带宽充裕，画面更清晰）
     JPEG_QUALITY = 85
 
-    def __init__(self):
+    def __init__(self, jpeg_quality: int = None, display_width: int = 640, display_height: int = 360):
+        # jpeg_quality 参数优先，否则用类默认值（CPU=65，GPU=85）
+        if jpeg_quality is not None:
+            self.JPEG_QUALITY = jpeg_quality
+        self.DISPLAY_WIDTH  = display_width
+        self.DISPLAY_HEIGHT = display_height
         # _global_lock 仅保护 _states/_cam_locks 字典结构（新增/删除 key）
         # 读写具体摄像头数据时使用各自的 per-camera lock
         self._global_lock = threading.Lock()

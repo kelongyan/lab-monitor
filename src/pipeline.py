@@ -35,6 +35,7 @@ def _is_rtsp(source: str) -> bool:
 
 
 class CameraPipeline(threading.Thread):
+    # 默认值保持向后兼容（GPU 模式），CPU 模式由 main.py 传参覆盖
     REID_EVERY_N_FRAMES = 5
 
     def __init__(
@@ -50,6 +51,9 @@ class CameraPipeline(threading.Thread):
         frame_hub: FrameHub | None = None,
         calibrator: TransitCalibrator | None = None,
         display: bool = False,
+        detect_every_n: int = 1,      # YOLO 跳帧：每 N 帧推理一次（CPU=3，GPU=1）
+        reid_every_n: int = 5,        # ReID 跳帧：每 N 帧提取一次特征（CPU=15，GPU=5）
+        frame_rate_cap: float = 30.0, # 帧率上限（CPU=15，GPU=30）
     ):
         super().__init__(name=f"pipeline-{camera_id}", daemon=True)
         self.camera_id = camera_id
@@ -70,6 +74,12 @@ class CameraPipeline(threading.Thread):
         self._reid_frame_counter: dict[int, int] = {}
         self._tracker = PersonTracker(fps=25)
         self._frame_idx = 0
+
+        # 性能参数（CPU/GPU 自动切换，由 main.py 传入）
+        self._detect_every_n = max(1, detect_every_n)
+        self._reid_every_n   = max(1, reid_every_n)
+        self._frame_rate_cap = max(1.0, frame_rate_cap)
+        self._last_detections: list = []  # YOLO 跳帧时复用上一次检测结果
 
         # Phase 4: 多帧 ReID 确认器（每路摄像头独立）
         self._validator = ReIDValidator(
@@ -162,9 +172,9 @@ class CameraPipeline(threading.Thread):
 
     def _read_loop(self, cap: cv2.VideoCapture) -> None:
         # GPU 服务器：读帧速度远快于源视频帧率，需要限速避免空跑浪费 GPU 算力
-        # 上限 30fps，本地 MP4 取源视频帧率与上限的较小值
+        # 上限由 main.py 传入：CPU=15fps，GPU=30fps
         source_fps = cap.get(cv2.CAP_PROP_FPS) or 25.0
-        target_fps = min(source_fps, 30.0)
+        target_fps = min(source_fps, self._frame_rate_cap)
         frame_interval = 1.0 / target_fps
 
         while not self._stop_event.is_set():
@@ -211,7 +221,13 @@ class CameraPipeline(threading.Thread):
             cv2.putText(frame, roi_label, (pts[0][0][0], max(20, pts[0][0][1] - 6)),
                         cv2.FONT_HERSHEY_SIMPLEX, 0.5, (0, 165, 255), 2)
 
-        detections = self.detector.detect(frame)
+        # YOLO 跳帧检测：CPU 模式每 N 帧推理一次
+        # 跳帧时传空列表让 Kalman 滤波器自主预测，避免旧检测误导 tracker
+        if self._frame_idx % self._detect_every_n == 0:
+            self._last_detections = self.detector.detect(frame)
+            detections = self._last_detections
+        else:
+            detections = []  # 让 Kalman 预测，不喂旧坐标
         tracks = self._tracker.update(detections, frame.shape)
         current_track_ids = {t["track_id"] for t in tracks}
 
@@ -224,9 +240,9 @@ class CameraPipeline(threading.Thread):
             bbox = track["bbox"]
             conf = track["conf"]
 
-            # 限频提取特征
+            # ReID 跳帧：CPU=15帧，GPU=5帧（由 main.py 传入）
             last_reid = self._reid_frame_counter.get(tid, -999)
-            if self._frame_idx - last_reid < self.REID_EVERY_N_FRAMES:
+            if self._frame_idx - last_reid < self._reid_every_n:
                 continue
             self._reid_frame_counter[tid] = self._frame_idx
 
@@ -283,13 +299,18 @@ class CameraPipeline(threading.Thread):
             conf = track["conf"]
             gid = self._track_to_global.get(tid)
 
-            # 校验脚下中心点 (foot_x, foot_y) 是否落入 ROI 电子围栏
-            foot_x, foot_y = float((x1 + x2) / 2), float(y2)
+            # 围栏入侵检测：检查 bbox 底部 3 个关键点 + 中心点
+            # 任一点落入 ROI 多边形即视为侵入，避免纯足点漏报
+            check_points = [
+                (float((x1 + x2) / 2), float(y2)),            # 底部中心（脚点）
+                (float(x1),            float(y2)),            # 底部左角
+                (float(x2),            float(y2)),            # 底部右角
+                (float((x1 + x2) / 2), float((y1 + y2) / 2)), # 身体中心
+            ]
             is_intrusion = False
             for roi in self._rois:
                 pts = np.array([[int(p[0] * w_img), int(p[1] * h_img)] for p in roi["polygon"]], np.int32)
-                res = cv2.pointPolygonTest(pts, (foot_x, foot_y), measureDist=False)
-                if res >= 0:
+                if any(cv2.pointPolygonTest(pts, pt, measureDist=False) >= 0 for pt in check_points):
                     is_intrusion = True
                     self.alerter.trigger_intrusion(self.camera_id, gid or f"Trk_{tid}", roi.get("name", "危险区域"), [x1, y1, x2, y2])
                     break

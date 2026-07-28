@@ -11,6 +11,11 @@
       "next": "cam_03",
       "expected_seconds": 10000,
       "tolerance_seconds": 15
+    },
+    {
+      "next": "cam_02",
+      "expected_seconds": 30000,
+      "tolerance_seconds": 15
     }
   ]
 }

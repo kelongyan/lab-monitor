@@ -37,6 +37,7 @@ _broadcaster = None
 _identity_store = None
 _calibrator = None
 _pipelines = None
+_mjpeg_sleep = 0.033  # 默认 ~30fps（GPU），CPU 模式由 init_server 覆盖为 0.067（15fps）
 
 # ROI 校验常量与文件锁
 _ROI_MAX_VERTICES = 64
@@ -45,14 +46,15 @@ _ROI_COORD_MAX = 1.0
 _roi_file_lock = asyncio.Lock()
 
 
-def init_server(frame_hub, broadcaster, identity_store, calibrator=None, pipelines=None, topology=None):
-    global _frame_hub, _broadcaster, _identity_store, _calibrator, _pipelines, _topology
+def init_server(frame_hub, broadcaster, identity_store, calibrator=None, pipelines=None, topology=None, mjpeg_fps: float = 30.0):
+    global _frame_hub, _broadcaster, _identity_store, _calibrator, _pipelines, _topology, _mjpeg_sleep
     _frame_hub = frame_hub
     _broadcaster = broadcaster
     _identity_store = identity_store
     _calibrator = calibrator
     _pipelines = pipelines
     _topology = topology
+    _mjpeg_sleep = 1.0 / max(1.0, mjpeg_fps)
 
 
 
@@ -431,7 +433,7 @@ async def _mjpeg_generator(cam_id: str):
             + data
             + b"\r\n"
         )
-        await asyncio.sleep(0.033)  # ~30 fps，匹配 GPU 推理速度
+        await asyncio.sleep(_mjpeg_sleep)
 
 
 @app.get("/stream/{cam_id}")

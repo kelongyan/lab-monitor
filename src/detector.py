@@ -32,15 +32,17 @@ class PersonDetector:
         输入：BGR 图像帧
         返回：[[x1, y1, x2, y2, conf], ...] — 仅 person 类
         """
+        kwargs = {
+            "classes": [0],
+            "conf": self.conf_thresh,
+            "device": self.device,
+            "verbose": False,
+        }
+        if self.use_fp16:
+            kwargs["half"] = True
+
         with self._lock:
-            results = self.model.predict(
-                frame,
-                classes=[0],          # person only
-                conf=self.conf_thresh,
-                device=self.device,
-                half=self.use_fp16,
-                verbose=False,
-            )
+            results = self.model.predict(frame, **kwargs)
         detections = []
         for r in results:
             boxes = r.boxes

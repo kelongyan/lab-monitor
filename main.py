@@ -79,13 +79,33 @@ def main(display: bool = False, web: bool = True, web_port: int = 8000) -> None:
         device = "cpu"
         logger.info("ℹ️ 未检测到 CUDA 显卡，当前运行于 CPU 模式")
 
+    # ---- 性能配置：根据设备自动切换 CPU / GPU 参数 ----
+    if device == "cuda":
+        perf = dict(
+            detect_every_n  = 1,     # GPU：每帧检测
+            reid_every_n    = 5,     # GPU：每5帧 ReID
+            frame_rate_cap  = 30.0,  # GPU：上限30fps
+            mjpeg_fps       = 30.0,  # GPU：MJPEG 30fps
+            jpeg_quality    = 85,    # GPU：高画质
+        )
+        logger.info("⚙️ 性能模式: GPU 高帧率 (30fps / YOLO每帧 / ReID每5帧)")
+    else:
+        perf = dict(
+            detect_every_n  = 3,     # CPU：每3帧检测，中间帧 Kalman 预测
+            reid_every_n    = 15,    # CPU：每15帧 ReID，降低 OSNet 推理压力
+            frame_rate_cap  = 15.0,  # CPU：上限15fps，避免 CPU 打满
+            mjpeg_fps       = 15.0,  # CPU：MJPEG 15fps
+            jpeg_quality    = 65,    # CPU：降低编码成本
+        )
+        logger.info("⚙️ 性能模式: CPU 节能 (15fps / YOLO每3帧 / ReID每15帧)")
+
     # ---- 初始化共享组件 ----
     logger.info("加载模型中（首次运行会自动下载权重）...")
     detector       = PersonDetector(model_name="yolov8n.pt", conf_thresh=0.4, device=device)
     reid_extractor = build_reid_extractor(device=device)
     identity_store = IdentityStore()
     topology       = CameraTopology(TOPO_CFG)
-    frame_hub      = FrameHub()
+    frame_hub      = FrameHub(jpeg_quality=perf["jpeg_quality"])
     broadcaster    = AlertBroadcaster()
     notifier       = build_notifier(NOTIFY_CFG)
     calibrator     = TransitCalibrator(OUTPUT_DIR / "transit_stats.json")
@@ -115,6 +135,9 @@ def main(display: bool = False, web: bool = True, web_port: int = 8000) -> None:
             frame_hub=frame_hub,
             calibrator=calibrator,
             display=display,
+            detect_every_n = perf["detect_every_n"],
+            reid_every_n   = perf["reid_every_n"],
+            frame_rate_cap = perf["frame_rate_cap"],
         )
         pipelines.append(p)
         p.start()
@@ -122,7 +145,11 @@ def main(display: bool = False, web: bool = True, web_port: int = 8000) -> None:
 
     # ---- 启动 Web 服务器 ----
     if web:
-        web_server.init_server(frame_hub, broadcaster, identity_store, calibrator, pipelines=pipelines, topology=topology)
+        web_server.init_server(
+            frame_hub, broadcaster, identity_store, calibrator,
+            pipelines=pipelines, topology=topology,
+            mjpeg_fps=perf["mjpeg_fps"],
+        )
         web_server.start_server_thread(port=web_port)
         time.sleep(0.5)
 

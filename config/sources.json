@@ -1,6 +1,6 @@
 {
-  "cam_01": "videos/people_sample.mp4",
-  "cam_02": "videos/store_sample.mp4",
-  "cam_03": "videos/street_sample.mp4",
-  "cam_04": "videos/hall_sample.mp4"
+  "cam_01": "videos/pedestrian_sidewalk.mp4",
+  "cam_02": "videos/pedestrian_street.mp4",
+  "cam_03": "videos/pedestrian_crosswalk.mp4",
+  "cam_04": "videos/pedestrian_crowd.mp4"
 }

@@ -21,8 +21,8 @@ if (Test-Path $pidFile) {
     Remove-Item -Path $pidFile -Force -ErrorAction SilentlyContinue
 }
 
-# 2. 检查并清理所有占用 8000 端口的残余进程
-$portConns = Get-NetTCPConnection -LocalPort 8000 -ErrorAction SilentlyContinue
+# 2. 检查并清理所有占用 8000 端口 Listen 状态的残余进程
+$portConns = Get-NetTCPConnection -LocalPort 8000 -State Listen -ErrorAction SilentlyContinue
 if ($portConns) {
     foreach ($conn in $portConns) {
         $owningPid = $conn.OwningProcess
