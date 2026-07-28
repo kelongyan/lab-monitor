@@ -1,4 +1,4 @@
-# <img src="docs/images/qlu.png" alt="齐鲁工业大学 Logo" height="38" valign="middle"> <img src="docs/images/chaosuan.png" alt="国家超算中心 Logo" height="38" valign="middle"> Lab-Monitor 实验室/超算中心智能监控预警系统
+# <img src="docs/images/qlu.png" alt="齐鲁工业大学 Logo" height="38" valign="middle"> <img src="docs/images/chaosuan.png" alt="国家超算中心 Logo" height="38" valign="middle"> Lab-Monitor 超算中心智能监控预警系统
 
 <p align="center">
   <b>基于计算机视觉与 ReID 的多摄像头实时监控、跨视角目标追踪及智能化告警平台</b>
