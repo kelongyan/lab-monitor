@@ -79,7 +79,9 @@ class CameraPipeline(threading.Thread):
         self._detect_every_n = max(1, detect_every_n)
         self._reid_every_n   = max(1, reid_every_n)
         self._frame_rate_cap = max(1.0, frame_rate_cap)
-        self._last_detections: list = []  # YOLO 跳帧时复用上一次检测结果
+        # 跳帧时复用上次 tracker 输出：保持 track_id 稳定，ReID 能正常积累
+        # 不能传空列表给 ByteTracker（会立刻清空所有 track，导致 ReID 永远重置）
+        self._last_tracks: list = []
 
         # Phase 4: 多帧 ReID 确认器（每路摄像头独立）
         self._validator = ReIDValidator(
@@ -222,13 +224,12 @@ class CameraPipeline(threading.Thread):
                         cv2.FONT_HERSHEY_SIMPLEX, 0.5, (0, 165, 255), 2)
 
         # YOLO 跳帧检测：CPU 模式每 N 帧推理一次
-        # 跳帧时传空列表让 Kalman 滤波器自主预测，避免旧检测误导 tracker
+        # 非检测帧直接复用上次 tracker 输出（track_id 稳定，ReID 持续积累）
+        # 不能传空列表给 ByteTracker：空列表会导致所有 track 瞬间丢失
         if self._frame_idx % self._detect_every_n == 0:
-            self._last_detections = self.detector.detect(frame)
-            detections = self._last_detections
-        else:
-            detections = []  # 让 Kalman 预测，不喂旧坐标
-        tracks = self._tracker.update(detections, frame.shape)
+            detections = self.detector.detect(frame)
+            self._last_tracks = self._tracker.update(detections, frame.shape)
+        tracks = self._last_tracks
         current_track_ids = {t["track_id"] for t in tracks}
 
         left_ids = self._prev_track_ids - current_track_ids
