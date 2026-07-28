@@ -17,6 +17,7 @@
    - [告警通知配置 (`config/notify.json`)](#告警通知配置-confignotifyjson)
 5. [系统启动与后台服务运行](#5-系统启动与后台服务运行)
 6. [常见问题与故障排查 (Troubleshooting)](#6-常见问题与故障排查-troubleshooting)
+7. [数据保留与敏感信息](#7-数据保留与敏感信息)
 
 ---
 
@@ -59,6 +60,13 @@
 - **RTSP 标准 URL 格式**：
   - 海康威视：`rtsp://admin:password@192.168.1.64:554/h264/ch1/main/av_stream`
   - 大华：`rtsp://admin:password@192.168.1.108:554/cam/realmonitor?channel=1&subtype=0`
+
+RTSP URL 中的用户名和密码会在应用日志中自动脱敏。连接和读取默认各使用 10 秒超时，可按网络条件在当前进程中调整：
+
+```powershell
+$env:LAB_MONITOR_RTSP_OPEN_TIMEOUT_MS = "15000"
+$env:LAB_MONITOR_RTSP_READ_TIMEOUT_MS = "15000"
+```
 
 ---
 
@@ -197,9 +205,21 @@ python main.py
   .\stop.ps1
   ```
 
+`start.ps1` 只有在 `/healthz` 返回本项目的健康响应后才提示启动成功。Python logging 写入 `outputs/server.log`，标准输出写入 `outputs/server.stdout.log`。`stop.ps1` 优先调用本机安全停止接口，等待 pipeline、校准文件、JSONL 和 SQLite 完成收尾；只有超时后才强制终止已通过 PID、命令行和监听端口共同校验的项目进程。
+
 ### 访问 Web 监控面板
 服务启动后，使用浏览器访问：
 👉 **http://localhost:8000**
+
+默认只监听 `127.0.0.1`，局域网内其他设备无法直接访问。确需远程访问时，必须同时配置登录凭据，再显式指定监听地址：
+
+```powershell
+$env:LAB_MONITOR_USERNAME = "operator"
+$env:LAB_MONITOR_PASSWORD = "请替换为高强度密码"
+python main.py --host 0.0.0.0 --port 8000
+```
+
+浏览器首次访问时会显示 HTTP Basic 登录框。远程部署必须通过 Nginx、Caddy 等可信反向代理启用 HTTPS；Basic 认证本身不加密用户名、密码和监控数据。不要把密码写入仓库文件或 PowerShell 脚本。
 
 ---
 
@@ -218,4 +238,20 @@ python main.py
 
 ### Q3: 端口 8000 被占用，无法启动？
 - **原因**：上一次运行的服务未完全退出，或其它程序占用了 8000 端口。
-- **解决**：运行 `.\stop.ps1` 强行释放端口，或在 `main.py` 中自定义 `web_port` 端口号。
+- **解决**：若是本项目旧实例，运行 `.\stop.ps1` 安全停止；若是其他程序，请先确认归属后自行处理，或运行 `python main.py --port 8001` 使用其他端口。停止脚本不会终止无法确认归属的进程。
+
+---
+
+## 7. 数据保留与敏感信息
+
+系统默认保留最近 30 天的 SQLite 告警、身份轨迹、JSONL 镜像和告警截图；启动时会先把旧 JSONL 幂等合并进 SQLite，再执行过期清理。可通过环境变量调整保留期和内存身份上限：
+
+```powershell
+$env:LAB_MONITOR_RETENTION_DAYS = "30"
+$env:LAB_MONITOR_MAX_IDENTITIES = "10000"
+python main.py
+```
+
+`outputs/lab_monitor.db` 中的 ReID 主特征和 Feature Bank 属于敏感生物特征数据。部署时应限制 `outputs/` 的文件系统访问权限，备份必须加密，不应上传到公共对象存储或代码仓库。切换 ReID 模型时，系统会按 `feature_space` 隔离不兼容特征，不会把同维度但不同模型的向量混入同一身份库。
+
+CSV 和 JSONL 是审计数据副本；在线历史查询以 SQLite 为唯一权威源。调整保留期前应按组织审计要求确认，缩短保留期会在下次启动时删除过期数据和截图。

@@ -6,12 +6,17 @@ identity_store.py — 线程安全的全局身份库
 import threading
 import uuid
 import time
+import logging
 import numpy as np
 from collections import deque
 from dataclasses import dataclass, field
 
+from .reid import match_feature_detailed
+
 # 每个身份最多保留最近 N 条出现记录，防止长时间运行后内存耗尽
 _MAX_APPEARANCES = 200
+_FEATURE_SCHEMA_VERSION = 1
+logger = logging.getLogger("identity_store")
 
 
 class ReIDMetrics:
@@ -36,12 +41,13 @@ class ReIDMetrics:
         best_sim: float,
         second_sim: float = 0.0,
         is_ratio_blocked: bool = False,
+        matched: bool = False,
         latency_ms: float = 0.0,
     ) -> None:
         with self._lock:
             if is_ratio_blocked:
                 self.ratio_blocked_count += 1
-            else:
+            if matched:
                 self.successful_matches += 1
                 self.sim_history.append(best_sim)
                 if best_sim > 0 and second_sim > 0:
@@ -80,17 +86,157 @@ class PersonRecord:
     feature: np.ndarray          # 主平均特征向量（L2归一化）
     feature_bank: list           # 多姿态/多光照特征向量库 [np.ndarray, ...] (最多保留 5 个)
     appearances: deque           # deque(maxlen=_MAX_APPEARANCES)，自动丢弃旧记录
+    total_appearances: int = 0
     last_camera: str = ""
     last_seen: float = 0.0
+
+
+@dataclass(frozen=True)
+class IdentityResolution:
+    global_id: str | None
+    status: str
+    best_similarity: float = 0.0
+    second_similarity: float = 0.0
+
+    @property
+    def is_new(self) -> bool:
+        return self.status == "created"
 
 
 class IdentityStore:
     """线程安全的全局人员身份库"""
 
-    def __init__(self):
+    def __init__(
+        self,
+        database=None,
+        feature_space: str = "unspecified",
+        max_records: int = 10000,
+    ):
         self._lock = threading.Lock()
         self._records: dict[str, PersonRecord] = {}
+        self._database = database
+        self._feature_space = feature_space
+        self._max_records = max(1, max_records)
+        self._feature_dim: int | None = None
         self.metrics = ReIDMetrics()
+        if self._database is not None:
+            self._restore()
+
+    def _restore(self) -> None:
+        restored = 0
+        items = sorted(
+            self._database.load_identities(),
+            key=lambda item: item.get("last_seen", 0.0),
+            reverse=True,
+        )[:self._max_records]
+        for item in items:
+            try:
+                if item["schema_version"] != _FEATURE_SCHEMA_VERSION:
+                    logger.warning(
+                        "跳过身份 %s：特征版本 %s 不受支持",
+                        item["global_id"], item["schema_version"],
+                    )
+                    continue
+                if item["feature_space"] != self._feature_space:
+                    logger.warning(
+                        "跳过身份 %s：特征空间 %r 与当前 %r 不一致",
+                        item["global_id"], item["feature_space"], self._feature_space,
+                    )
+                    continue
+                dim = int(item["feature_dim"])
+                if dim <= 0 or len(item["feature_blob"]) != dim * 4:
+                    raise ValueError("主特征字节长度不匹配")
+                if self._feature_dim is not None and dim != self._feature_dim:
+                    logger.warning(
+                        "跳过身份 %s：特征维度 %d 与当前库 %d 不一致",
+                        item["global_id"], dim, self._feature_dim,
+                    )
+                    continue
+                feature = np.frombuffer(
+                    item["feature_blob"], dtype=np.float32
+                ).copy()
+                bank_count = int(item["feature_bank_count"])
+                bank_blob = item["feature_bank_blob"]
+                if bank_count:
+                    if len(bank_blob) != bank_count * dim * 4:
+                        raise ValueError("Feature Bank 字节长度不匹配")
+                    bank_matrix = np.frombuffer(
+                        bank_blob, dtype=np.float32
+                    ).reshape(bank_count, dim)
+                    feature_bank = [row.copy() for row in bank_matrix]
+                else:
+                    feature_bank = [feature.copy()]
+                appearances = deque(
+                    (dict(entry) for entry in item["appearances"]),
+                    maxlen=_MAX_APPEARANCES,
+                )
+                self._records[item["global_id"]] = PersonRecord(
+                    global_id=item["global_id"],
+                    feature=feature,
+                    feature_bank=feature_bank,
+                    appearances=appearances,
+                    total_appearances=int(item["total_appearances"]),
+                    last_camera=item["last_camera"],
+                    last_seen=float(item["last_seen"]),
+                )
+                self._feature_dim = dim
+                restored += 1
+            except (KeyError, TypeError, ValueError) as error:
+                logger.warning(
+                    "跳过损坏的身份持久化记录 %s: %s",
+                    item.get("global_id", "<unknown>"), error,
+                )
+        if restored:
+            logger.info("已从 SQLite 恢复 %d 个 ReID 身份", restored)
+
+    @staticmethod
+    def _snapshot(rec: PersonRecord) -> PersonRecord:
+        return PersonRecord(
+            global_id=rec.global_id,
+            feature=rec.feature.copy(),
+            feature_bank=[feature.copy() for feature in rec.feature_bank],
+            appearances=deque(
+                (dict(entry) for entry in rec.appearances),
+                maxlen=_MAX_APPEARANCES,
+            ),
+            total_appearances=rec.total_appearances,
+            last_camera=rec.last_camera,
+            last_seen=rec.last_seen,
+        )
+
+    def _persist(self, rec: PersonRecord, new_appearance: dict | None = None) -> None:
+        if self._database is None:
+            return
+        feature = np.asarray(rec.feature, dtype=np.float32)
+        bank = np.stack(rec.feature_bank).astype(np.float32, copy=False)
+        self._database.save_identity(
+            global_id=rec.global_id,
+            feature_dim=int(feature.size),
+            feature_blob=feature.tobytes(),
+            feature_bank_count=len(bank),
+            feature_bank_blob=bank.tobytes(),
+            appearances=list(rec.appearances),
+            total_appearances=rec.total_appearances,
+            last_camera=rec.last_camera,
+            last_seen=rec.last_seen,
+            feature_space=self._feature_space,
+            new_appearance=new_appearance,
+            schema_version=_FEATURE_SCHEMA_VERSION,
+        )
+
+    def _make_room_locked(self) -> list[str]:
+        if len(self._records) < self._max_records:
+            return []
+        victim = min(
+            self._records.values(),
+            key=lambda record: record.last_seen,
+        )
+        self._records.pop(victim.global_id, None)
+        return [victim.global_id]
+
+    def _delete_persisted(self, global_ids: list[str]) -> None:
+        if self._database is not None and global_ids:
+            self._database.delete_identities(global_ids)
 
     # ------------------------------------------------------------------ #
     # 查询                                                                  #
@@ -109,7 +255,7 @@ class IdentityStore:
     def get(self, global_id: str) -> PersonRecord | None:
         with self._lock:
             rec = self._records.get(global_id)
-            return rec  # 调用方需在锁外使用，feature 是 ndarray 不可变即可
+            return self._snapshot(rec) if rec is not None else None
 
     def get_last_bbox(self, global_id: str) -> list[float]:
         """在锁内安全读取最后一次出现的 bbox，避免调用方在锁外访问可变的 appearances deque"""
@@ -125,63 +271,92 @@ class IdentityStore:
 
     def register(self, feature: np.ndarray) -> str:
         """注册新身份，返回新 global_id"""
-        gid = str(uuid.uuid4())[:8]
-        feat_copy = feature.copy()
+        feat_copy = np.asarray(feature, dtype=np.float32).copy()
+        if feat_copy.ndim != 1 or np.linalg.norm(feat_copy) <= 1e-8:
+            raise ValueError("身份特征必须是一维非零向量")
+        feat_copy /= np.linalg.norm(feat_copy)
         with self._lock:
-            self._records[gid] = PersonRecord(
+            if self._feature_dim is not None and feat_copy.size != self._feature_dim:
+                raise ValueError("身份特征维度与当前特征库不一致")
+            self._feature_dim = int(feat_copy.size)
+            evicted = self._make_room_locked()
+            gid = str(uuid.uuid4())[:8]
+            rec = PersonRecord(
                 global_id=gid,
                 feature=feat_copy,
-                feature_bank=[feat_copy],
+                feature_bank=[feat_copy.copy()],
                 appearances=deque(maxlen=_MAX_APPEARANCES),
             )
+            self._records[gid] = rec
+            snapshot = self._snapshot(rec)
+        self._persist(snapshot)
+        self._delete_persisted(evicted)
         return gid
 
     def register_if_new(
         self,
         feature: np.ndarray,
         threshold: float = 0.75,
-    ) -> tuple[str, bool]:
+        ratio: float = 0.85,
+    ) -> IdentityResolution:
         """
         原子性向量化查重+注册：
         在持有锁的情况下，利用矩阵乘法一次性计算 query 特征与所有记录主特征/特征库的相似度。
-        - 有匹配 → 返回 (existing_id, False)，不重复注册
-        - 无匹配 → 在锁内注册并返回 (new_id, True)
+        返回 matched、created 或 ambiguous，歧义结果不会静默归并 Top-1。
         """
         feat_copy = feature.copy()
+        norm = np.linalg.norm(feat_copy)
+        if norm <= 1e-8:
+            return IdentityResolution(global_id=None, status="invalid")
+        feat_copy /= norm
         with self._lock:
+            if self._feature_dim is not None and feat_copy.size != self._feature_dim:
+                return IdentityResolution(global_id=None, status="invalid")
             if self._records:
-                # 提取所有主特征进行矩阵点积加速
-                gids = list(self._records.keys())
-                main_feats = np.stack([self._records[g].feature for g in gids]) # (N, D)
-                sims = main_feats @ feature # (N,)
-                max_idx = int(np.argmax(sims))
-                if sims[max_idx] >= threshold:
-                    return gids[max_idx], False
-
-                # 深入检查特征库 (feature bank)
-                # 一次性构建全局 bank 矩阵批量 matmul，避免持锁期间 N 次循环
-                all_bank_feats: list[np.ndarray] = []
-                all_bank_gids: list[str] = []
-                for g, rec in self._records.items():
-                    for f in rec.feature_bank:
-                        all_bank_feats.append(f)
-                        all_bank_gids.append(g)
-                if all_bank_feats:
-                    bank_matrix = np.stack(all_bank_feats)  # (N*K, D)
-                    bank_sims = bank_matrix @ feature        # (N*K,)
-                    max_idx = int(np.argmax(bank_sims))
-                    if bank_sims[max_idx] >= threshold:
-                        return all_bank_gids[max_idx], False
+                gallery = []
+                for global_id, record in self._records.items():
+                    candidates = [record.feature, *record.feature_bank]
+                    best_feature = max(
+                        candidates,
+                        key=lambda candidate: float(candidate @ feat_copy),
+                    )
+                    gallery.append((global_id, best_feature))
+                detail = match_feature_detailed(
+                    feat_copy,
+                    gallery,
+                    threshold=threshold,
+                    ratio=ratio,
+                )
+                if detail.matched_id is not None:
+                    return IdentityResolution(
+                        global_id=detail.matched_id,
+                        status="matched",
+                        best_similarity=detail.best_sim,
+                        second_similarity=detail.second_sim,
+                    )
+                if detail.is_ratio_blocked:
+                    return IdentityResolution(
+                        global_id=None,
+                        status="ambiguous",
+                        best_similarity=detail.best_sim,
+                        second_similarity=detail.second_sim,
+                    )
 
             # 未找到相似身份，在锁内注册，保证原子性
+            evicted = self._make_room_locked()
             gid = str(uuid.uuid4())[:8]
-            self._records[gid] = PersonRecord(
+            rec = PersonRecord(
                 global_id=gid,
                 feature=feat_copy,
-                feature_bank=[feat_copy],
+                feature_bank=[feat_copy.copy()],
                 appearances=deque(maxlen=_MAX_APPEARANCES),
             )
-            return gid, True
+            self._records[gid] = rec
+            self._feature_dim = int(feat_copy.size)
+            snapshot = self._snapshot(rec)
+        self._persist(snapshot)
+        self._delete_persisted(evicted)
+        return IdentityResolution(global_id=gid, status="created")
 
     def update_appearance(
         self,
@@ -200,6 +375,7 @@ class IdentityStore:
         self.metrics.record_quality(quality)
         alpha = base_alpha + (1.0 - base_alpha) * (1.0 - quality)
         feat_copy = feature.copy()
+        snapshot = None
         with self._lock:
             rec = self._records.get(global_id)
             if rec is None:
@@ -230,15 +406,11 @@ class IdentityStore:
             rec.appearances.append({
                 "camera": camera_id,
                 "time": rec.last_seen,
-                "bbox": bbox,
+                "bbox": list(bbox),
             })
-
-            # 同步更新 SQLite 数据库（方向三）
-            try:
-                from .db import db
-                db.upsert_identity(global_id, camera_id, last_seen=rec.last_seen, appearances_count=len(rec.appearances))
-            except Exception:
-                pass
+            rec.total_appearances += 1
+            snapshot = self._snapshot(rec)
+        self._persist(snapshot, new_appearance=dict(snapshot.appearances[-1]))
 
     def all_ids(self) -> list[str]:
         with self._lock:
@@ -248,4 +420,3 @@ class IdentityStore:
         with self._lock:
             g_size = len(self._records)
         return self.metrics.get_summary(gallery_size=g_size)
-

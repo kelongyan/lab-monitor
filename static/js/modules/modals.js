@@ -1,18 +1,80 @@
 /**
  * 弹窗与模态框交互模块
  */
-import { BASE, showToast } from '../utils/api.js';
+import { BASE, fetchJson, showToast } from '../utils/api.js';
 import { escapeHtml, escapeAttr } from '../utils/formatter.js';
 import { getCachedCameras } from './grid.js';
 
+const SVG_NS = 'http://www.w3.org/2000/svg';
+const modalRequests = new Map();
+const modalGenerations = new Map();
+const modalOpeners = new Map();
+
+function beginModalRequest(modalId) {
+  modalRequests.get(modalId)?.abort();
+  const controller = new AbortController();
+  const generation = (modalGenerations.get(modalId) || 0) + 1;
+  modalGenerations.set(modalId, generation);
+  modalRequests.set(modalId, controller);
+  return {
+    signal: controller.signal,
+    isCurrent: () => (
+      modalGenerations.get(modalId) === generation
+      && !controller.signal.aborted
+      && document.getElementById(modalId)?.classList.contains('active')
+    ),
+  };
+}
+
+function createSvgElement(tagName, attributes = {}) {
+  const element = document.createElementNS(SVG_NS, tagName);
+  Object.entries(attributes).forEach(([name, value]) => {
+    element.setAttribute(name, String(value));
+  });
+  return element;
+}
+
+function appendSvgText(parent, value, attributes) {
+  const text = createSvgElement('text', attributes);
+  text.textContent = String(value);
+  parent.appendChild(text);
+  return text;
+}
+
 export function openModal(id) {
   const el = document.getElementById(id);
-  if (el) el.classList.add('active');
+  if (!el) return;
+  if (!el.classList.contains('active')) {
+    modalOpeners.set(id, document.activeElement);
+  }
+  el.classList.add('active');
+  el.setAttribute('aria-hidden', 'false');
+  const focusFirstControl = () => {
+    if (!el.classList.contains('active')) return;
+    const focusTarget = el.querySelector(
+      '.modal-close-btn, button:not([disabled]), a[href], input:not([disabled])'
+    ) || el.querySelector('.modal-container');
+    focusTarget?.focus();
+  };
+  focusFirstControl();
+  setTimeout(focusFirstControl, 260);
 }
 
 export function closeModal(id) {
   const el = document.getElementById(id);
-  if (el) el.classList.remove('active');
+  if (!el) return;
+  el.classList.remove('active');
+  el.setAttribute('aria-hidden', 'true');
+  modalRequests.get(id)?.abort();
+  modalRequests.delete(id);
+  modalGenerations.set(id, (modalGenerations.get(id) || 0) + 1);
+  el.querySelectorAll('img').forEach(img => {
+    if (img.src.includes('/stream/')) img.src = '';
+  });
+  el.dispatchEvent(new CustomEvent('modal:closed'));
+  const opener = modalOpeners.get(id);
+  modalOpeners.delete(id);
+  if (opener instanceof HTMLElement && opener.isConnected) opener.focus();
 }
 
 export function openAlertDetailModal(alert) {
@@ -28,12 +90,16 @@ export function openAlertDetailModal(alert) {
   const gidHtml = escapeHtml(alert.global_id);
   const gidAttr = escapeAttr(alert.global_id);
   const camHtml = escapeHtml(alert.last_camera);
-  const camAttr = escapeAttr(alert.last_camera);
   const stageHtml = escapeHtml(alert.stage || 'ALERT');
   const riskHtml = escapeHtml(alert.risk_level || 'HIGH');
   const elapsedHtml = escapeHtml(alert.elapsed_seconds);
-  const alertIdHtml = encodeURIComponent(alert.alert_id || '');
   const expectedHtml = (alert.expected_cameras || []).map(c => escapeHtml(c)).join(', ') || '无';
+  const snapshotHtml = alert.screenshot_url
+    ? `<div class="snapshot-shell">
+         <img id="alert-snapshot-img" src="${escapeAttr(alert.screenshot_url)}" class="snapshot-preview" alt="现场快照">
+         <div id="alert-snapshot-empty" class="empty-state" hidden>该事件无可用现场快照</div>
+       </div>`
+    : '<div class="empty-state">该事件无可用现场快照</div>';
 
   body.innerHTML = `
     <div style="font-size: 13px; color: var(--text-muted); line-height: 1.5;">
@@ -43,8 +109,9 @@ export function openAlertDetailModal(alert) {
     <div class="meta-grid">
       <div class="meta-card">
         <div class="label">目标 Global ID</div>
-        <div class="val" style="color: var(--primary); cursor: pointer;" id="btn-alert-traj">
-          #${gidHtml} (点击看轨迹)
+        <div class="val" style="cursor: pointer;" id="btn-alert-traj">
+          <span class="id-link" style="font-size: 14px; padding: 2px 8px;">#${gidHtml}</span>
+          <span style="font-size: 11px; color: var(--text-muted); font-weight: normal; margin-left: 4px;">🔍 查看轨迹</span>
         </div>
       </div>
       <div class="meta-card">
@@ -65,10 +132,18 @@ export function openAlertDetailModal(alert) {
 
     <div style="margin-top: 8px;">
       <div style="font-size: 12px; font-weight: 700; color: var(--text-muted); margin-bottom: 6px;">📷 现场最后快照:</div>
-      <img src="${BASE}/screenshots/${alertIdHtml}.jpg" class="snapshot-preview"
-           onerror="this.onerror=null; this.src='${BASE}/stream/${camAttr}';" alt="现场快照">
+      ${snapshotHtml}
     </div>
   `;
+
+  const snapshotImage = body.querySelector('#alert-snapshot-img');
+  if (snapshotImage) {
+    snapshotImage.addEventListener('error', () => {
+      snapshotImage.hidden = true;
+      const empty = body.querySelector('#alert-snapshot-empty');
+      if (empty) empty.hidden = false;
+    }, { once: true });
+  }
 
   const btnTraj = document.getElementById('btn-alert-traj');
   if (btnTraj) {
@@ -86,16 +161,17 @@ export async function showTrajectoryModal(global_id) {
   const body = document.getElementById('modal-traj-body');
   if (!title || !body) return;
 
-  title.textContent = `目标 #${global_id} 跨镜头通行轨迹链`;
+  title.innerHTML = `目标 <span class="id-link" style="font-size: 15px; margin: 0 4px;">#${escapeHtml(global_id)}</span> 跨镜头通行轨迹链`;
   body.innerHTML = `<div class="empty-state">加载人员轨迹数据中...</div>`;
   openModal('trajectory-modal');
+  const request = beginModalRequest('trajectory-modal');
 
   try {
-    const res = await fetch(`/api/identities/${global_id}`).then(r => r.json());
-    if (res.error) {
-      body.innerHTML = `<div class="empty-state">暂无该目标移动轨迹历史</div>`;
-      return;
-    }
+    const res = await fetchJson(
+      `/api/identities/${encodeURIComponent(global_id)}`,
+      { signal: request.signal },
+    );
+    if (!request.isCurrent()) return;
 
     const traj = res.trajectory || [];
     if (traj.length === 0) {
@@ -136,6 +212,7 @@ export async function showTrajectoryModal(global_id) {
       </div>
     `;
   } catch (e) {
+    if (!request.isCurrent()) return;
     body.innerHTML = `<div class="empty-state">获取轨迹失败: ${e.message}</div>`;
   }
 }
@@ -148,9 +225,11 @@ export async function openIdentitySearchModal() {
   title.textContent = `ReID 全局身份档案库`;
   body.innerHTML = `<div class="empty-state">读取全量 ReID 身份中...</div>`;
   openModal('trajectory-modal');
+  const request = beginModalRequest('trajectory-modal');
 
   try {
-    const res = await fetch(`/api/identities`).then(r => r.json());
+    const res = await fetchJson('/api/identities', { signal: request.signal });
+    if (!request.isCurrent()) return;
     const ids = res.ids || [];
     if (ids.length === 0) {
       body.innerHTML = `<div class="empty-state">当前尚未登记任何 ReID 人员身份</div>`;
@@ -166,7 +245,7 @@ export async function openIdentitySearchModal() {
           const idAttr = escapeAttr(id);
           const idHtml = escapeHtml(id);
           return `
-          <div class="meta-card id-card-btn" style="cursor: pointer;" data-id="${idAttr}">
+          <div class="meta-card id-card-btn" style="cursor: pointer;" data-id="${idAttr}" role="button" tabindex="0">
             <div class="label">Global ID</div>
             <div class="val" style="color: var(--primary);">#${idHtml}</div>
           </div>`;
@@ -175,12 +254,20 @@ export async function openIdentitySearchModal() {
     `;
 
     body.querySelectorAll('.id-card-btn').forEach(card => {
-      card.addEventListener('click', () => {
+      const openIdentity = () => {
         showTrajectoryModal(card.getAttribute('data-id'));
+      };
+      card.addEventListener('click', openIdentity);
+      card.addEventListener('keydown', event => {
+        if (event.key === 'Enter' || event.key === ' ') {
+          event.preventDefault();
+          openIdentity();
+        }
       });
     });
   } catch(e) {
-    body.innerHTML = `<div class="empty-state">加载失败</div>`;
+    if (!request.isCurrent()) return;
+    body.innerHTML = `<div class="empty-state">加载失败: ${escapeHtml(e.message)}</div>`;
   }
 }
 
@@ -189,12 +276,19 @@ export async function openTopologyModal() {
   if (!body) return;
   body.innerHTML = `<div class="empty-state">读取与渲染拓扑网络中...</div>`;
   openModal('topology-modal');
+  const request = beginModalRequest('topology-modal');
 
   try {
-    const [topoRes, statsRes] = await Promise.all([
-      fetch('/api/topology').then(r => r.json()),
-      fetch('/api/stats').then(r => r.json()).catch(() => ({ calibration: {} }))
-    ]);
+    const topoRes = await fetchJson('/api/topology', { signal: request.signal });
+    if (!request.isCurrent()) return;
+    let statsRes = { calibration: {} };
+    try {
+      statsRes = await fetchJson('/api/stats', { signal: request.signal });
+    } catch (error) {
+      if (request.signal.aborted) return;
+      console.warn('AI 校准统计暂不可用:', error.message);
+    }
+    if (!request.isCurrent()) return;
 
     const statsData = statsRes.calibration || {};
     let edgesList = [];
@@ -227,7 +321,7 @@ export async function openTopologyModal() {
       return;
     }
 
-    const nodeCoords = {};
+    const nodeCoords = new Map();
     const W = 700, H = 340;
     const count = camNodes.length;
 
@@ -239,22 +333,19 @@ export async function openTopologyModal() {
           { x: 540, y: 250 },
           { x: 160, y: 250 }
         ];
-        nodeCoords[id] = coords4[idx] || { x: 350, y: 170 };
+        nodeCoords.set(id, coords4[idx] || { x: 350, y: 170 });
       } else {
         const angle = (idx / count) * 2 * Math.PI - Math.PI / 2;
-        nodeCoords[id] = {
+        nodeCoords.set(id, {
           x: Math.round(350 + 220 * Math.cos(angle)),
           y: Math.round(170 + 110 * Math.sin(angle))
-        };
+        });
       }
     });
 
-    let pathsSvg = '';
-    let labelsSvg = '';
-
-    edgesList.forEach((e) => {
-      const fromPos = nodeCoords[e.from] || { x: 100, y: 100 };
-      const toPos = nodeCoords[e.to] || { x: 200, y: 200 };
+    const renderedEdges = edgesList.map((e) => {
+      const fromPos = nodeCoords.get(e.from) || { x: 100, y: 100 };
+      const toPos = nodeCoords.get(e.to) || { x: 200, y: 200 };
 
       const dx = toPos.x - fromPos.x;
       const dy = toPos.y - fromPos.y;
@@ -268,45 +359,16 @@ export async function openTopologyModal() {
 
       const pathD = `M ${fromPos.x} ${fromPos.y} Q ${ctrlX} ${ctrlY} ${toPos.x} ${toPos.y}`;
 
-      const statKey = `${e.from}->${e.to}`;
+      const statKey = `${e.from}→${e.to}`;
       const statItem = statsData[statKey];
       const aiTimeText = statItem ? `AI校准: ${statItem.mean_seconds}s` : `预期: ${e.expected_seconds}s`;
 
-      pathsSvg += `
-        <path d="${pathD}" stroke="rgba(56, 189, 248, 0.2)" stroke-width="3" fill="none" />
-        <path d="${pathD}" stroke="url(#topo-line-grad)" stroke-width="2.5" stroke-dasharray="8 6" fill="none" marker-end="url(#arrow)" class="topo-flow-path" />
-      `;
-
       const labelX = (fromPos.x + toPos.x) / 2 + nx * (curveOffset * 0.75);
       const labelY = (fromPos.y + toPos.y) / 2 + ny * (curveOffset * 0.75);
-
-      labelsSvg += `
-        <g transform="translate(${labelX}, ${labelY})">
-          <rect x="-42" y="-11" width="84" height="22" rx="11" fill="rgba(15, 23, 42, 0.9)" stroke="rgba(56, 189, 248, 0.4)" stroke-width="1"/>
-          <text x="0" y="3" text-anchor="middle" fill="#38bdf8" font-size="10" font-family="JetBrains Mono" font-weight="700">${aiTimeText}</text>
-        </g>
-      `;
+      return { pathD, labelX, labelY, label: aiTimeText };
     });
 
-    let nodesSvg = '';
     const cachedCams = getCachedCameras();
-    camNodes.forEach(id => {
-      const pos = nodeCoords[id];
-      const isOnline = cachedCams.some(c => c.camera_id === id && c.is_online);
-      const statusColor = isOnline ? '#10b981' : '#ef4444';
-
-      nodesSvg += `
-        <g class="topo-node-group" transform="translate(${pos.x}, ${pos.y})" cursor="pointer" data-cam="${escapeAttr(id)}">
-          <circle r="32" fill="none" stroke="${statusColor}" stroke-opacity="0.3" stroke-width="2">
-            <animate attributeName="r" values="28;38;28" dur="3s" repeatCount="indefinite"/>
-            <animate attributeName="stroke-opacity" values="0.4;0.0;0.4" dur="3s" repeatCount="indefinite"/>
-          </circle>
-          <circle r="26" fill="rgba(15, 23, 42, 0.95)" stroke="${statusColor}" stroke-width="2" box-shadow="0 0 16px ${statusColor}"/>
-          <text x="0" y="-4" text-anchor="middle" fill="#38bdf8" font-size="10" font-family="JetBrains Mono" font-weight="800">CAM</text>
-          <text x="0" y="12" text-anchor="middle" fill="#f8fafc" font-size="11" font-family="JetBrains Mono" font-weight="800">${id.toUpperCase()}</text>
-        </g>
-      `;
-    });
 
     body.innerHTML = `
       <style>
@@ -335,9 +397,9 @@ export async function openTopologyModal() {
               <path d="M 0 1 L 10 5 L 0 9 z" fill="#38bdf8"/>
             </marker>
           </defs>
-          ${pathsSvg}
-          ${labelsSvg}
-          ${nodesSvg}
+          <g id="topo-paths"></g>
+          <g id="topo-labels"></g>
+          <g id="topo-nodes"></g>
         </svg>
       </div>
 
@@ -358,27 +420,6 @@ export async function openTopologyModal() {
               </tr>
             </thead>
             <tbody id="topo-edit-tbody">
-              ${edgesList.map((e) => `
-                <tr class="topo-edge-row">
-                  <td><input type="text" class="tech-cam-input topo-from" value="${escapeAttr(e.from)}"></td>
-                  <td><input type="text" class="tech-cam-input topo-to" value="${escapeAttr(e.to)}"></td>
-                  <td>
-                    <div class="tech-num-box">
-                      <button class="tech-num-btn btn-step-sub" type="button">-</button>
-                      <input type="number" class="tech-num-input topo-exp" value="${e.expected_seconds}" min="1">
-                      <button class="tech-num-btn btn-step-add" type="button">+</button>
-                    </div>
-                  </td>
-                  <td>
-                    <div class="tech-num-box">
-                      <button class="tech-num-btn btn-step-sub" type="button">-</button>
-                      <input type="number" class="tech-num-input topo-tol" value="${e.tolerance_seconds || 15}" min="1">
-                      <button class="tech-num-btn btn-step-add" type="button">+</button>
-                    </div>
-                  </td>
-                  <td><button class="clear-btn btn-delete-row" type="button" style="color: var(--danger);">删除</button></td>
-                </tr>
-              `).join('')}
             </tbody>
           </table>
         </div>
@@ -388,10 +429,21 @@ export async function openTopologyModal() {
       </div>
     `;
 
+    renderTopologySvg(body, renderedEdges, camNodes, nodeCoords, cachedCams);
+    const tableBody = body.querySelector('#topo-edit-tbody');
+    edgesList.forEach(edge => tableBody.appendChild(createTopologyRow(edge)));
+
     // 绑定事件处理器
     body.querySelectorAll('.topo-node-group').forEach(group => {
-      group.addEventListener('click', () => {
+      const openCamera = () => {
         openCamZoomModal(group.getAttribute('data-cam'));
+      };
+      group.addEventListener('click', openCamera);
+      group.addEventListener('keydown', event => {
+        if (event.key === 'Enter' || event.key === ' ') {
+          event.preventDefault();
+          openCamera();
+        }
       });
     });
 
@@ -404,8 +456,90 @@ export async function openTopologyModal() {
     bindTopoTableButtons(body);
 
   } catch(e) {
+    if (!request.isCurrent()) return;
     body.innerHTML = `<div class="empty-state">加载拓扑图表失败: ${e.message}</div>`;
   }
+}
+
+function renderTopologySvg(container, edges, cameraIds, nodeCoords, cachedCams) {
+  const paths = container.querySelector('#topo-paths');
+  const labels = container.querySelector('#topo-labels');
+  const nodes = container.querySelector('#topo-nodes');
+
+  edges.forEach(edge => {
+    paths.appendChild(createSvgElement('path', {
+      d: edge.pathD,
+      stroke: 'rgba(56, 189, 248, 0.2)',
+      'stroke-width': 3,
+      fill: 'none'
+    }));
+    paths.appendChild(createSvgElement('path', {
+      d: edge.pathD,
+      stroke: 'url(#topo-line-grad)',
+      'stroke-width': 2.5,
+      'stroke-dasharray': '8 6',
+      fill: 'none',
+      'marker-end': 'url(#arrow)',
+      class: 'topo-flow-path'
+    }));
+
+    const labelGroup = createSvgElement('g', {
+      transform: `translate(${edge.labelX}, ${edge.labelY})`
+    });
+    labelGroup.appendChild(createSvgElement('rect', {
+      x: -42, y: -11, width: 84, height: 22, rx: 11,
+      fill: 'rgba(15, 23, 42, 0.9)',
+      stroke: 'rgba(56, 189, 248, 0.4)',
+      'stroke-width': 1
+    }));
+    appendSvgText(labelGroup, edge.label, {
+      x: 0, y: 3, 'text-anchor': 'middle', fill: '#38bdf8',
+      'font-size': 10, 'font-family': 'JetBrains Mono', 'font-weight': 700
+    });
+    labels.appendChild(labelGroup);
+  });
+
+  cameraIds.forEach(cameraId => {
+    const pos = nodeCoords.get(cameraId);
+    const isOnline = cachedCams.some(
+      camera => camera.camera_id === cameraId && camera.is_online
+    );
+    const statusColor = isOnline ? '#10b981' : '#ef4444';
+    const group = createSvgElement('g', {
+      class: 'topo-node-group',
+      transform: `translate(${pos.x}, ${pos.y})`,
+      cursor: 'pointer',
+      'data-cam': cameraId,
+      role: 'button',
+      tabindex: 0,
+      'aria-label': `放大摄像头 ${cameraId}`
+    });
+    const pulse = createSvgElement('circle', {
+      r: 32, fill: 'none', stroke: statusColor,
+      'stroke-opacity': 0.3, 'stroke-width': 2
+    });
+    pulse.appendChild(createSvgElement('animate', {
+      attributeName: 'r', values: '28;38;28', dur: '3s', repeatCount: 'indefinite'
+    }));
+    pulse.appendChild(createSvgElement('animate', {
+      attributeName: 'stroke-opacity', values: '0.4;0.0;0.4',
+      dur: '3s', repeatCount: 'indefinite'
+    }));
+    group.appendChild(pulse);
+    group.appendChild(createSvgElement('circle', {
+      r: 26, fill: 'rgba(15, 23, 42, 0.95)',
+      stroke: statusColor, 'stroke-width': 2
+    }));
+    appendSvgText(group, 'CAM', {
+      x: 0, y: -4, 'text-anchor': 'middle', fill: '#38bdf8',
+      'font-size': 10, 'font-family': 'JetBrains Mono', 'font-weight': 800
+    });
+    appendSvgText(group, cameraId.toUpperCase(), {
+      x: 0, y: 12, 'text-anchor': 'middle', fill: '#f8fafc',
+      'font-size': 11, 'font-family': 'JetBrains Mono', 'font-weight': 800
+    });
+    nodes.appendChild(group);
+  });
 }
 
 function bindTopoTableButtons(container) {
@@ -433,29 +567,43 @@ export function stepNumInput(btn, delta) {
 export function addTopologyRow() {
   const tbody = document.getElementById('topo-edit-tbody');
   if (!tbody) return;
+  const tr = createTopologyRow({
+    from: 'cam_01',
+    to: 'cam_02',
+    expected_seconds: 30,
+    tolerance_seconds: 15
+  });
+  tbody.appendChild(tr);
+  bindTopoTableButtons(tr);
+}
+
+function createTopologyRow(edge) {
   const tr = document.createElement('tr');
   tr.className = 'topo-edge-row';
   tr.innerHTML = `
-    <td><input type="text" class="tech-cam-input topo-from" value="cam_01"></td>
-    <td><input type="text" class="tech-cam-input topo-to" value="cam_02"></td>
+    <td><input type="text" class="tech-cam-input topo-from"></td>
+    <td><input type="text" class="tech-cam-input topo-to"></td>
     <td>
       <div class="tech-num-box">
         <button class="tech-num-btn btn-step-sub" type="button">-</button>
-        <input type="number" class="tech-num-input topo-exp" value="30" min="1">
+        <input type="number" class="tech-num-input topo-exp" min="1">
         <button class="tech-num-btn btn-step-add" type="button">+</button>
       </div>
     </td>
     <td>
       <div class="tech-num-box">
         <button class="tech-num-btn btn-step-sub" type="button">-</button>
-        <input type="number" class="tech-num-input topo-tol" value="15" min="1">
+        <input type="number" class="tech-num-input topo-tol" min="0">
         <button class="tech-num-btn btn-step-add" type="button">+</button>
       </div>
     </td>
-    <td><button class="clear-btn btn-delete-row" type="button" style="color: var(--danger);">🗑️ 删除</button></td>
+    <td><button class="clear-btn btn-delete-row" type="button" style="color: var(--danger);">删除</button></td>
   `;
-  tbody.appendChild(tr);
-  bindTopoTableButtons(tr);
+  tr.querySelector('.topo-from').value = String(edge.from ?? '');
+  tr.querySelector('.topo-to').value = String(edge.to ?? '');
+  tr.querySelector('.topo-exp').value = String(edge.expected_seconds ?? 30);
+  tr.querySelector('.topo-tol').value = String(edge.tolerance_seconds ?? 15);
+  return tr;
 }
 
 export async function saveTopologyConfig() {
@@ -479,17 +627,17 @@ export async function saveTopologyConfig() {
   });
 
   try {
-    const resp = await fetch('/api/topology', {
+    const res = await fetchJson('/api/topology', {
       method: 'POST',
       headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify(graph)
+      body: JSON.stringify(graph),
+      timeoutMs: 8000,
     });
-    const res = await resp.json();
-    if (resp.ok && res.status === 'success') {
+    if (res.status === 'success') {
       showToast('摄像头拓扑结构与期望通行时间保存并即时生效成功！', 'success');
       openTopologyModal();
     } else {
-      showToast('保存拓扑失败: ' + (res.error || `HTTP ${resp.status}`), 'error');
+      showToast('保存拓扑失败: 服务端未确认配置生效', 'error');
     }
   } catch(e) {
     showToast('保存拓扑发生网络错误: ' + e.message, 'error');
@@ -511,9 +659,14 @@ export async function openHistoryExportModal() {
     </div>
   `;
   openModal('history-modal');
+  const request = beginModalRequest('history-modal');
 
   try {
-    const res = await fetch('/api/alerts/history?limit=50').then(r => r.json());
+    const res = await fetchJson(
+      '/api/alerts/history?limit=50',
+      { signal: request.signal },
+    );
+    if (!request.isCurrent()) return;
     const alerts = res.alerts || [];
     const container = document.getElementById('history-logs-container');
 
@@ -551,7 +704,8 @@ export async function openHistoryExportModal() {
       </div>
     `;
   } catch(e) {
-    document.getElementById('history-logs-container').innerHTML = `<div class="empty-state">获取历史日志失败</div>`;
+    if (!request.isCurrent()) return;
+    document.getElementById('history-logs-container').innerHTML = `<div class="empty-state">获取历史日志失败: ${escapeHtml(e.message)}</div>`;
   }
 }
 
@@ -560,10 +714,14 @@ export function openCamZoomModal(cam_id) {
   const body = document.getElementById('modal-alert-body');
   if (!title || !body) return;
   title.textContent = `摄像头高清放大监视器: ${cam_id.toUpperCase()}`;
+  closeModal('topology-modal');
+
+  const streamUrl = `${BASE}/stream/${encodeURIComponent(cam_id)}`;
+  const camIdHtml = escapeHtml(cam_id);
 
   body.innerHTML = `
     <div class="cam-view" style="height: 380px; border-radius: 12px;">
-      <img src="${BASE}/stream/${cam_id}" alt="${cam_id}">
+      <img src="${streamUrl}" alt="${camIdHtml}">
     </div>
     <div style="display: flex; justify-content: flex-end; margin-top: 10px;">
       <button class="action-btn" id="btn-close-zoom-modal">关闭放大视角</button>
@@ -576,3 +734,246 @@ export function openCamZoomModal(cam_id) {
   }
   openModal('alert-detail-modal');
 }
+
+// 全局全量告警缓存（用于焦点视角侧边栏同步回填）
+const allAlertsHistory = [];
+
+export function clearModalAlertHistory() {
+  allAlertsHistory.length = 0;
+  const logList = document.getElementById('focus-modal-log-list');
+  const countEl = document.getElementById('focus-log-count');
+  if (countEl) countEl.textContent = '0';
+  if (logList) {
+    logList.innerHTML = `
+      <div class="secure-empty-box" style="padding: 20px 10px; margin: 10px 0;">
+        <div class="secure-shield-icon" style="width: 40px; height: 40px; font-size: 18px;">🛡️</div>
+        <div class="secure-empty-title" style="font-size: 12px;">当前视角暂无异常</div>
+      </div>
+    `;
+  }
+}
+
+export function pushAlertToModalHistory(alert) {
+  allAlertsHistory.unshift(alert);
+  if (allAlertsHistory.length > 200) allAlertsHistory.pop();
+  onRealtimeAlertReceived(alert);
+}
+
+export function renderAlertCardElement(alert) {
+  const isWarning = alert.stage === 'WARNING';
+  const isIntrusion = alert.alert_type === 'INTRUSION';
+  const isCrowd = alert.alert_type === 'CROWD_DENSITY';
+  const isSceneExit = alert.alert_type === 'SCENE_EXIT';
+
+  const timeStr = new Date(alert.timestamp * 1000).toLocaleTimeString('zh-CN');
+  const stage = alert.stage || 'ALERT';
+  const card = document.createElement('div');
+
+  const alertClass = isIntrusion ? 'INTRUSION' : (stage === 'WARNING' ? 'WARNING' : alert.risk_level);
+  card.className = `alert-card ${alertClass}`;
+  card.setAttribute('role', 'button');
+  card.tabIndex = 0;
+  card.addEventListener('click', () => openAlertDetailModal(alert));
+  card.addEventListener('keydown', event => {
+    if (event.key === 'Enter' || event.key === ' ') {
+      event.preventDefault();
+      openAlertDetailModal(alert);
+    }
+  });
+
+  let titleText;
+  if (isIntrusion)      titleText = 'ROI 区域非法越界入侵';
+  else if (isCrowd)     titleText = '区域人流密度超限预警';
+  else if (isSceneExit) titleText = '目标全域场景消失失联';
+  else if (isWarning)   titleText = '路径通行超时预警';
+  else                  titleText = '目标通行超时失联';
+
+  const gidHtml = escapeHtml(alert.global_id);
+  const gidAttr = escapeAttr(alert.global_id);
+  const riskHtml = escapeHtml(alert.risk_level);
+  const camHtml = escapeHtml(alert.last_camera);
+  const expectedHtml = (alert.expected_cameras || []).map(c => escapeHtml(c)).join(', ') || '无';
+  const elapsedHtml = escapeHtml(alert.elapsed_seconds);
+
+  card.innerHTML = `
+    <div class="alert-card-header">
+      <div class="alert-type-title">
+        <span>${titleText}</span>
+      </div>
+      <div class="alert-time-tag">${timeStr}</div>
+    </div>
+    <div class="alert-body-grid">
+      <div class="alert-item">目标 ID: <val class="id-link" data-action="trajectory" data-gid="${gidAttr}">#${gidHtml}</val></div>
+      <div class="alert-item">风险等级: <val>${riskHtml}</val></div>
+      <div class="alert-item">位置: <val>${camHtml}</val></div>
+      <div class="alert-item">${isIntrusion ? '状态' : '已用时长'}: <val>${isIntrusion ? '越界入侵' : elapsedHtml + 's'}</val></div>
+      <div class="alert-item" style="grid-column: span 2;">预期/区域: <val>${expectedHtml}</val></div>
+    </div>
+  `;
+
+  const trajLink = card.querySelector('[data-action="trajectory"]');
+  if (trajLink && !isCrowd) {
+    trajLink.addEventListener('click', (e) => {
+      e.stopPropagation();
+      showTrajectoryModal(alert.global_id);
+    });
+  }
+  return card;
+}
+
+let currentFocusCamId = null;
+
+export function getActiveFocusCamId() {
+  return currentFocusCamId;
+}
+
+export function onRealtimeAlertReceived(alert) {
+  if (!currentFocusCamId) return;
+  const matchCam = alert.last_camera === currentFocusCamId || (alert.expected_cameras && alert.expected_cameras.includes(currentFocusCamId));
+  if (!matchCam) return;
+
+  const logList = document.getElementById('focus-modal-log-list');
+  const countEl = document.getElementById('focus-log-count');
+  if (!logList) return;
+
+  const emptyBox = logList.querySelector('.secure-empty-box, .empty-state');
+  if (emptyBox) emptyBox.remove();
+
+  const card = renderAlertCardElement(alert);
+  logList.insertBefore(card, logList.firstChild);
+  while (logList.children.length > 200) {
+    logList.removeChild(logList.lastChild);
+  }
+
+  if (countEl) {
+    const cur = parseInt(countEl.textContent || '0', 10);
+    countEl.textContent = Math.min(cur + 1, 200);
+  }
+}
+
+export function updateFocusCameraStatus(camera) {
+  if (!camera || camera.camera_id !== currentFocusCamId) return;
+  const dot = document.getElementById('focus-modal-dot');
+  const fps = document.getElementById('focus-modal-fps');
+  const spec = document.getElementById('focus-modal-spec');
+  const isReconnecting = camera.status_text === 'RECONNECTING';
+  if (dot) {
+    dot.className = 'cam-status-dot' + (
+      camera.is_online ? '' : (isReconnecting ? ' reconnecting' : ' offline')
+    );
+  }
+  if (fps) fps.textContent = `${camera.is_online ? camera.fps : 0} FPS`;
+  if (spec) {
+    const width = camera.display_width || '--';
+    const height = camera.display_height || '--';
+    spec.textContent = `${camera.is_online ? 'LIVE' : camera.status_text || 'OFFLINE'} | ${width}x${height} MJPEG`;
+  }
+}
+
+export function openFocusModal(camId) {
+  if (!camId) return;
+  currentFocusCamId = camId;
+
+  const overlay = document.getElementById('focus-modal-overlay');
+  const title = document.getElementById('focus-modal-title');
+  const img = document.getElementById('focus-modal-img');
+  const logList = document.getElementById('focus-modal-log-list');
+  const countEl = document.getElementById('focus-log-count');
+  const btnToggle = document.getElementById('btn-toggle-focus-sidebar');
+  const sidebar = document.getElementById('focus-sidebar');
+  const textToggle = document.getElementById('text-toggle-sidebar');
+
+  if (!overlay || !img) return;
+
+  if (title) title.textContent = `${camId.toUpperCase()} 焦点特写指挥视窗`;
+  img.src = `${BASE}/stream/${encodeURIComponent(camId)}`;
+  const camera = getCachedCameras().find(item => item.camera_id === camId);
+  if (camera) updateFocusCameraStatus(camera);
+
+  // 左侧面板折叠/展开开关
+  if (btnToggle && sidebar && textToggle) {
+    btnToggle.onclick = (e) => {
+      e.stopPropagation();
+      sidebar.classList.toggle('collapsed');
+      const isCol = sidebar.classList.contains('collapsed');
+      textToggle.textContent = isCol ? '展开视角日志' : '收起视角日志';
+      btnToggle.querySelector('span').textContent = isCol ? '👉' : '👈';
+    };
+  }
+
+  // 同步且零延迟过滤属于当前摄像头的历史事件
+  const filtered = allAlertsHistory.filter(a => a.last_camera === camId || (a.expected_cameras && a.expected_cameras.includes(camId)));
+
+  if (countEl) countEl.textContent = filtered.length;
+
+  if (logList) {
+    logList.innerHTML = '';
+    if (filtered.length === 0) {
+      logList.innerHTML = `
+        <div class="secure-empty-box" style="padding: 20px 10px; margin: 10px 0;">
+          <div class="secure-shield-icon" style="width: 40px; height: 40px; font-size: 18px;">🛡️</div>
+          <div class="secure-empty-title" style="font-size: 12px;">当前视角暂无异常</div>
+          <div class="secure-empty-sub" style="font-size: 10px;">智能监控持续守护中</div>
+        </div>
+      `;
+    } else {
+      filtered.slice(0, 200).forEach(alert => {
+        const card = renderAlertCardElement(alert);
+        logList.appendChild(card);
+      });
+    }
+  }
+
+  openModal(overlay.id);
+
+  const btnClose = document.getElementById('btn-close-focus');
+  if (btnClose) {
+    btnClose.onclick = (e) => {
+      if (e) e.stopPropagation();
+      closeFocusModal();
+    };
+  }
+
+  overlay.onclick = (e) => {
+    if (e.target === overlay || e.target.classList.contains('focus-modal-overlay')) {
+      closeFocusModal();
+    }
+  };
+}
+
+export function closeFocusModal() {
+  currentFocusCamId = null;
+  const overlay = document.getElementById('focus-modal-overlay');
+  if (overlay) closeModal(overlay.id);
+}
+
+document.addEventListener('keydown', (e) => {
+  const activeModals = [...document.querySelectorAll('.modal-overlay.active')];
+  const topModal = activeModals.at(-1);
+  if (!topModal) return;
+  if (e.key === 'Escape') {
+    e.preventDefault();
+    if (topModal.id === 'focus-modal-overlay') closeFocusModal();
+    else closeModal(topModal.id);
+    return;
+  }
+  if (e.key === 'Tab') {
+    const focusable = [...topModal.querySelectorAll(
+      'button:not([disabled]), a[href], input:not([disabled]), select:not([disabled]), textarea:not([disabled]), [tabindex="0"]'
+    )].filter(element => !element.hidden && element.offsetParent !== null);
+    if (!focusable.length) {
+      e.preventDefault();
+      topModal.querySelector('.modal-container')?.focus();
+      return;
+    }
+    const first = focusable[0];
+    const last = focusable.at(-1);
+    if (e.shiftKey && document.activeElement === first) {
+      e.preventDefault();
+      last.focus();
+    } else if (!e.shiftKey && document.activeElement === last) {
+      e.preventDefault();
+      first.focus();
+    }
+  }
+});

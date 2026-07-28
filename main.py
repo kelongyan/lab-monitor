@@ -7,6 +7,7 @@ import json
 import time
 import logging
 import threading
+import os
 from pathlib import Path
 
 from src.detector import PersonDetector
@@ -17,7 +18,8 @@ from src.alerter import AlertManager, AlertBroadcaster
 from src.frame_hub import FrameHub
 from src.notifier import build_notifier
 from src.calibrator import TransitCalibrator
-from src.pipeline import CameraPipeline
+from src.pipeline import CameraPipeline, redact_source
+from src.db import db
 import server as web_server
 
 logging.basicConfig(
@@ -41,14 +43,65 @@ def load_sources() -> dict[str, str]:
         return json.load(f)
 
 
-def alert_ticker(alert_manager: AlertManager, interval: float = 0.5) -> None:
+def alert_ticker(
+    alert_manager: AlertManager,
+    stop_event: threading.Event,
+    interval: float = 0.5,
+) -> None:
     """后台线程：每隔 interval 秒检查一次超时告警（GPU 服务器模式：0.5s）"""
-    while True:
+    while not stop_event.is_set():
         alert_manager.tick()
-        time.sleep(interval)
+        stop_event.wait(interval)
 
 
-def main(display: bool = False, web: bool = True, web_port: int = 8000) -> None:
+def apply_output_retention(retention_days: int) -> dict[str, int]:
+    cutoff = time.time() - max(1, retention_days) * 86400
+    removed_screenshots = 0
+    if SCREENSHOT_DIR.exists():
+        for screenshot in SCREENSHOT_DIR.glob("*.jpg"):
+            try:
+                if screenshot.stat().st_mtime < cutoff:
+                    screenshot.unlink()
+                    removed_screenshots += 1
+            except OSError:
+                logger.warning("无法清理过期快照: %s", screenshot)
+
+    removed_log_rows = 0
+    if ALERT_LOG.exists():
+        retained = []
+        with ALERT_LOG.open("r", encoding="utf-8") as source:
+            for line in source:
+                try:
+                    alert = json.loads(line)
+                except json.JSONDecodeError:
+                    removed_log_rows += 1
+                    continue
+                if float(alert.get("timestamp", 0)) < cutoff:
+                    removed_log_rows += 1
+                else:
+                    retained.append(json.dumps(alert, ensure_ascii=False) + "\n")
+        temp = ALERT_LOG.with_name(f".{ALERT_LOG.name}.retention.tmp")
+        try:
+            with temp.open("w", encoding="utf-8") as output:
+                output.writelines(retained)
+                output.flush()
+                os.fsync(output.fileno())
+            os.replace(temp, ALERT_LOG)
+        finally:
+            if temp.exists():
+                temp.unlink()
+    return {
+        "screenshots": removed_screenshots,
+        "jsonl_rows": removed_log_rows,
+    }
+
+
+def main(
+    display: bool = False,
+    web: bool = True,
+    web_port: int = 8000,
+    web_host: str = "127.0.0.1",
+) -> None:
     sources = load_sources()
 
     # 检查视频文件是否存在（仅本地文件，RTSP 跳过检查）
@@ -103,21 +156,45 @@ def main(display: bool = False, web: bool = True, web_port: int = 8000) -> None:
     logger.info("加载模型中（首次运行会自动下载权重）...")
     detector       = PersonDetector(model_name="yolov8n.pt", conf_thresh=0.4, device=device)
     reid_extractor = build_reid_extractor(device=device)
-    identity_store = IdentityStore()
-    topology       = CameraTopology(TOPO_CFG)
+    imported_alerts = db.import_alert_log(ALERT_LOG)
+    if imported_alerts:
+        logger.info("已将 %d 条旧 JSONL 告警合并进 SQLite", imported_alerts)
+    retention_days = int(os.getenv("LAB_MONITOR_RETENTION_DAYS", "30"))
+    retention_db = db.apply_retention(retention_days)
+    retention_files = apply_output_retention(retention_days)
+    if any(retention_db.values()) or any(retention_files.values()):
+        logger.info(
+            "保留策略已清理: SQLite=%s, files=%s",
+            retention_db,
+            retention_files,
+        )
+    identity_store = IdentityStore(
+        database=db,
+        feature_space=reid_extractor.feature_space,
+        max_records=int(os.getenv("LAB_MONITOR_MAX_IDENTITIES", "10000")),
+    )
+    topology       = CameraTopology(TOPO_CFG, allowed_camera_ids=set(load_sources()))
     frame_hub      = FrameHub(jpeg_quality=perf["jpeg_quality"])
-    broadcaster    = AlertBroadcaster()
+    frame_hub.register_cameras(sources)
+    broadcaster    = AlertBroadcaster(delivery_enabled=web)
     notifier       = build_notifier(NOTIFY_CFG)
-    calibrator     = TransitCalibrator(OUTPUT_DIR / "transit_stats.json")
+    calibrator     = TransitCalibrator(
+        OUTPUT_DIR / "transit_stats.json",
+        valid_edges=topology.edges(),
+    )
     alert_manager  = AlertManager(
         alert_log=ALERT_LOG,
         notifier=notifier,
         broadcaster=broadcaster,
         identity_store=identity_store,  # 场景消失检测
         scene_exit_seconds=300.0,       # 5 分钟无出现则触发 SCENE_EXIT
+        screenshot_dir=SCREENSHOT_DIR,
+        frame_provider=frame_hub.get_frame,
+        database=db,
     )
 
     SCREENSHOT_DIR.mkdir(parents=True, exist_ok=True)
+    shutdown_event = threading.Event()
 
     # ---- 启动 Web 服务器 ----
     # ---- 启动各路流水线 ----
@@ -141,7 +218,15 @@ def main(display: bool = False, web: bool = True, web_port: int = 8000) -> None:
         )
         pipelines.append(p)
         p.start()
-        logger.info("启动摄像头 %s → %s", cam_id, source)
+        logger.info("启动摄像头 %s → %s", cam_id, redact_source(source))
+
+    def request_shutdown() -> None:
+        if shutdown_event.is_set():
+            return
+        logger.info("收到安全停止请求，正在停止流水线并落盘...")
+        shutdown_event.set()
+        for pipeline in pipelines:
+            pipeline.stop()
 
     # ---- 启动 Web 服务器 ----
     if web:
@@ -149,14 +234,23 @@ def main(display: bool = False, web: bool = True, web_port: int = 8000) -> None:
             frame_hub, broadcaster, identity_store, calibrator,
             pipelines=pipelines, topology=topology,
             mjpeg_fps=perf["mjpeg_fps"],
+            shutdown_callback=request_shutdown,
         )
-        web_server.start_server_thread(port=web_port)
-        time.sleep(0.5)
+        try:
+            web_server.start_server_thread(host=web_host, port=web_port)
+        except Exception:
+            request_shutdown()
+            for pipeline in pipelines:
+                pipeline.join(timeout=5)
+            alert_manager.close()
+            calibrator.flush()
+            db.close()
+            raise
 
     # ---- 启动预警后台检查线程 ----
     ticker = threading.Thread(
         target=alert_ticker,
-        args=(alert_manager,),
+        args=(alert_manager, shutdown_event),
         daemon=True,
         name="alert-ticker",
     )
@@ -164,15 +258,22 @@ def main(display: bool = False, web: bool = True, web_port: int = 8000) -> None:
 
     logger.info("所有流水线已启动（%d 路）", len(pipelines))
     if web:
-        logger.info("监控大屏：http://localhost:%d", web_port)
+        logger.info("监控大屏：http://%s:%d", web_host, web_port)
 
     try:
-        for p in pipelines:
-            p.join()
+        while any(p.is_alive() for p in pipelines):
+            for pipeline in pipelines:
+                pipeline.join(timeout=0.5)
     except KeyboardInterrupt:
-        logger.info("收到中断信号，正在停止...")
-        for p in pipelines:
-            p.stop()
+        request_shutdown()
+    finally:
+        request_shutdown()
+        for pipeline in pipelines:
+            pipeline.join(timeout=5)
+        ticker.join(timeout=2)
+        calibrator.flush()
+        alert_manager.close()
+        db.close()
 
     logger.info("系统已停止，告警日志：%s", ALERT_LOG)
 
@@ -182,6 +283,12 @@ if __name__ == "__main__":
     parser = argparse.ArgumentParser(description="超算中心监控预警系统")
     parser.add_argument("--display",   action="store_true", help="显示本地画面窗口")
     parser.add_argument("--no-web",    action="store_true", help="不启动 Web 服务器")
+    parser.add_argument("--host",      default="127.0.0.1", help="Web 监听地址（默认仅本机）")
     parser.add_argument("--port",      type=int, default=8000, help="Web 端口（默认 8000）")
     args = parser.parse_args()
-    main(display=args.display, web=not args.no_web, web_port=args.port)
+    main(
+        display=args.display,
+        web=not args.no_web,
+        web_port=args.port,
+        web_host=args.host,
+    )

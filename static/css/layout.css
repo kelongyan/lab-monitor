@@ -152,3 +152,65 @@ header {
   gap: 16px;
   overflow: hidden;
 }
+
+button:focus-visible,
+a:focus-visible,
+[role="button"]:focus-visible,
+[tabindex]:focus-visible {
+  outline: 2px solid var(--primary);
+  outline-offset: 2px;
+}
+
+@media (max-width: 1100px) {
+  body {
+    height: auto;
+    min-height: 100vh;
+    overflow-x: hidden;
+    overflow-y: auto;
+  }
+
+  header {
+    height: auto;
+    min-height: 64px;
+    padding: 10px 16px;
+    flex-wrap: wrap;
+    gap: 10px;
+  }
+
+  .header-actions {
+    flex-wrap: wrap;
+  }
+
+  .layout {
+    flex-direction: column;
+    overflow: visible;
+  }
+
+  .main-content {
+    overflow: visible;
+  }
+}
+
+@media (max-width: 700px) {
+  .brand-title-group h1 {
+    font-size: 14px;
+  }
+
+  .brand-tag,
+  .time-display {
+    display: none;
+  }
+
+  .header-actions {
+    width: 100%;
+  }
+
+  .action-btn {
+    min-height: 34px;
+  }
+
+  .layout {
+    padding: 10px;
+    gap: 10px;
+  }
+}

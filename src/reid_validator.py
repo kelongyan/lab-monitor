@@ -87,6 +87,7 @@ class ReIDValidator:
                 best_sim=detail.best_sim,
                 second_sim=detail.second_sim,
                 is_ratio_blocked=detail.is_ratio_blocked,
+                matched=detail.matched_id is not None,
                 latency_ms=latency_ms,
             )
 
@@ -145,3 +146,7 @@ class ReIDValidator:
     def buffer_len(self, track_id: int) -> int:
         """P2: 公开接口替代直接访问 _buffers 私有成员（供 pipeline.py 展示缓冲进度）"""
         return len(self._buffers.get(track_id, []))
+
+    @property
+    def buffer_size(self) -> int:
+        return self._buffer_size

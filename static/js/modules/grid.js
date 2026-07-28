@@ -16,12 +16,6 @@ export function getCachedCameras() {
 export function setFocusCamera(camId) {
   if (!camId) return;
   currentFocusCamId = camId;
-  if (currentGridMode === 'auto' || currentGridMode === '2') {
-    setGridMode('1n');
-  } else {
-    renderCamGrid(cachedCameras, true);
-  }
-  showToast(`已将 ${camId.toUpperCase()} 切换为主焦点监视视角`, 'info');
 }
 
 export function setGridMode(mode) {
@@ -36,6 +30,9 @@ export function buildSingleCamCardHTML(cam, isFocus = false) {
   const isReconnecting = cam.status_text === 'RECONNECTING';
   const camIdAttr = escapeAttr(cam.camera_id);
   const camIdHtml = escapeHtml(cam.camera_id);
+  const streamUrl = `${BASE}/stream/${encodeURIComponent(cam.camera_id)}`;
+  const streamState = cam.is_online ? 'LIVE' : (cam.status_text || 'OFFLINE');
+  const streamSpec = `${cam.display_width || '--'}x${cam.display_height || '--'} MJPEG`;
   return `
     <div class="cam-card ${isFocus ? 'theater-focus-card' : ''}" id="card-${camIdHtml}">
       <div class="cam-header">
@@ -45,17 +42,17 @@ export function buildSingleCamCardHTML(cam, isFocus = false) {
         </div>
         <div class="cam-controls">
           <button class="cam-control-btn" title="手动画围栏" data-action="roi" data-cam="${camIdAttr}">ROI 围栏</button>
-          <button class="cam-control-btn" title="焦点主视角" data-action="focus" data-cam="${camIdAttr}">焦点</button>
+          <button class="cam-control-btn" title="居中放大特写" data-action="focus" data-cam="${camIdAttr}">🔍 焦点放大</button>
         </div>
         <div class="cam-badges">
           ${cam.reconnect_count > 0 ? `<div class="rtsp-diag-badge" id="reconn-${camIdHtml}">RTSP 重连: ${escapeHtml(cam.reconnect_count)}次</div>` : ''}
-          <div class="cam-rec-badge"><div class="rec-circle"></div>REC</div>
+          <div class="cam-rec-badge" id="rec-${camIdHtml}"><div class="rec-circle"></div>${cam.is_online ? 'REC' : streamState}</div>
           <div class="cam-fps-badge" id="fps-${camIdHtml}">${escapeHtml(cam.fps)} FPS</div>
         </div>
       </div>
       <div class="cam-view">
-        <img src="${BASE}/stream/${camIdHtml}" id="stream-img-${camIdHtml}" alt="${camIdHtml}" loading="lazy">
-        <div class="cam-hud-tag">LIVE | 1080P MJPEG</div>
+        <img src="${streamUrl}" id="stream-img-${camIdHtml}" alt="${camIdHtml}" loading="lazy">
+        <div class="cam-hud-tag" id="spec-${camIdHtml}">${streamState} | ${streamSpec}</div>
       </div>
     </div>
   `;
@@ -64,7 +61,16 @@ export function buildSingleCamCardHTML(cam, isFocus = false) {
 export function renderCamGrid(cameras, forceRefresh = false) {
   cachedCameras = cameras;
   const grid = document.getElementById('cam-grid');
-  if (!cameras || cameras.length === 0) return;
+  if (!grid) return;
+  if (!cameras || cameras.length === 0) {
+    camIds = [];
+    currentFocusCamId = '';
+    grid.innerHTML = '<div class="empty-state">暂无已注册摄像头通道</div>';
+    grid.removeAttribute('style');
+    const statCams = document.getElementById('stat-cams');
+    if (statCams) statCams.textContent = '0';
+    return;
+  }
 
   if (!currentFocusCamId || !cameras.find(c => c.camera_id === currentFocusCamId)) {
     currentFocusCamId = cameras[0].camera_id;
@@ -91,15 +97,14 @@ export function renderCamGrid(cameras, forceRefresh = false) {
     container.className = 'theater-mode-container';
     
     let html = buildSingleCamCardHTML(focusCam, true);
-
     html += `<div class="cam-carousel-bar">`;
-    cameras.forEach(c => {
+    cameras.filter(c => c.camera_id !== focusCam.camera_id).forEach(c => {
       const activeCls = c.camera_id === focusCam.camera_id ? 'active' : '';
       const cIdAttr = escapeAttr(c.camera_id);
       const cIdHtml = escapeHtml(c.camera_id);
       html += `
         <div class="carousel-thumb-item ${activeCls}" data-action="focus" data-cam="${cIdAttr}">
-          <img src="${BASE}/stream/${cIdHtml}" alt="${cIdHtml}">
+          <img src="${BASE}/stream/${encodeURIComponent(c.camera_id)}" alt="${cIdHtml}">
           <div class="carousel-thumb-tag">${cIdHtml.toUpperCase()}</div>
         </div>
       `;
@@ -158,8 +163,32 @@ export function updateCamStatus(cameras) {
   cameras.forEach(cam => {
     const dot = document.getElementById(`dot-${cam.camera_id}`);
     const fps = document.getElementById(`fps-${cam.camera_id}`);
+    const reconnect = document.getElementById(`reconn-${cam.camera_id}`);
+    const badges = document.getElementById(`card-${cam.camera_id}`)?.querySelector('.cam-badges');
+    const rec = document.getElementById(`rec-${cam.camera_id}`);
+    const spec = document.getElementById(`spec-${cam.camera_id}`);
     const isReconnecting = cam.status_text === 'RECONNECTING';
     if (dot) dot.className = 'cam-status-dot' + (cam.is_online ? '' : (isReconnecting ? ' reconnecting' : ' offline'));
-    if (fps) fps.textContent = cam.fps + ' FPS';
+    if (fps) fps.textContent = `${cam.is_online ? cam.fps : 0} FPS`;
+    if (cam.reconnect_count > 0 && !reconnect && badges) {
+      const badge = document.createElement('div');
+      badge.className = 'rtsp-diag-badge';
+      badge.id = `reconn-${cam.camera_id}`;
+      badges.insertBefore(badge, badges.firstChild);
+    }
+    const currentReconnect = document.getElementById(`reconn-${cam.camera_id}`);
+    if (currentReconnect) {
+      if (cam.reconnect_count > 0) {
+        currentReconnect.textContent = `RTSP 重连: ${cam.reconnect_count}次`;
+      } else {
+        currentReconnect.remove();
+      }
+    }
+    if (rec) {
+      rec.lastChild.textContent = cam.is_online ? 'REC' : (cam.status_text || 'OFFLINE');
+    }
+    if (spec) {
+      spec.textContent = `${cam.is_online ? 'LIVE' : cam.status_text || 'OFFLINE'} | ${cam.display_width || '--'}x${cam.display_height || '--'} MJPEG`;
+    }
   });
 }

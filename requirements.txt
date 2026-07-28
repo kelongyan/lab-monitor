@@ -5,6 +5,9 @@
 ultralytics>=8.0.0
 fastapi>=0.100.0
 uvicorn[standard]>=0.24.0
+numpy>=1.24,<3.0
+opencv-python>=4.8.0
+psutil>=5.9.0
 
 # P1 优化新增：OSNet ReID 模型（torchreid 依赖 gdown + tensorboard）
 torchreid>=0.2.5

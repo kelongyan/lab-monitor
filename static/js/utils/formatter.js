@@ -21,9 +21,25 @@ export function escapeAttr(str) {
     .replace(/>/g, '&gt;');
 }
 
+let alertAudioContext = null;
+
+export async function unlockAlertAudio() {
+  try {
+    const AudioContextClass = window.AudioContext || window.webkitAudioContext;
+    if (!AudioContextClass) return;
+    if (!alertAudioContext) alertAudioContext = new AudioContextClass();
+    if (alertAudioContext.state === 'suspended') {
+      await alertAudioContext.resume();
+    }
+  } catch {
+    alertAudioContext = null;
+  }
+}
+
 export function playAlertBeep() {
   try {
-    const ctx = new (window.AudioContext || window.webkitAudioContext)();
+    const ctx = alertAudioContext;
+    if (!ctx || ctx.state !== 'running') return;
     const osc = ctx.createOscillator();
     const gain = ctx.createGain();
     osc.type = 'sawtooth';
@@ -32,9 +48,11 @@ export function playAlertBeep() {
     gain.gain.exponentialRampToValueAtTime(0.001, ctx.currentTime + 0.3);
     osc.connect(gain);
     gain.connect(ctx.destination);
+    osc.onended = () => {
+      osc.disconnect();
+      gain.disconnect();
+    };
     osc.start();
     osc.stop(ctx.currentTime + 0.3);
-  } catch (e) {
-    // 忽略音频初始化拦截
-  }
+  } catch {}
 }

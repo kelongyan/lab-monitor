@@ -4,12 +4,13 @@
 <meta charset="UTF-8">
 <meta name="viewport" content="width=device-width, initial-scale=1.0">
 <title>超算中心多镜头智能监控预警平台 - Command Center</title>
+<link rel="icon" type="image/png" href="/static/logo.png">
 <!-- 引入 Google Fonts 高科技字体 -->
 <link rel="preconnect" href="https://fonts.googleapis.com">
 <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
 <link href="https://fonts.googleapis.com/css2?family=JetBrains+Mono:wght@400;500;700&family=Plus+Jakarta+Sans:wght@400;500;600;700;800&display=swap" rel="stylesheet">
 <!-- 模块化样式表入口 -->
-<link rel="stylesheet" href="/static/css/main.css">
+<link rel="stylesheet" href="/static/css/main.css?v=11.0">
 </head>
 <body>
 
@@ -59,7 +60,7 @@
         </div>
       </div>
 
-      <div class="stat-card" style="cursor: pointer;" id="card-stat-persons-btn">
+      <div class="stat-card" style="cursor: pointer;" id="card-stat-persons-btn" role="button" tabindex="0" aria-label="打开人员档案数据库">
         <div class="stat-icon-wrapper" style="background: rgba(124, 58, 237, 0.12); color: var(--purple); font-size: 12px; font-weight: 700;">人员</div>
         <div class="stat-info">
           <div class="stat-value" id="stat-ids" style="color: var(--purple);">0</div>
@@ -136,7 +137,7 @@
   <div class="sidebar-panel">
     <div class="panel-header">
       <h2>智能预警事件日志 <span class="alert-counter-badge" id="alert-badge">0</span></h2>
-      <button class="clear-btn" id="btn-clear-alerts">清空日志</button>
+      <button class="clear-btn" id="btn-clear-alerts">清空当前视图</button>
     </div>
 
     <!-- 动态告警卡片列表 -->
@@ -169,13 +170,13 @@
 <!-- ================================================================== -->
 <!-- 模态框 1：告警详情与快照 Modals                                    -->
 <!-- ================================================================== -->
-<div class="modal-overlay" id="alert-detail-modal">
-  <div class="modal-container">
+<div class="modal-overlay" id="alert-detail-modal" role="dialog" aria-modal="true" aria-labelledby="modal-alert-title" aria-hidden="true">
+  <div class="modal-container" tabindex="-1">
     <div class="modal-header">
       <div class="modal-title">
         <span id="modal-alert-title">告警事件排查与详细分析</span>
       </div>
-      <button class="modal-close-btn" data-close-modal="alert-detail-modal">✕</button>
+      <button class="modal-close-btn" data-close-modal="alert-detail-modal" aria-label="关闭告警详情">✕</button>
     </div>
     <div class="modal-body" id="modal-alert-body"></div>
   </div>
@@ -184,13 +185,13 @@
 <!-- ================================================================== -->
 <!-- 模态框 2：人员轨迹时间轴 Modal                                      -->
 <!-- ================================================================== -->
-<div class="modal-overlay" id="trajectory-modal">
-  <div class="modal-container">
+<div class="modal-overlay" id="trajectory-modal" role="dialog" aria-modal="true" aria-labelledby="modal-traj-title" aria-hidden="true">
+  <div class="modal-container" tabindex="-1">
     <div class="modal-header">
       <div class="modal-title">
         <span id="modal-traj-title">跨镜头轨迹追踪链</span>
       </div>
-      <button class="modal-close-btn" data-close-modal="trajectory-modal">✕</button>
+      <button class="modal-close-btn" data-close-modal="trajectory-modal" aria-label="关闭人员轨迹">✕</button>
     </div>
     <div class="modal-body" id="modal-traj-body"></div>
   </div>
@@ -199,13 +200,13 @@
 <!-- ================================================================== -->
 <!-- 模态框 3：拓扑结构 Modal                                          -->
 <!-- ================================================================== -->
-<div class="modal-overlay" id="topology-modal">
-  <div class="modal-container">
+<div class="modal-overlay" id="topology-modal" role="dialog" aria-modal="true" aria-labelledby="modal-topology-title" aria-hidden="true">
+  <div class="modal-container" tabindex="-1">
     <div class="modal-header">
       <div class="modal-title">
-        <span>摄像头拓扑网络与通行时延管理</span>
+        <span id="modal-topology-title">摄像头拓扑网络与通行时延管理</span>
       </div>
-      <button class="modal-close-btn" data-close-modal="topology-modal">✕</button>
+      <button class="modal-close-btn" data-close-modal="topology-modal" aria-label="关闭拓扑管理">✕</button>
     </div>
     <div class="modal-body" id="modal-topo-body"></div>
   </div>
@@ -214,13 +215,13 @@
 <!-- ================================================================== -->
 <!-- 模态框 4：历史告警检索与导出 Modal                                 -->
 <!-- ================================================================== -->
-<div class="modal-overlay" id="history-modal">
-  <div class="modal-container">
+<div class="modal-overlay" id="history-modal" role="dialog" aria-modal="true" aria-labelledby="modal-history-title" aria-hidden="true">
+  <div class="modal-container" tabindex="-1">
     <div class="modal-header">
       <div class="modal-title">
-        <span>历史告警检索与 CSV 报表导出</span>
+        <span id="modal-history-title">历史告警检索与 CSV 报表导出</span>
       </div>
-      <button class="modal-close-btn" data-close-modal="history-modal">✕</button>
+      <button class="modal-close-btn" data-close-modal="history-modal" aria-label="关闭历史告警">✕</button>
     </div>
     <div class="modal-body" id="modal-history-body"></div>
   </div>
@@ -229,13 +230,13 @@
 <!-- ================================================================== -->
 <!-- 模态框 5：手动画电子围栏 ROI Modal                                 -->
 <!-- ================================================================== -->
-<div class="modal-overlay" id="roi-modal">
-  <div class="modal-container">
+<div class="modal-overlay" id="roi-modal" role="dialog" aria-modal="true" aria-labelledby="roi-modal-title" aria-hidden="true">
+  <div class="modal-container" tabindex="-1">
     <div class="modal-header">
       <div class="modal-title">
         <span id="roi-modal-title">ROI 电子围栏画板配置</span>
       </div>
-      <button class="modal-close-btn" data-close-modal="roi-modal">✕</button>
+      <button class="modal-close-btn" data-close-modal="roi-modal" aria-label="关闭 ROI 围栏画板">✕</button>
     </div>
     <div class="modal-body" id="modal-roi-body">
       <div style="font-size: 12px; color: var(--text-muted); display: flex; align-items: center; justify-content: space-between; margin-bottom: 6px;">
@@ -265,7 +266,46 @@
   </div>
 </div>
 
+<!-- 居中放大焦点浮层 (Focus Lightbox Modal) -->
+<div class="modal-overlay focus-modal-overlay" id="focus-modal-overlay" role="dialog" aria-modal="true" aria-labelledby="focus-modal-title" aria-hidden="true">
+  <div class="modal-container focus-modal-container" tabindex="-1">
+    <div class="modal-header">
+      <div class="modal-title">
+        <div class="cam-status-dot" id="focus-modal-dot"></div>
+        <span id="focus-modal-title">CAM_01 焦点特写指挥视窗</span>
+        <span class="brand-tag" style="background: rgba(56, 189, 248, 0.15); color: #38bdf8; border: 1px solid rgba(56, 189, 248, 0.3);">HQ FOCUS + LOGS</span>
+      </div>
+      <div style="display: flex; align-items: center; gap: 10px;">
+        <button class="action-btn" id="btn-toggle-focus-sidebar" style="font-size: 11px; padding: 3px 8px;">
+          <span>👈</span> <span id="text-toggle-sidebar">收起视角日志</span>
+        </button>
+        <div class="cam-rec-badge"><div class="rec-circle"></div>REC</div>
+        <div class="cam-fps-badge" id="focus-modal-fps">0 FPS</div>
+        <button class="modal-close-btn" id="btn-close-focus" title="关闭 (Esc)" aria-label="关闭焦点视图">✕</button>
+      </div>
+    </div>
+    <div class="modal-body focus-modal-body" style="padding: 0; position: relative; background: #000; display: flex; flex: 1; overflow: hidden;">
+      <!-- 左侧专属日志侧边栏 -->
+      <div class="focus-sidebar" id="focus-sidebar">
+        <div class="focus-sidebar-header">
+          <span>视角专属预警事件 (<span id="focus-log-count">0</span>)</span>
+          <span class="secure-live-tag" style="margin:0; font-size:9px;">REALTIME</span>
+        </div>
+        <div class="focus-sidebar-list" id="focus-modal-log-list">
+          <div class="empty-state" style="font-size: 11px;">正在载入该视角专属事件...</div>
+        </div>
+      </div>
+
+      <!-- 右侧高清监控主画面 -->
+      <div class="focus-main-view">
+        <img id="focus-modal-img" src="" alt="Focus Stream">
+        <div class="cam-hud-tag" id="focus-modal-spec" style="bottom: 16px; left: 16px; font-size: 11px; padding: 3px 8px;">OFFLINE | --x-- MJPEG</div>
+      </div>
+    </div>
+  </div>
+</div>
+
 <!-- 模块化 JavaScript 入口 -->
-<script type="module" src="/static/js/app.js"></script>
+<script type="module" src="/static/js/app.js?v=11.0"></script>
 </body>
 </html>

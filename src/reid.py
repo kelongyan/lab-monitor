@@ -33,6 +33,7 @@ class ReIDExtractor:
     """用 ResNet50 提取人员外观特征向量（2048维）"""
 
     def __init__(self, device: str = "cpu"):
+        self.feature_space = "resnet50-imagenet1k-v1:2048"
         self.device = torch.device(device)
         backbone = models.resnet50(weights=models.ResNet50_Weights.IMAGENET1K_V1)
         # 去掉最后的分类头，只保留特征提取部分
@@ -86,6 +87,7 @@ class ReIDExtractorOSNet:
         warnings.filterwarnings("ignore", category=UserWarning)
         import torchreid
 
+        self.feature_space = "osnet-x0.25-imagenet:512"
         self.device = torch.device(device)
         # eval 模式下 OSNet.forward() 直接返回 512 维特征向量（已内置 BN + GAP）
         self.model = torchreid.models.build_model(
@@ -212,4 +214,3 @@ def match_feature(
     """
     detail = match_feature_detailed(query, gallery, threshold=threshold, ratio=ratio)
     return detail.matched_id
-

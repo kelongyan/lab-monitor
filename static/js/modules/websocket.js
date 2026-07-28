@@ -2,16 +2,30 @@
  * WebSocket 与数据轮询模块
  */
 import { escapeHtml, escapeAttr, playAlertBeep } from '../utils/formatter.js';
+import { fetchJson } from '../utils/api.js';
 import { renderCamGrid, updateCamStatus } from './grid.js';
-import { openAlertDetailModal, showTrajectoryModal } from './modals.js';
+import { openAlertDetailModal, showTrajectoryModal, pushAlertToModalHistory, clearModalAlertHistory, updateFocusCameraStatus } from './modals.js';
 
 let ws = null;
 let totalAlerts = 0;
 let totalWarnings = 0;
+let visibleAlerts = 0;
+let lastAlertId = '';
+const seenAlertIds = new Set();
+const seenAlertOrder = [];
+const MAX_SEEN_ALERT_IDS = 1000;
+
+// 全局告警历史缓存（最近 100 条）
+const alertHistoryCache = [];
+
+export function getAlertHistoryCache() {
+  return alertHistoryCache;
+}
 
 export function connectWS() {
   const proto = location.protocol === 'https:' ? 'wss' : 'ws';
-  ws = new WebSocket(`${proto}://${location.host}/ws`);
+  const since = lastAlertId ? `?since=${encodeURIComponent(lastAlertId)}` : '';
+  ws = new WebSocket(`${proto}://${location.host}/ws${since}`);
   const statusEl = document.getElementById('ws-status');
 
   ws.onopen = () => {
@@ -33,35 +47,11 @@ export function connectWS() {
   ws.onerror = () => ws.close();
 }
 
-/**
- * 渲染一条告警卡片
- * @param {object} alert   - 告警数据
- * @param {boolean} silent - true 时跳过计数器更新和告警音效（用于历史记录回填）
- */
-export function addAlert(alert, silent = false) {
-  const list = document.getElementById('alert-list');
-  const noAlert = document.getElementById('no-alert');
-  if (noAlert) noAlert.remove();
-
+export function createAlertCardElement(alert) {
   const isWarning = alert.stage === 'WARNING';
   const isIntrusion = alert.alert_type === 'INTRUSION';
   const isCrowd = alert.alert_type === 'CROWD_DENSITY';
   const isSceneExit = alert.alert_type === 'SCENE_EXIT';
-
-  if (!silent) {
-    if (isWarning) {
-      totalWarnings++;
-      const statWarn = document.getElementById('stat-warnings');
-      if (statWarn) statWarn.textContent = totalWarnings;
-    } else {
-      totalAlerts++;
-      const statAlert = document.getElementById('stat-alerts');
-      const badge = document.getElementById('alert-badge');
-      if (statAlert) statAlert.textContent = totalAlerts;
-      if (badge) badge.textContent = Math.min(totalAlerts, 99);
-      playAlertBeep();
-    }
-  }
 
   const timeStr = new Date(alert.timestamp * 1000).toLocaleTimeString('zh-CN');
   const stage = alert.stage || 'ALERT';
@@ -69,7 +59,15 @@ export function addAlert(alert, silent = false) {
 
   const alertClass = isIntrusion ? 'INTRUSION' : (stage === 'WARNING' ? 'WARNING' : alert.risk_level);
   card.className = `alert-card ${alertClass}`;
+  card.setAttribute('role', 'button');
+  card.tabIndex = 0;
   card.addEventListener('click', () => openAlertDetailModal(alert));
+  card.addEventListener('keydown', event => {
+    if (event.key === 'Enter' || event.key === ' ') {
+      event.preventDefault();
+      openAlertDetailModal(alert);
+    }
+  });
 
   let titleText;
   if (isIntrusion)      titleText = 'ROI 区域非法越界入侵';
@@ -101,28 +99,85 @@ export function addAlert(alert, silent = false) {
     </div>
   `;
 
-  // 绑定内联点击
   const trajLink = card.querySelector('[data-action="trajectory"]');
   if (trajLink && !isCrowd) {
-    // 真实人员 ID：点击查轨迹
     trajLink.addEventListener('click', (e) => {
       e.stopPropagation();
       showTrajectoryModal(alert.global_id);
     });
   } else if (trajLink) {
-    // CROWD_DENSITY：global_id 是 "Crowd_N" 格式，非真实人员，禁用轨迹入口
     trajLink.style.cursor = 'default';
     trajLink.style.textDecoration = 'none';
-    trajLink.style.color = 'var(--text-muted)';
   }
 
-  list.insertBefore(card, list.firstChild);
-  while (list.children.length > 30) list.removeChild(list.lastChild);
+  return card;
+}
+
+export function addAlert(alert, silent = false) {
+  const alertId = alert?.alert_id || [
+    alert?.timestamp, alert?.stage, alert?.alert_type,
+    alert?.global_id, alert?.last_camera,
+  ].join('|');
+  if (seenAlertIds.has(alertId)) return false;
+  seenAlertIds.add(alertId);
+  seenAlertOrder.push(alertId);
+  if (seenAlertOrder.length > MAX_SEEN_ALERT_IDS) {
+    seenAlertIds.delete(seenAlertOrder.shift());
+  }
+  if (alert?.alert_id) lastAlertId = alert.alert_id;
+
+  // 缓存至全局告警数组（保留最近 100 条）
+  alertHistoryCache.unshift(alert);
+  if (alertHistoryCache.length > 100) alertHistoryCache.pop();
+
+  // 同步推送至 Modal 告警历史缓存与焦点视窗
+  pushAlertToModalHistory(alert);
+
+  const list = document.getElementById('alert-list');
+  const noAlert = document.getElementById('no-alert');
+  if (noAlert) noAlert.remove();
+
+  const isWarning = alert.stage === 'WARNING';
+  if (!isWarning) visibleAlerts++;
+  if (!silent) {
+    if (isWarning) {
+      totalWarnings++;
+      const statWarn = document.getElementById('stat-warnings');
+      if (statWarn) statWarn.textContent = totalWarnings;
+    } else {
+      totalAlerts++;
+      const statAlert = document.getElementById('stat-alerts');
+      const badge = document.getElementById('alert-badge');
+      if (statAlert) statAlert.textContent = totalAlerts;
+      playAlertBeep();
+    }
+  }
+  const card = createAlertCardElement(alert);
+  if (list) list.insertBefore(card, list.firstChild);
+  if (list) {
+    while (list.children.length > 30) list.removeChild(list.lastChild);
+    visibleAlerts = list.querySelectorAll('.alert-card:not(.WARNING)').length;
+  }
+  const badge = document.getElementById('alert-badge');
+  if (badge) badge.textContent = Math.min(visibleAlerts, 99);
+  return true;
+}
+
+export function hydrateAlerts(alerts, summary = {}) {
+  [...alerts].reverse().forEach(alert => addAlert(alert, true));
+  const loadedAlerts = alerts.filter(alert => alert.stage !== 'WARNING').length;
+  const loadedWarnings = alerts.length - loadedAlerts;
+  totalAlerts = Number.isFinite(summary.alerts) ? summary.alerts : loadedAlerts;
+  totalWarnings = Number.isFinite(summary.warnings) ? summary.warnings : loadedWarnings;
+  const statAlerts = document.getElementById('stat-alerts');
+  const statWarnings = document.getElementById('stat-warnings');
+  if (statAlerts) statAlerts.textContent = totalAlerts;
+  if (statWarnings) statWarnings.textContent = totalWarnings;
 }
 
 export async function pollCalibStats() {
   try {
-    const res = await fetch('/api/stats').then(r => r.json());
+    const res = await fetchJson('/api/stats', { timeoutMs: 5000 });
     const data = res.calibration || {};
     const container = document.getElementById('calib-content');
     if (!container) return;
@@ -140,26 +195,31 @@ export async function pollCalibStats() {
         </span>
       </div>
     `).join('');
-  } catch {}
+  } catch (error) {
+    console.warn('通行校准统计暂不可用:', error.message);
+  }
 }
 
 export async function pollStatus() {
   try {
     const [statusRes, idsRes] = await Promise.all([
-      fetch('/api/status').then(r => r.json()),
-      fetch('/api/identities').then(r => r.json()),
+      fetchJson('/api/status', { timeoutMs: 4000 }),
+      fetchJson('/api/identities', { timeoutMs: 4000 }),
     ]);
     const cameras = statusRes.cameras || [];
     renderCamGrid(cameras);
     updateCamStatus(cameras);
+    cameras.forEach(updateFocusCameraStatus);
     const statIds = document.getElementById('stat-ids');
     if (statIds) statIds.textContent = idsRes.count || 0;
-  } catch {}
+  } catch (error) {
+    console.warn('摄像头状态暂不可用，保留上一轮画面:', error.message);
+  }
 }
 
 export async function pollReidMetrics() {
   try {
-    const res = await fetch('/api/metrics/reid').then(r => r.json());
+    const res = await fetchJson('/api/metrics/reid', { timeoutMs: 4000 });
     
     const simPct = (res.avg_top1_similarity * 100).toFixed(1);
     const matchRatePct = (res.match_rate * 100).toFixed(1);
@@ -211,12 +271,9 @@ export function clearAlerts() {
       </div>
     `;
   }
-  totalAlerts = 0;
-  totalWarnings = 0;
-  const statAlerts = document.getElementById('stat-alerts');
-  const statWarnings = document.getElementById('stat-warnings');
+  alertHistoryCache.length = 0;
+  clearModalAlertHistory();
+  visibleAlerts = 0;
   const alertBadge = document.getElementById('alert-badge');
-  if (statAlerts) statAlerts.textContent = '0';
-  if (statWarnings) statWarnings.textContent = '0';
   if (alertBadge) alertBadge.textContent = '0';
 }

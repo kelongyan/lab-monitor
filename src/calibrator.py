@@ -11,6 +11,7 @@ import logging
 import threading
 import time
 from collections import defaultdict
+from dataclasses import dataclass
 from pathlib import Path
 
 logger = logging.getLogger("calibrator")
@@ -19,6 +20,13 @@ logger = logging.getLogger("calibrator")
 MIN_SAMPLES = 5
 # 时间窗口 = mean + Z * std（Z=1.65 覆盖约95%）
 Z_SCORE = 1.65
+
+
+@dataclass(frozen=True)
+class Departure:
+    camera_id: str
+    timestamp: float
+    expected_cameras: frozenset[str]
 
 
 class TransitCalibrator:
@@ -32,11 +40,19 @@ class TransitCalibrator:
     # 两次写盘之间的最小间隔（秒）；到期且有脏数据才真正写文件
     _SAVE_INTERVAL = 30.0
 
-    def __init__(self, stats_path: str | Path = "outputs/transit_stats.json"):
+    def __init__(
+        self,
+        stats_path: str | Path = "outputs/transit_stats.json",
+        valid_edges: set[tuple[str, str]] | None = None,
+        departure_expiry_seconds: float = 3600.0,
+    ):
         self._lock = threading.Lock()
         self._path = Path(stats_path)
+        self._valid_edges = frozenset(valid_edges) if valid_edges is not None else None
+        self._departure_expiry_seconds = departure_expiry_seconds
         # key: "cam_A→cam_B"  value: list of actual transit seconds
         self._data: dict[str, list[float]] = defaultdict(list)
+        self._departures: dict[str, Departure] = {}
         self._dirty: bool = False          # 有未持久化的数据
         self._last_save: float = 0.0       # 上次写盘的 time.time()
         self._load()
@@ -46,19 +62,116 @@ class TransitCalibrator:
     # 记录实际通行时间                                                       #
     # ------------------------------------------------------------------ #
 
+    def record_departure(
+        self,
+        global_id: str,
+        camera_id: str,
+        expected_cameras: list[str],
+        timestamp: float | None = None,
+    ) -> bool:
+        """Store one shared departure that can be consumed by another camera."""
+        destinations = {
+            destination
+            for destination in expected_cameras
+            if destination != camera_id
+            and (
+                self._valid_edges is None
+                or (camera_id, destination) in self._valid_edges
+            )
+        }
+        if not global_id or not destinations:
+            return False
+        now = time.time() if timestamp is None else timestamp
+        with self._lock:
+            self._purge_expired_departures_locked(now)
+            self._departures[global_id] = Departure(
+                camera_id=camera_id,
+                timestamp=now,
+                expected_cameras=frozenset(destinations),
+            )
+        return True
+
+    def record_arrival(
+        self,
+        global_id: str,
+        camera_id: str,
+        timestamp: float | None = None,
+    ) -> bool:
+        """Consume a matching departure and record exactly one legal transit."""
+        now = time.time() if timestamp is None else timestamp
+        with self._lock:
+            self._purge_expired_departures_locked(now)
+            departure = self._departures.get(global_id)
+            if departure is None:
+                return False
+            if (
+                camera_id == departure.camera_id
+                or camera_id not in departure.expected_cameras
+                or (
+                    self._valid_edges is not None
+                    and (departure.camera_id, camera_id) not in self._valid_edges
+                )
+            ):
+                return False
+
+            self._departures.pop(global_id, None)
+            actual_seconds = now - departure.timestamp
+            if actual_seconds <= 0 or actual_seconds > 3600:
+                return False
+            self._append_sample_locked(
+                departure.camera_id, camera_id, actual_seconds
+            )
+
+        logger.debug(
+            "记录通行时间 %s→%s: %.1fs",
+            departure.camera_id,
+            camera_id,
+            actual_seconds,
+        )
+        if time.monotonic() - self._last_save >= self._SAVE_INTERVAL:
+            self.flush()
+        return True
+
+    def _purge_expired_departures_locked(self, now: float) -> None:
+        expired = [
+            global_id
+            for global_id, departure in self._departures.items()
+            if now - departure.timestamp > self._departure_expiry_seconds
+        ]
+        for global_id in expired:
+            self._departures.pop(global_id, None)
+
+    def _append_sample_locked(
+        self,
+        cam_from: str,
+        cam_to: str,
+        actual_seconds: float,
+    ) -> int:
+        key = f"{cam_from}→{cam_to}"
+        self._data[key].append(actual_seconds)
+        if len(self._data[key]) > 200:
+            self._data[key] = self._data[key][-200:]
+        self._dirty = True
+        return len(self._data[key])
+
     def record_transit(self, cam_from: str, cam_to: str, actual_seconds: float) -> None:
         """人员从 cam_from 走到 cam_to 的实际耗时（秒）"""
-        if actual_seconds <= 0 or actual_seconds > 3600:
+        if (
+            cam_from == cam_to
+            or actual_seconds <= 0
+            or actual_seconds > 3600
+            or (
+                self._valid_edges is not None
+                and (cam_from, cam_to) not in self._valid_edges
+            )
+        ):
             return  # 异常值过滤
-        key = f"{cam_from}→{cam_to}"
         with self._lock:
-            self._data[key].append(actual_seconds)
-            # 保留最近200条，防止文件无限增大
-            if len(self._data[key]) > 200:
-                self._data[key] = self._data[key][-200:]
-            self._dirty = True
-            count = len(self._data[key])
-        logger.debug("记录通行时间 %s: %.1fs（共 %d 条）", key, actual_seconds, count)
+            count = self._append_sample_locked(cam_from, cam_to, actual_seconds)
+        logger.debug(
+            "记录通行时间 %s→%s: %.1fs（共 %d 条）",
+            cam_from, cam_to, actual_seconds, count,
+        )
         # 脏标记 + 限频：距上次写盘超过 _SAVE_INTERVAL 才真正落盘
         if time.monotonic() - self._last_save >= self._SAVE_INTERVAL:
             self.flush()
@@ -151,10 +264,35 @@ class TransitCalibrator:
         try:
             with open(self._path, encoding="utf-8") as f:
                 raw = json.load(f)
+            cleaned = {}
+            for key, samples in raw.items():
+                if not isinstance(key, str) or "→" not in key:
+                    continue
+                cam_from, cam_to = key.split("→", 1)
+                if cam_from == cam_to:
+                    continue
+                if (
+                    self._valid_edges is not None
+                    and (cam_from, cam_to) not in self._valid_edges
+                ):
+                    continue
+                if not isinstance(samples, list):
+                    continue
+                valid_samples = [
+                    float(sample)
+                    for sample in samples
+                    if isinstance(sample, (int, float))
+                    and not isinstance(sample, bool)
+                    and 0 < float(sample) <= 3600
+                ][-200:]
+                if valid_samples:
+                    cleaned[key] = valid_samples
             with self._lock:
-                for k, v in raw.items():
-                    self._data[k] = v
+                self._data.update(cleaned)
             total = sum(len(v) for v in self._data.values())
             logger.info("加载通行统计：%d 条路径，共 %d 条记录", len(self._data), total)
+            if cleaned != raw:
+                logger.warning("已清理通行统计中的自循环、非法路径或异常样本")
+                self._write(cleaned)
         except Exception as e:
             logger.error("加载通行统计失败: %s", e)

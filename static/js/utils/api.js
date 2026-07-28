@@ -3,6 +3,52 @@
  */
 export const BASE = location.protocol + '//' + location.host;
 
+export class ApiError extends Error {
+  constructor(message, status = 0) {
+    super(message);
+    this.name = 'ApiError';
+    this.status = status;
+  }
+}
+
+export async function fetchJson(url, options = {}) {
+  const { timeoutMs = 5000, signal: externalSignal, ...fetchOptions } = options;
+  const controller = new AbortController();
+  const abortFromExternal = () => controller.abort(externalSignal?.reason);
+  if (externalSignal) {
+    if (externalSignal.aborted) abortFromExternal();
+    else externalSignal.addEventListener('abort', abortFromExternal, { once: true });
+  }
+  const timeoutId = setTimeout(() => controller.abort('timeout'), timeoutMs);
+  try {
+    const response = await fetch(url, { ...fetchOptions, signal: controller.signal });
+    const text = await response.text();
+    let payload = {};
+    if (text) {
+      try {
+        payload = JSON.parse(text);
+      } catch {
+        throw new ApiError(`接口返回了无效 JSON (HTTP ${response.status})`, response.status);
+      }
+    }
+    if (!response.ok || payload?.error) {
+      throw new ApiError(
+        payload?.error || `请求失败 (HTTP ${response.status})`,
+        response.status,
+      );
+    }
+    return payload;
+  } catch (error) {
+    if (controller.signal.aborted && !externalSignal?.aborted) {
+      throw new ApiError('请求超时', 0);
+    }
+    throw error;
+  } finally {
+    clearTimeout(timeoutId);
+    externalSignal?.removeEventListener('abort', abortFromExternal);
+  }
+}
+
 export function showToast(message, type = 'success', duration = 3000) {
   let container = document.getElementById('toast-container');
   if (!container) {

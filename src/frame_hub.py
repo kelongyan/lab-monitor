@@ -25,6 +25,7 @@ class CameraState:
     status_text: str = "OFFLINE"
     reconnect_count: int = 0
     fps: float = 0.0
+    generation: int = 0
     _frame_times: deque = field(default_factory=lambda: deque(maxlen=30))
 
 
@@ -64,6 +65,13 @@ class FrameHub:
                 lock = self._cam_locks[camera_id]
         return self._states[camera_id], lock
 
+    def register_camera(self, camera_id: str) -> None:
+        self._ensure_camera(camera_id)
+
+    def register_cameras(self, camera_ids) -> None:
+        for camera_id in camera_ids:
+            self.register_camera(camera_id)
+
     # ------------------------------------------------------------------ #
     # Pipeline → Hub                                                        #
     # ------------------------------------------------------------------ #
@@ -74,6 +82,7 @@ class FrameHub:
         with cam_lock:
             s.latest_frame = frame
             s.latest_jpeg = None  # 标记新帧到来，清除旧 JPEG 编码缓存
+            s.generation += 1
             s.frame_time = now
             s.is_online = True
             s.status_text = status_text
@@ -84,15 +93,16 @@ class FrameHub:
                 s.fps = round((len(s._frame_times) - 1) / max(elapsed, 1e-6), 1)
 
     def mark_offline(self, camera_id: str, status_text: str = "OFFLINE", reconnect_count: int = 0) -> None:
-        lock = self._cam_locks.get(camera_id)
-        if lock is None:
-            return
-        with lock:
-            s = self._states.get(camera_id)
-            if s is not None:
-                s.is_online = False
-                s.status_text = status_text
-                s.reconnect_count = reconnect_count
+        s, cam_lock = self._ensure_camera(camera_id)
+        with cam_lock:
+            s.is_online = False
+            s.status_text = status_text
+            s.reconnect_count = reconnect_count
+            s.latest_frame = None
+            s.latest_jpeg = None
+            s.generation += 1
+            s.fps = 0.0
+            s._frame_times.clear()
 
     # ------------------------------------------------------------------ #
     # Hub → Server                                                          #
@@ -107,32 +117,47 @@ class FrameHub:
         if lock is None:
             return None
 
-        with lock:
-            s = self._states.get(camera_id)
-            if s is None or s.latest_frame is None:
+        # 编码期间若有新帧到达，最多重试两次，绝不把旧 generation 写回缓存。
+        for _ in range(3):
+            with lock:
+                s = self._states.get(camera_id)
+                if s is None or not s.is_online or s.latest_frame is None:
+                    return None
+                if s.latest_jpeg is not None:
+                    return s.latest_jpeg
+                frame = s.latest_frame.copy()
+                generation = s.generation
+
+            h, w = frame.shape[:2]
+            if w != self.DISPLAY_WIDTH or h != self.DISPLAY_HEIGHT:
+                frame = cv2.resize(frame, (self.DISPLAY_WIDTH, self.DISPLAY_HEIGHT))
+
+            success, buf = cv2.imencode(
+                ".jpg", frame, [cv2.IMWRITE_JPEG_QUALITY, quality]
+            )
+            if not success:
                 return None
+            jpeg_bytes = buf.tobytes()
 
-            # 命中 JPEG 缓存：直接返回，无需再次 resize + imencode
-            if s.latest_jpeg is not None:
-                return s.latest_jpeg
+            with lock:
+                s = self._states.get(camera_id)
+                if s is None or not s.is_online:
+                    return None
+                if s.generation == generation:
+                    s.latest_jpeg = jpeg_bytes
+                    return jpeg_bytes
+        return None
 
-            frame = s.latest_frame.copy()
-
-        # 锁外执行 OpenCV 图像缩放与 JPEG 编码，避免长时间占用 per-camera 锁
-        h, w = frame.shape[:2]
-        if w != self.DISPLAY_WIDTH:
-            frame = cv2.resize(frame, (self.DISPLAY_WIDTH, self.DISPLAY_HEIGHT))
-
-        _, buf = cv2.imencode(".jpg", frame, [cv2.IMWRITE_JPEG_QUALITY, quality])
-        jpeg_bytes = buf.tobytes()
-
-        # 写回缓存（二次检查：若此期间已有新帧推入则放弃写回，避免旧帧污染缓存）
+    def get_frame(self, camera_id: str) -> np.ndarray | None:
+        """返回在线 camera 最新帧的副本，供告警快照使用。"""
+        lock = self._cam_locks.get(camera_id)
+        if lock is None:
+            return None
         with lock:
-            s = self._states.get(camera_id)
-            if s is not None and s.latest_jpeg is None:
-                s.latest_jpeg = jpeg_bytes
-
-        return jpeg_bytes
+            state = self._states.get(camera_id)
+            if state is None or not state.is_online or state.latest_frame is None:
+                return None
+            return state.latest_frame.copy()
 
     def get_status(self) -> list[dict]:
         """返回所有摄像头状态，供 API 接口用"""
@@ -140,6 +165,7 @@ class FrameHub:
             cam_ids = list(self._states.keys())
 
         result = []
+        now = time.time()
         for cam_id in cam_ids:
             lock = self._cam_locks.get(cam_id)
             if lock is None:
@@ -155,6 +181,14 @@ class FrameHub:
                     "reconnect_count": s.reconnect_count,
                     "fps": s.fps,
                     "last_frame_time": s.frame_time,
+                    "frame_age_seconds": (
+                        round(max(0.0, now - s.frame_time), 3)
+                        if s.frame_time > 0
+                        else None
+                    ),
+                    "display_width": self.DISPLAY_WIDTH,
+                    "display_height": self.DISPLAY_HEIGHT,
+                    "jpeg_quality": self.JPEG_QUALITY,
                 })
         return result
 
