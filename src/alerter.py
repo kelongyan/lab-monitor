@@ -73,6 +73,8 @@ class AlertManager:
         alert_log: str | Path = "outputs/alerts.jsonl",
         notifier=None,           # src.notifier.BaseNotifier 实例
         broadcaster: AlertBroadcaster | None = None,
+        identity_store=None,              # IdentityStore 实例（避免循环导入不做类型标注）
+        scene_exit_seconds: float = 300.0,  # 人员从所有摄像头消失多久后报警
     ):
         self._lock = threading.Lock()
         self._watches: dict[str, WatchEntry] = {}
@@ -80,6 +82,10 @@ class AlertManager:
         self._log_path.parent.mkdir(parents=True, exist_ok=True)
         self._notifier = notifier
         self._broadcaster = broadcaster
+        self._identity_store = identity_store
+        self._scene_exit_seconds = scene_exit_seconds
+        # gid → 已触发 SCENE_EXIT 告警的时间戳；人员重新出现后清除
+        self._scene_exit_alerted: dict[str, float] = {}
         # P0-3：冷却字典初始化于 __init__，避免 hasattr 动态创建 + 内存泄漏
         self._intrusion_cooldown: dict[str, float] = {}
         # P2-3：持久文件句柄（line buffering），避免每次 open/close 开销
@@ -257,7 +263,67 @@ class AlertManager:
             if self._broadcaster:
                 self._broadcaster.push(alert)
 
+        # 场景消失检测：人员从所有摄像头消失超过阈值则触发 SCENE_EXIT
+        if self._identity_store is not None:
+            self._check_scene_exits(now)
+
         return [self._build_alert(e, stage="ALERT") for e in triggered]
+
+    # ------------------------------------------------------------------ #
+
+    def _check_scene_exits(self, now: float) -> None:
+        """检测从所有摄像头消失超过 scene_exit_seconds 的人员并触发 SCENE_EXIT 告警"""
+        all_ids = self._identity_store.all_ids()
+        for gid in all_ids:
+            rec = self._identity_store.get(gid)
+            if rec is None or rec.last_seen == 0.0:
+                continue
+
+            elapsed = now - rec.last_seen
+
+            # 仍在视野内 → 清除已报警标记（为下次消失做准备）
+            if elapsed < self._scene_exit_seconds:
+                self._scene_exit_alerted.pop(gid, None)
+                continue
+
+            # 正在被拓扑路径监听 → 交给 MISSING_PERSON 处理，避免冲突
+            with self._lock:
+                in_watch = gid in self._watches
+            if in_watch:
+                continue
+
+            # 已报警过（同一次消失事件） → 跳过
+            if gid in self._scene_exit_alerted:
+                continue
+
+            # ✅ 触发场景消失告警
+            self._scene_exit_alerted[gid] = now
+            alert = {
+                "alert_id": _new_alert_id("alert_exit"),
+                "alert_type": "SCENE_EXIT",
+                "stage": "ALERT",
+                "global_id": gid,
+                "last_camera": rec.last_camera,
+                "last_seen": rec.last_seen,
+                "last_bbox": self._identity_store.get_last_bbox(gid),
+                "elapsed_seconds": round(elapsed, 1),
+                "risk_level": "MEDIUM",
+                "timestamp": now,
+                "expected_cameras": ["全域监控区"],
+            }
+
+            self._write_log(alert)
+            logger.warning(
+                "👻 SCENE_EXIT: 人员 %s 已从所有摄像头消失 %.0f 秒（最后位置: %s）",
+                gid, elapsed, rec.last_camera,
+            )
+            if self._broadcaster:
+                self._broadcaster.push(alert)
+            if self._notifier:
+                try:
+                    self._notifier.send(alert)
+                except Exception as e:
+                    logger.error("通知发送失败: %s", e)
 
     # ------------------------------------------------------------------ #
 

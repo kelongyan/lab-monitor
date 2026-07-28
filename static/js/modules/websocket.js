@@ -46,6 +46,7 @@ export function addAlert(alert, silent = false) {
   const isWarning = alert.stage === 'WARNING';
   const isIntrusion = alert.alert_type === 'INTRUSION';
   const isCrowd = alert.alert_type === 'CROWD_DENSITY';
+  const isSceneExit = alert.alert_type === 'SCENE_EXIT';
 
   if (!silent) {
     if (isWarning) {
@@ -71,10 +72,11 @@ export function addAlert(alert, silent = false) {
   card.addEventListener('click', () => openAlertDetailModal(alert));
 
   let titleText;
-  if (isIntrusion)     titleText = 'ROI 区域非法越界入侵';
-  else if (isCrowd)    titleText = '区域人流密度超限预警';
-  else if (isWarning)  titleText = '路径通行超时预警';
-  else                 titleText = '目标通行超时失联';
+  if (isIntrusion)      titleText = 'ROI 区域非法越界入侵';
+  else if (isCrowd)     titleText = '区域人流密度超限预警';
+  else if (isSceneExit) titleText = '目标全域场景消失失联';
+  else if (isWarning)   titleText = '路径通行超时预警';
+  else                  titleText = '目标通行超时失联';
 
   const gidHtml = escapeHtml(alert.global_id);
   const gidAttr = escapeAttr(alert.global_id);

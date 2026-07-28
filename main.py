@@ -93,6 +93,8 @@ def main(display: bool = False, web: bool = True, web_port: int = 8000) -> None:
         alert_log=ALERT_LOG,
         notifier=notifier,
         broadcaster=broadcaster,
+        identity_store=identity_store,  # 场景消失检测
+        scene_exit_seconds=300.0,       # 5 分钟无出现则触发 SCENE_EXIT
     )
 
     SCREENSHOT_DIR.mkdir(parents=True, exist_ok=True)
