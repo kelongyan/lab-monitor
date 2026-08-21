@@ -10,6 +10,7 @@ from types import SimpleNamespace
 from unittest.mock import patch
 
 import server
+from src import alerter
 from src.alerter import AlertBroadcaster, AlertManager
 from src.db import Database
 from src.pipeline import redact_source
@@ -147,6 +148,45 @@ class RetentionAndLogTests(unittest.TestCase):
                 ]
                 self.assertEqual(len(rows), 40)
                 self.assertEqual(len({row["alert_id"] for row in rows}), 40)
+            finally:
+                manager.close()
+    def test_intrusion_cooldown_suppresses_repeat_within_window(self):
+        """围栏语义是"有人进了不该进的地方"，一次驻留只该报一条"""
+        with tempfile.TemporaryDirectory() as temp_dir:
+            path = Path(temp_dir) / "alerts.jsonl"
+            manager = AlertManager(alert_log=path)
+            try:
+                first = manager.trigger_intrusion("cam_a", "person-1", "zone")
+                repeat = manager.trigger_intrusion("cam_a", "person-1", "zone")
+                other_person = manager.trigger_intrusion("cam_a", "person-2", "zone")
+                other_zone = manager.trigger_intrusion("cam_a", "person-1", "zone-2")
+
+                self.assertIsNotNone(first)
+                self.assertIsNone(repeat, "冷却窗口内的复报必须被抑制")
+                self.assertIsNotNone(other_person, "不同身份不共用冷却")
+                self.assertIsNotNone(other_zone, "不同围栏不共用冷却")
+
+                # 冷却过期后可以再次告警（回拨时间戳模拟窗口耗尽）
+                key = "intrusion_cam_a_person-1_zone"
+                manager._intrusion_cooldown[key] -= alerter._INTRUSION_COOLDOWN_SECONDS + 1
+                self.assertIsNotNone(manager.trigger_intrusion("cam_a", "person-1", "zone"))
+            finally:
+                manager.close()
+
+    def test_intrusion_cooldown_cleanup_keeps_active_window(self):
+        """清理过期 key 时不能把仍在冷却中的 key 一起删掉，否则复报抑制失效"""
+        with tempfile.TemporaryDirectory() as temp_dir:
+            manager = AlertManager(alert_log=Path(temp_dir) / "alerts.jsonl")
+            try:
+                now = time.time()
+                # 撑过 200 个 key 的清理阈值，其中一个仍处于冷却窗口内
+                for index in range(220):
+                    manager._intrusion_cooldown[f"stale_{index}"] = (
+                        now - alerter._INTRUSION_COOLDOWN_SECONDS * 3
+                    )
+                manager.trigger_intrusion("cam_b", "person-9", "zone")
+                self.assertIn("intrusion_cam_b_person-9_zone", manager._intrusion_cooldown)
+                self.assertIsNone(manager.trigger_intrusion("cam_b", "person-9", "zone"))
             finally:
                 manager.close()
 

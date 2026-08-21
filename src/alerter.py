@@ -21,6 +21,10 @@ from collections import deque
 logger = logging.getLogger("alerter")
 
 _WARNING_RATIO = 0.70   # deadline 的这个比例触发 WARNING
+# INTRUSION 冷却窗口（秒）：同一（相机, 身份, 围栏）在窗口内只报一次。
+# 注意这只是"复报间隔"，不是"驻留判定"——真正按"进入/离开围栏"配对的状态机
+# 需要在 pipeline 侧跟踪每个 track 的围栏内外状态，属后续优化项。
+_INTRUSION_COOLDOWN_SECONDS = float(os.getenv("LAB_MONITOR_INTRUSION_COOLDOWN", "120"))
 
 
 def _new_alert_id(prefix: str = "alert") -> str:
@@ -280,13 +284,17 @@ class AlertManager:
         now = time.time()
         key = f"intrusion_{camera_id}_{global_id}_{roi_name}"
         with self._lock:
-            # 10 秒冷却防刷屏；同时清理 >60s 的过期 key，防止 Trk_N 无限累积（内存泄漏修复）
-            if now - self._intrusion_cooldown.get(key, 0) < 10.0:
+            # 冷却防刷屏：同一（相机, 身份, 围栏）在窗口内只报一次。
+            # 10s 太短——人在围栏内驻留或走过时会每 10 秒复报一条（实测一次经过刷 6~7 条），
+            # 而围栏语义是"有人进了不该进的地方"，一次经过报一条即可。
+            if now - self._intrusion_cooldown.get(key, 0) < _INTRUSION_COOLDOWN_SECONDS:
                 return None
             self._intrusion_cooldown[key] = now
-            # 清理超过 60 秒的旧记录（仅当字典非空时执行，避免每帧开销）
+            # 清理过期 key，防止未识别人员的 Trk_N 无限累积（仅在字典变大时执行，避免每帧开销）。
+            # 过期阈值必须大于冷却窗口，否则清理会让仍在冷却中的 key 提前恢复触发。
             if len(self._intrusion_cooldown) > 200:
-                expired = [k for k, ts in self._intrusion_cooldown.items() if now - ts > 60.0]
+                cutoff = _INTRUSION_COOLDOWN_SECONDS * 2
+                expired = [k for k, ts in self._intrusion_cooldown.items() if now - ts > cutoff]
                 for k in expired:
                     del self._intrusion_cooldown[k]
 
