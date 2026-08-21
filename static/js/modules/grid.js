@@ -142,7 +142,21 @@ export function renderCamGrid(cameras, forceRefresh = false) {
   } else {
     grid.style.display = 'grid';
     if (currentGridMode === 'auto') {
-      const cols = cameras.length <= 2 ? 2 : cameras.length <= 4 ? 2 : 3;
+      // 按摄像头数量动态计算列数：保证每路画面至少 ~250px 宽，32 路约 5~6 列
+      const count = cameras.length;
+      const containerWidth = grid.clientWidth || window.innerWidth;
+      const minCardWidth = 250;
+      let cols = Math.max(2, Math.floor(containerWidth / minCardWidth));
+      if (count <= 2) cols = 2;
+      else if (count <= 4) cols = 2;
+      else if (count <= 6) cols = 3;
+      else if (count <= 9) cols = 3;
+      else if (count <= 12) cols = Math.min(cols, 4);
+      else if (count <= 16) cols = Math.min(cols, 4);
+      else if (count <= 20) cols = Math.min(cols, 5);
+      else if (count <= 25) cols = Math.min(cols, 5);
+      else cols = Math.min(cols, 6); // 32 路 → 6 列
+      cols = Math.max(2, cols);
       grid.style.gridTemplateColumns = `repeat(${cols}, 1fr)`;
     } else {
       grid.style.gridTemplateColumns = `repeat(${currentGridMode}, 1fr)`;

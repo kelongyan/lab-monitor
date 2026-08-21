@@ -195,6 +195,31 @@
   gap: 14px;
   overflow-y: auto;
   padding-right: 4px;
+  align-content: start;
+  grid-auto-rows: min-content;
+  container-type: inline-size;
+}
+
+/* 窄卡片（多路网格时）自动精简头部，避免控件挤压 */
+@container (max-width: 300px) {
+  .cam-controls {
+    display: none;
+  }
+  .cam-header {
+    padding: 6px 8px;
+  }
+  .cam-name {
+    font-size: 11px;
+  }
+  .cam-badges .cam-rec-badge,
+  .cam-badges .cam-fps-badge {
+    font-size: 9px;
+    padding: 1px 4px;
+  }
+  .cam-hud-tag {
+    font-size: 8px;
+    padding: 1px 4px;
+  }
 }
 
 #cam-grid::-webkit-scrollbar {
@@ -357,7 +382,7 @@
   flex: 1;
   background: radial-gradient(circle at center, rgba(15, 23, 42, 0.95) 0%, rgba(3, 7, 18, 1) 100%);
   aspect-ratio: 16 / 9;
-  min-height: 200px;
+  min-height: 120px;
   display: flex;
   align-items: center;
   justify-content: center;
