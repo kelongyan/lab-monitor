@@ -238,26 +238,30 @@ class AlertManager:
     # ------------------------------------------------------------------ #
 
     def resolve(self, global_id: str, seen_camera: str) -> bool:
+        # P0-1：被任何相机观测到即无条件解除 watch。MISSING_PERSON 只表示
+        # “离开后在 deadline 内没有被任何相机看到”；出现在非预期相机属于
+        # 独立的“路线偏离”事件，只记 warning 日志，不再借 MISSING_PERSON 表达。
         with self._lock:
-            entry = self._watches.get(global_id)
+            entry = self._watches.pop(global_id, None)
             self._reset_disappearance_state_locked(global_id)
-            hit = entry is not None and seen_camera in entry.expected_cameras
-            if hit:
-                self._watches.pop(global_id, None)
         if entry is None:
             return False
+        hit = seen_camera in entry.expected_cameras
         if hit:
             logger.info("Resolved: %s appeared in %s as expected", global_id, seen_camera)
         else:
             logger.warning(
-                "Person %s appeared in unexpected camera %s (expected %s)",
-                global_id, seen_camera, entry.expected_cameras,
+                "Route deviation: person %s expected %s but appeared in %s",
+                global_id, entry.expected_cameras, seen_camera,
             )
         return hit
 
     def mark_seen(self, global_id: str) -> None:
         """Clear disappearance suppression after a person is observed again."""
         with self._lock:
+            # P0-1：被任何相机观测到即不再算失踪，同步解除拓扑 watch，
+            # 避免人还在画面里被持续识别却仍然开出 MISSING_PERSON。
+            self._watches.pop(global_id, None)
             self._reset_disappearance_state_locked(global_id)
 
     # ------------------------------------------------------------------ #

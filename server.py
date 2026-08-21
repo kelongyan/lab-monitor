@@ -55,6 +55,9 @@ _ROI_COORD_MIN = 0.0
 _ROI_COORD_MAX = 1.0
 _roi_file_lock = asyncio.Lock()
 
+# CSV 导出行数上限（P2-13：避免全表读进内存拼字符串导致 OOM）
+_ALERT_EXPORT_MAX_ROWS = 50000
+
 
 def _read_json_file(path: Path) -> dict:
     return json.loads(path.read_text(encoding="utf-8"))
@@ -223,6 +226,9 @@ async def save_roi(request: Request):
         name = str(body.get("name", "自定义电子围栏"))[:64]  # 名称最长 64 字符
 
         # P0-2b: polygon 顶点数上限 + 坐标范围 [0, 1] 校验
+        # P1-4: 校验的同时构造清洗后的坐标（统一转 float），避免字符串坐标落盘
+        #       —— pipeline 侧 int(x * width) 遇到字符串会抛 ValueError 打死摄像头线程
+        sanitized: list[list[float]] = []
         if polygon:
             if len(polygon) < 3:
                 return JSONResponse(
@@ -235,12 +241,15 @@ async def save_roi(request: Request):
                     status_code=400,
                 )
             for pt in polygon:
+                x = y = 0.0
                 try:
+                    if not (isinstance(pt, (list, tuple)) and len(pt) == 2):
+                        raise ValueError("坐标点必须是 [x, y] 形式")
+                    x = float(pt[0])
+                    y = float(pt[1])
                     valid_point = (
-                        isinstance(pt, (list, tuple))
-                        and len(pt) == 2
-                        and _ROI_COORD_MIN <= float(pt[0]) <= _ROI_COORD_MAX
-                        and _ROI_COORD_MIN <= float(pt[1]) <= _ROI_COORD_MAX
+                        _ROI_COORD_MIN <= x <= _ROI_COORD_MAX
+                        and _ROI_COORD_MIN <= y <= _ROI_COORD_MAX
                     )
                 except (TypeError, ValueError):
                     valid_point = False
@@ -249,16 +258,17 @@ async def save_roi(request: Request):
                         {"status": "error", "error": "polygon 坐标必须在 [0, 1] 范围内"},
                         status_code=400,
                     )
+                sanitized.append([x, y])
 
         # P0-2c: 读-改-写加锁，防止并发 POST 竞态覆盖（_roi_file_lock 在 startup() 初始化）
         roi_file = Path(__file__).parent / "config" / "roi.json"
         lock = _roi_file_lock or asyncio.Lock()  # startup 未完成时降级为临时锁
         async with lock:
             current = await run_in_threadpool(
-                _update_roi_file, roi_file, camera_id, polygon, name
+                _update_roi_file, roi_file, camera_id, sanitized, name
             )
 
-        logger.info("保存 ROI 配置成功: camera_id=%s, polygon_points=%d", camera_id, len(polygon))
+        logger.info("保存 ROI 配置成功: camera_id=%s, polygon_points=%d", camera_id, len(sanitized))
 
         # 动态通知运行中的 CameraPipelines
         if _pipelines:
@@ -449,7 +459,8 @@ def export_alerts_csv():
             s = "'" + s   # 在 Excel 中强制视为文本
         return s
 
-    total, alerts = db.query_alert_page(limit=2_147_483_647)
+    total, alerts = db.query_alert_page(limit=_ALERT_EXPORT_MAX_ROWS)
+    truncated = total > len(alerts)
     output = io.StringIO(newline="")
     writer = csv.writer(output, lineterminator="\r\n")
     writer.writerow([
@@ -472,10 +483,21 @@ def export_alerts_csv():
             _safe_csv(item.get("elapsed_seconds")),
         ])
     csv_content = output.getvalue()
+    headers = {
+        "Content-Disposition": 'attachment; filename="lab_alerts_history.csv"',
+        # P2-13：超出上限时截断，并通过响应头告知客户端真实总数
+        "X-Export-Truncated": "true" if truncated else "false",
+        "X-Export-Rows": str(len(alerts)),
+        "X-Export-Total": str(total),
+    }
+    if truncated:
+        logger.warning(
+            "告警导出被截断：共 %d 条，仅导出最近 %d 条", total, len(alerts)
+        )
     return Response(
         content=csv_content.encode("utf-8-sig"),
         media_type="text/csv",
-        headers={"Content-Disposition": 'attachment; filename="lab_alerts_history.csv"'}
+        headers=headers,
     )
 
 

@@ -24,8 +24,14 @@ class PersonDetector:
         self.use_fp16 = (self.device == "cuda" or (isinstance(self.device, str) and "cuda" in self.device))
 
         # 预热并提前触发模型 fuse，避免多线程并发 predict 时产生竞态条件
+        # ultralytics 8.4 起 half 已弃用，统一用 quantize（16=FP16，None=FP32）
         dummy = np.zeros((64, 64, 3), dtype=np.uint8)
-        self.model.predict(dummy, device=self.device, verbose=False, half=self.use_fp16)
+        self.model.predict(
+            dummy,
+            device=self.device,
+            verbose=False,
+            quantize=16 if self.use_fp16 else None,
+        )
 
     def detect(self, frame: np.ndarray) -> list[list[float]]:
         """
@@ -39,7 +45,7 @@ class PersonDetector:
             "verbose": False,
         }
         if self.use_fp16:
-            kwargs["half"] = True
+            kwargs["quantize"] = 16  # FP16（替代已弃用的 half=True）
 
         with self._lock:
             results = self.model.predict(frame, **kwargs)

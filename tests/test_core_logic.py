@@ -183,13 +183,40 @@ class AlertStateTests(unittest.TestCase):
         self.manager._close_log_file()
         self.temp_dir.cleanup()
 
-    def test_unexpected_camera_keeps_watch_until_expected_arrival(self):
+    def test_unexpected_camera_sighting_clears_watch(self):
+        # P0-1：被任何相机观测到即解除 watch，非预期相机只算“路线偏离”
+        self.manager.watch("person-1", "cam_a", ["cam_b"], 0.01)
+
+        # 契约未变：命中预期相机才返回 True，非预期相机仍返回 False
+        self.assertFalse(self.manager.resolve("person-1", "cam_c"))
+        self.assertNotIn("person-1", self.manager._watches)
+        time.sleep(0.05)
+        self.assertEqual([], self.manager.tick())
+
+    def test_expected_camera_sighting_resolves_watch(self):
         self.manager.watch("person-1", "cam_a", ["cam_b"], 30)
 
-        self.assertFalse(self.manager.resolve("person-1", "cam_c"))
-        self.assertIn("person-1", self.manager._watches)
         self.assertTrue(self.manager.resolve("person-1", "cam_b"))
         self.assertNotIn("person-1", self.manager._watches)
+
+    def test_mark_seen_cancels_missing_person_before_deadline(self):
+        # P0-1 回归测试：人还在画面里被持续识别（mark_seen）就不该报失踪
+        self.manager.watch("person-1", "cam_a", ["cam_b"], deadline_offset=0.01)
+        self.manager.mark_seen("person-1")
+
+        self.assertNotIn("person-1", self.manager._watches)
+        time.sleep(0.05)
+        self.assertEqual([], self.manager.tick())
+
+    def test_unobserved_person_still_triggers_missing_alert(self):
+        # 反向保证：全程未被任何相机观测到时，MISSING_PERSON 仍正常产出
+        self.manager.watch("person-1", "cam_a", ["cam_b"], deadline_offset=0.01)
+        time.sleep(0.05)
+
+        alerts = self.manager.tick()
+
+        self.assertEqual(["MISSING_PERSON"], [alert["alert_type"] for alert in alerts])
+        self.assertEqual("person-1", alerts[0]["global_id"])
 
     def test_missing_person_escalates_to_scene_exit_after_grace_period(self):
         store = IdentityStore()

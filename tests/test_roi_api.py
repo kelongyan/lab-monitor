@@ -70,6 +70,82 @@ class RoiApiTests(unittest.TestCase):
             (root / "config").mkdir()
             asyncio.run(exercise(root))
 
+    def test_string_coordinates_are_sanitized_to_float(self):
+        """P1-4: 字符串坐标必须被清洗为 float 后再落盘，否则 pipeline int() 会崩线程。"""
+        async def exercise(root: Path):
+            original_pipelines = server._pipelines
+            original_lock = server._roi_file_lock
+            server._pipelines = [SimpleNamespace(camera_id="cam_a")]
+            server._roi_file_lock = asyncio.Lock()
+            path_factory = lambda _: root / "server.py"
+            try:
+                with patch.object(server, "Path", path_factory):
+                    response = await server.save_roi(FakeRequest({
+                        "camera_id": "cam_a",
+                        "polygon": [["0.1", "0.2"], ["0.3", "0.4"], ["0.5", "0.6"]],
+                        "name": "字符串坐标",
+                    }))
+                    self.assertEqual(response.status_code, 200)
+
+                    too_few = await server.save_roi(FakeRequest({
+                        "camera_id": "cam_a",
+                        "polygon": [[0.1, 0.2], [0.3, 0.4]],
+                        "name": "两点",
+                    }))
+                    self.assertEqual(too_few.status_code, 400)
+
+                    out_of_range = await server.save_roi(FakeRequest({
+                        "camera_id": "cam_a",
+                        "polygon": [[5, 5], [6, 6], [7, 7]],
+                        "name": "越界",
+                    }))
+                    self.assertEqual(out_of_range.status_code, 400)
+            finally:
+                server._pipelines = original_pipelines
+                server._roi_file_lock = original_lock
+
+            saved = json.loads((root / "config" / "roi.json").read_text(encoding="utf-8"))
+            polygon = saved["cam_a"][0]["polygon"]
+            self.assertEqual(len(polygon), 3)
+            for point in polygon:
+                self.assertEqual(len(point), 2)
+                for value in point:
+                    self.assertIsInstance(value, float)
+            self.assertEqual(polygon[0], [0.1, 0.2])
+
+        with tempfile.TemporaryDirectory() as temp_dir:
+            root = Path(temp_dir)
+            (root / "config").mkdir()
+            asyncio.run(exercise(root))
+
+    def test_long_name_is_truncated(self):
+        """名称做 str() + 64 字符截断，防止超长字符串写入配置文件。"""
+        async def exercise(root: Path):
+            original_pipelines = server._pipelines
+            original_lock = server._roi_file_lock
+            server._pipelines = [SimpleNamespace(camera_id="cam_a")]
+            server._roi_file_lock = asyncio.Lock()
+            path_factory = lambda _: root / "server.py"
+            try:
+                with patch.object(server, "Path", path_factory):
+                    response = await server.save_roi(FakeRequest({
+                        "camera_id": "cam_a",
+                        "polygon": [[0.0, 0.0], [1.0, 0.0], [0.5, 1.0]],
+                        "name": "围" * 200,
+                    }))
+                    self.assertEqual(response.status_code, 200)
+            finally:
+                server._pipelines = original_pipelines
+                server._roi_file_lock = original_lock
+
+            saved = json.loads((root / "config" / "roi.json").read_text(encoding="utf-8"))
+            self.assertEqual(len(saved["cam_a"][0]["name"]), 64)
+
+        with tempfile.TemporaryDirectory() as temp_dir:
+            root = Path(temp_dir)
+            (root / "config").mkdir()
+            asyncio.run(exercise(root))
+
 
 if __name__ == "__main__":
     unittest.main()

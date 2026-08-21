@@ -31,6 +31,10 @@ _RTSP_BACKOFF_FACTOR = 1.5
 _RTSP_OPEN_TIMEOUT_MS = int(os.getenv("LAB_MONITOR_RTSP_OPEN_TIMEOUT_MS", "10000"))
 _RTSP_READ_TIMEOUT_MS = int(os.getenv("LAB_MONITOR_RTSP_READ_TIMEOUT_MS", "10000"))
 
+# 本地文件源重试配置：正常循环播放保持 0.5s 间隔，坏源指数退避至 60s（F3）
+_FILE_INITIAL_DELAY = 0.5
+_FILE_MAX_DELAY = 60.0
+
 
 def _is_rtsp(source: str) -> bool:
     return isinstance(source, str) and source.lower().startswith("rtsp://")
@@ -116,15 +120,113 @@ class CameraPipeline(threading.Thread):
             return []
         try:
             data = json.loads(roi_file.read_text(encoding="utf-8"))
-            return data.get(self.camera_id, [])
-        except Exception:
+            raw_rois = data.get(self.camera_id, [])
+        except Exception as error:
+            # 静默失败等于关闭全域电子围栏，必须留下痕迹（F10）
+            logger.error(
+                "[%s] roi.json 读取失败（%s: %s），本路电子围栏已关闭",
+                self.camera_id, type(error).__name__, error,
+            )
             return []
+        return self._sanitize_rois(raw_rois)
+
+    def _sanitize_rois(self, raw_rois) -> list[dict]:
+        """
+        清洗 ROI 配置（F10）：坐标强制转 float 并裁剪到 [0,1]，顶点数不足或
+        含非法坐标的 ROI 直接跳过并记日志。
+        原因：写入接口可能把坐标原样落盘为字符串，_process_frame 里的
+        int(p[0] * w) 会抛 ValueError，异常穿出 _read_loop 后该路线程永久退出。
+        """
+        if not isinstance(raw_rois, list):
+            logger.error("[%s] roi.json 中本相机的配置不是数组，已忽略", self.camera_id)
+            return []
+
+        cleaned: list[dict] = []
+        for idx, roi in enumerate(raw_rois):
+            if not isinstance(roi, dict):
+                logger.error("[%s] ROI #%d 不是对象，已跳过", self.camera_id, idx)
+                continue
+            roi_name = roi.get("name", "未命名")
+            polygon = roi.get("polygon")
+            if not isinstance(polygon, (list, tuple)) or len(polygon) < 3:
+                logger.error(
+                    "[%s] ROI #%d(%s) 缺少 polygon 或顶点数不足 3，已跳过",
+                    self.camera_id, idx, roi_name,
+                )
+                continue
+
+            points: list[list[float]] = []
+            for point in polygon:
+                try:
+                    x = min(1.0, max(0.0, float(point[0])))
+                    y = min(1.0, max(0.0, float(point[1])))
+                except (TypeError, ValueError, IndexError, KeyError):
+                    points = []
+                    break
+                points.append([x, y])
+            if len(points) < 3:
+                logger.error(
+                    "[%s] ROI #%d(%s) 含非法坐标，已跳过",
+                    self.camera_id, idx, roi_name,
+                )
+                continue
+
+            item = dict(roi)
+            item["polygon"] = points
+            cleaned.append(item)
+        return cleaned
+
+    def _roi_points(self, roi: dict, w_img: int, h_img: int) -> np.ndarray:
+        """归一化多边形 → 像素坐标（坐标已由 _load_rois 清洗为 [0,1] 的 float）"""
+        return np.array(
+            [[int(p[0] * w_img), int(p[1] * h_img)] for p in roi["polygon"]], np.int32
+        )
 
     def reload_rois(self) -> None:
         self._rois = self._load_rois()
 
     def stop(self) -> None:
         self._stop_event.set()
+
+    def _reset_stream_state(self) -> None:
+        """
+        重开流（本地文件循环播放 / RTSP 重连）前重置跟踪与 ReID 状态（F2）。
+
+        不重置时新片头的检测框与旧轨迹关联不上，旧 track_id 会集体从 tracker
+        输出中消失，被 _process_frame 误判为人员离场 → watch() → MISSING_PERSON 误报。
+        清空 _prev_track_ids 即可消除这批伪离场事件。
+
+        注意：**不要**在这里重建 PersonTracker。BYTETracker.__init__ 会调用
+        reset_id()，而 BaseTrack._count 是**类级共享**计数器，重建会把全部
+        摄像头线程的 track_id 一起归零，导致其它路正在活跃的 track_id 与新分配
+        的 id 撞号（_track_to_global 会把新来的人认成旧身份）。旧轨迹留在 tracker
+        里由 track_buffer 自然淘汰即可，不影响正确性。
+        _track_to_global 与 _validator 必须清空：track_id 可能被新片段复用，
+        否则新进入的人会直接继承上一轮的 global_id。
+        """
+        self._validator = ReIDValidator(
+            buffer_size=8,
+            confirm_frames=3,
+            threshold=0.75,
+        )
+        self._prev_track_ids = set()
+        self._track_to_global = {}
+        self._reid_frame_counter = {}
+        self._last_tracks = []
+
+    def _capture_ready(self, cap) -> bool:
+        """
+        判定 capture 是否真的可用（F3）。
+        损坏文件（H.264 缺 PPS 等）isOpened() 仍返回 True，但元数据全废、
+        画面宽度为 0，首帧必然解码失败，这里提前识别避免无意义重开。
+        """
+        if cap is None or not cap.isOpened():
+            return False
+        try:
+            width = float(cap.get(cv2.CAP_PROP_FRAME_WIDTH))
+        except (TypeError, ValueError):
+            return True  # 取不到宽度时不做预判，交由实际读帧结果决定
+        return width > 0
 
     # ------------------------------------------------------------------ #
     # 主循环                                                                #
@@ -144,17 +246,17 @@ class CameraPipeline(threading.Thread):
                 )
 
     def _run_file(self) -> None:
+        # 坏源熔断（F3）：本轮解码 0 帧则计入失败并指数退避，只在状态翻转时打一条日志
+        fail_streak = 0
+        delay = _FILE_INITIAL_DELAY
         while not self._stop_event.is_set():
             cap = None
+            frames = 0
             try:
                 cap = cv2.VideoCapture(self.source)
-                if not cap.isOpened():
-                    logger.error("[%s] 无法打开视频文件: %s", self.camera_id, self.source)
-                    if self.frame_hub:
-                        self.frame_hub.mark_offline(self.camera_id, status_text="FILE_ERROR")
-                    return
-                logger.info("[%s] 开始处理文件: %s", self.camera_id, self.source)
-                self._read_loop(cap)
+                if self._capture_ready(cap):
+                    logger.debug("[%s] 开始处理文件: %s", self.camera_id, self.source)
+                    frames = self._read_loop(cap)
             except Exception:
                 logger.exception("[%s] 本地视频处理异常", self.camera_id)
                 if self.frame_hub:
@@ -165,7 +267,31 @@ class CameraPipeline(threading.Thread):
             finally:
                 if cap is not None:
                     cap.release()
-            time.sleep(0.5)
+
+            if frames:
+                # 正常循环播放：不给可用源引入退避
+                fail_streak = 0
+                delay = _FILE_INITIAL_DELAY
+            else:
+                fail_streak += 1
+                if fail_streak == 1:
+                    logger.error(
+                        "[%s] 视频源不可用（无法打开或首帧解码失败）: %s，转入退避重试",
+                        self.camera_id, self.source,
+                    )
+                if self.frame_hub:
+                    self.frame_hub.mark_offline(
+                        self.camera_id,
+                        status_text="FILE_ERROR",
+                        reconnect_count=fail_streak,
+                    )
+                delay = min(delay * 2, _FILE_MAX_DELAY)
+
+            # 重开前重置跟踪状态，EOF 不等于人员离场（F2）
+            self._reset_stream_state()
+            # 用 wait 而非 sleep，stop() 可立刻中断退避
+            if self._stop_event.wait(delay):
+                break
         if self.frame_hub:
             self.frame_hub.mark_offline(self.camera_id, status_text="STOPPED")
         logger.info("[%s] 文件流水线结束", self.camera_id)
@@ -227,6 +353,8 @@ class CameraPipeline(threading.Thread):
                         status_text="RECONNECTING",
                         reconnect_count=self._reconnect_count,
                     )
+            # 重连前重置跟踪状态：新连接的 track_id 会重新分配，旧轨迹并非人员离场（F2）
+            self._reset_stream_state()
             self._stop_event.wait(retry_delay)
             retry_delay = min(
                 retry_delay * _RTSP_BACKOFF_FACTOR, _RTSP_MAX_DELAY
@@ -236,12 +364,14 @@ class CameraPipeline(threading.Thread):
             self.frame_hub.mark_offline(self.camera_id, status_text="STOPPED", reconnect_count=self._reconnect_count)
         logger.info("[%s] RTSP 流水线结束", self.camera_id)
 
-    def _read_loop(self, cap: cv2.VideoCapture) -> None:
+    def _read_loop(self, cap: cv2.VideoCapture) -> int:
+        """读帧主循环；返回本轮成功解码的帧数（供 _run_file 判定坏源熔断，F3）"""
         # GPU 服务器：读帧速度远快于源视频帧率，需要限速避免空跑浪费 GPU 算力
         # 上限由 main.py 传入：CPU=15fps，GPU=30fps
         source_fps = cap.get(cv2.CAP_PROP_FPS) or 25.0
         target_fps = min(source_fps, self._frame_rate_cap)
         frame_interval = 1.0 / target_fps
+        decoded = 0
 
         while not self._stop_event.is_set():
             t_start = time.monotonic()
@@ -250,6 +380,7 @@ class CameraPipeline(threading.Thread):
             if not ret:
                 break
             self._frame_idx += 1
+            decoded += 1
             self._process_frame(frame)
             if self.frame_hub:
                 self.frame_hub.push_frame(self.camera_id, frame, status_text="ONLINE")
@@ -267,6 +398,7 @@ class CameraPipeline(threading.Thread):
 
         if self.display:
             cv2.destroyWindow(f"Camera {self.camera_id}")
+        return decoded
 
     # ------------------------------------------------------------------ #
     # 核心处理逻辑（Phase 4：多帧验证 + 校准记录）                             #
@@ -277,7 +409,7 @@ class CameraPipeline(threading.Thread):
 
         # 绘制 ROI 危险区域边框
         for roi in self._rois:
-            pts = np.array([[int(p[0] * w_img), int(p[1] * h_img)] for p in roi["polygon"]], np.int32)
+            pts = self._roi_points(roi, w_img, h_img)
             pts = pts.reshape((-1, 1, 2))
             cv2.polylines(frame, [pts], isClosed=True, color=(0, 165, 255), thickness=2)
             roi_label = f"[ROI] {roi.get('name', '危险区')}"
@@ -385,7 +517,7 @@ class CameraPipeline(threading.Thread):
             ]
             is_intrusion = False
             for roi in self._rois:
-                pts = np.array([[int(p[0] * w_img), int(p[1] * h_img)] for p in roi["polygon"]], np.int32)
+                pts = self._roi_points(roi, w_img, h_img)
                 if any(cv2.pointPolygonTest(pts, pt, measureDist=False) >= 0 for pt in check_points):
                     is_intrusion = True
                     self.alerter.trigger_intrusion(

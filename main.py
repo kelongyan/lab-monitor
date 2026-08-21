@@ -8,12 +8,17 @@ import time
 import logging
 import threading
 import os
+from logging.handlers import RotatingFileHandler
 from pathlib import Path
+
+# 必须在导入 cv2（由 src.* 间接导入）之前设置：屏蔽 FFmpeg C 层 stderr
+# （损坏视频源会持续刷 "PPS out of range" / "no start code" 等噪声日志）
+os.environ.setdefault("OPENCV_FFMPEG_LOGLEVEL", "-8")
 
 from src.detector import PersonDetector
 from src.reid import build_reid_extractor
 from src.identity_store import IdentityStore
-from src.topology import CameraTopology
+from src.topology import CameraTopology, TopologyValidationError
 from src.alerter import AlertManager, AlertBroadcaster
 from src.frame_hub import FrameHub
 from src.notifier import build_notifier
@@ -22,13 +27,6 @@ from src.pipeline import CameraPipeline, redact_source
 from src.db import db
 import server as web_server
 
-logging.basicConfig(
-    level=logging.INFO,
-    format="%(asctime)s [%(name)s] %(levelname)s: %(message)s",
-    datefmt="%H:%M:%S",
-)
-logger = logging.getLogger("main")
-
 CONFIG_DIR     = Path("config")
 SOURCES_CFG    = CONFIG_DIR / "sources.json"
 TOPO_CFG       = CONFIG_DIR / "topology.json"
@@ -36,6 +34,26 @@ NOTIFY_CFG     = CONFIG_DIR / "notify.json"
 OUTPUT_DIR     = Path("outputs")
 SCREENSHOT_DIR = OUTPUT_DIR / "screenshots"
 ALERT_LOG      = OUTPUT_DIR / "alerts.jsonl"
+SERVER_LOG     = OUTPUT_DIR / "server.log"
+PID_FILE       = OUTPUT_DIR / "server.pid"
+
+# 日志：控制台（前台运行时可见）+ 轮转文件（单个 64MB，保留 5 份），避免 server.log 无限膨胀
+OUTPUT_DIR.mkdir(parents=True, exist_ok=True)
+_log_formatter = logging.Formatter(
+    fmt="%(asctime)s [%(name)s] %(levelname)s: %(message)s",
+    datefmt="%H:%M:%S",
+)
+_console_handler = logging.StreamHandler()
+_console_handler.setFormatter(_log_formatter)
+_file_handler = RotatingFileHandler(
+    SERVER_LOG,
+    maxBytes=64 * 1024 * 1024,
+    backupCount=5,
+    encoding="utf-8",
+)
+_file_handler.setFormatter(_log_formatter)
+logging.basicConfig(level=logging.INFO, handlers=[_console_handler, _file_handler])
+logger = logging.getLogger("main")
 
 
 def load_sources() -> dict[str, str]:
@@ -48,10 +66,28 @@ def alert_ticker(
     stop_event: threading.Event,
     interval: float = 0.5,
 ) -> None:
-    """后台线程：每隔 interval 秒检查一次超时告警（GPU 服务器模式：0.5s）"""
+    """后台线程：每隔 interval 秒检查一次超时告警（GPU 服务器模式：0.5s）
+
+    它是唯一的超时检测线程，任何异常只记录不退出循环，
+    否则 MISSING_PERSON / SCENE_EXIT 会静默失效。
+    """
+    failures = 0
     while not stop_event.is_set():
-        alert_manager.tick()
+        try:
+            alert_manager.tick()
+        except Exception:
+            failures += 1
+            logger.exception("告警轮询异常（累计 %d 次），线程继续运行", failures)
         stop_event.wait(interval)
+
+
+def clear_pid_file() -> None:
+    """退出时清理 PID 文件；仅当内容确为本进程 PID，避免误删新实例写入的值"""
+    try:
+        if PID_FILE.exists() and PID_FILE.read_text(encoding="ascii").strip() == str(os.getpid()):
+            PID_FILE.unlink()
+    except (OSError, ValueError):
+        pass
 
 
 def apply_output_retention(retention_days: int) -> dict[str, int]:
@@ -173,7 +209,22 @@ def main(
         feature_space=reid_extractor.feature_space,
         max_records=int(os.getenv("LAB_MONITOR_MAX_IDENTITIES", "10000")),
     )
-    topology       = CameraTopology(TOPO_CFG, allowed_camera_ids=set(load_sources()))
+    # 白名单用过滤后的 sources（磁盘不存在的源已被剔除），避免误报未知摄像头 ID
+    try:
+        topology = CameraTopology(TOPO_CFG, allowed_camera_ids=set(sources))
+    except TopologyValidationError as exc:
+        logger.error(
+            "拓扑配置 %s 校验失败，已降级为空拓扑继续启动："
+            "MISSING_PERSON（跨相机超时）告警将不可用，修好配置后需重启服务。原因：%s",
+            TOPO_CFG,
+            exc,
+        )
+        # 指向不存在的路径以获得空拓扑，再还原配置路径，便于后续通过 Web 接口修正并落盘
+        topology = CameraTopology(
+            TOPO_CFG.with_name(f".{TOPO_CFG.name}.disabled"),
+            allowed_camera_ids=set(sources),
+        )
+        topology._config_path = TOPO_CFG
     frame_hub      = FrameHub(jpeg_quality=perf["jpeg_quality"])
     frame_hub.register_cameras(sources)
     broadcaster    = AlertBroadcaster(delivery_enabled=web)
@@ -195,6 +246,12 @@ def main(
 
     SCREENSHOT_DIR.mkdir(parents=True, exist_ok=True)
     shutdown_event = threading.Event()
+
+    # 写入真实服务进程 PID（start.ps1 拿到的是 venv launcher 的 PID，并不可靠）
+    try:
+        PID_FILE.write_text(str(os.getpid()), encoding="ascii")
+    except OSError as exc:
+        logger.warning("无法写入 PID 文件 %s: %s", PID_FILE, exc)
 
     # ---- 启动 Web 服务器 ----
     # ---- 启动各路流水线 ----
@@ -245,6 +302,7 @@ def main(
             alert_manager.close()
             calibrator.flush()
             db.close()
+            clear_pid_file()
             raise
 
     # ---- 启动预警后台检查线程 ----
@@ -261,9 +319,11 @@ def main(
         logger.info("监控大屏：http://%s:%d", web_host, web_port)
 
     try:
-        while any(p.is_alive() for p in pipelines):
-            for pipeline in pipelines:
-                pipeline.join(timeout=0.5)
+        # 只等停止信号：Web 大屏在流水线全部退出后仍需继续提供历史查询
+        while not shutdown_event.wait(0.5):
+            # 无 Web 模式没有查询需求，流水线全部退出即可结束进程
+            if not web and not any(p.is_alive() for p in pipelines):
+                break
     except KeyboardInterrupt:
         request_shutdown()
     finally:
@@ -274,6 +334,7 @@ def main(
         calibrator.flush()
         alert_manager.close()
         db.close()
+        clear_pid_file()
 
     logger.info("系统已停止，告警日志：%s", ALERT_LOG)
 
