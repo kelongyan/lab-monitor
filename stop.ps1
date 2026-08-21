@@ -52,7 +52,8 @@ if (-not $isPythonMain) {
     exit 1
 }
 
-$headers = @{}
+# 写接口守卫要求自定义头（缺失会被 403 拒绝，脚本会退化成强制终止）
+$headers = @{ "X-Lab-Monitor-Request" = "1" }
 if ($env:LAB_MONITOR_USERNAME -and $env:LAB_MONITOR_PASSWORD) {
     $rawCredentials = "$($env:LAB_MONITOR_USERNAME):$($env:LAB_MONITOR_PASSWORD)"
     $encodedCredentials = [Convert]::ToBase64String([Text.Encoding]::UTF8.GetBytes($rawCredentials))

@@ -4,11 +4,32 @@
 import { BASE, fetchJson, showToast } from '../utils/api.js';
 import { escapeHtml, escapeAttr } from '../utils/formatter.js';
 import { getCachedCameras } from './grid.js';
+import { BLANK_IMAGE, setStreamsSuspended } from './stream_manager.js';
 
 const SVG_NS = 'http://www.w3.org/2000/svg';
 const modalRequests = new Map();
 const modalGenerations = new Map();
 const modalOpeners = new Map();
+// 记录当前打开且内含独立 MJPEG 流的弹窗（焦点视窗 / 放大监视器 / ROI 画板）
+const streamModals = new Set();
+
+// 弹窗自带视频流时挂起网格建流：否则「网格 4 路 + 弹窗 1 路」接近
+// 浏览器 6 条连接上限，REST 轮询与 ROI/拓扑保存的 POST 会排队等不到连接。
+function syncModalStreamSuspend(id, isOpen) {
+  if (isOpen) {
+    // 必须 add / delete 二选一：alert-detail-modal 这类共用弹窗被复用成
+    // 「无流内容」时若只 add 不 delete，挂起状态会一直生效、网格全程冻结。
+    const el = document.getElementById(id);
+    if (el?.querySelector('img[src*="/stream/"]')) {
+      streamModals.add(id);
+    } else {
+      streamModals.delete(id);
+    }
+  } else {
+    streamModals.delete(id);
+  }
+  setStreamsSuspended(streamModals.size > 0);
+}
 
 function beginModalRequest(modalId) {
   modalRequests.get(modalId)?.abort();
@@ -49,6 +70,7 @@ export function openModal(id) {
   }
   el.classList.add('active');
   el.setAttribute('aria-hidden', 'false');
+  syncModalStreamSuspend(id, true);
   const focusFirstControl = () => {
     if (!el.classList.contains('active')) return;
     const focusTarget = el.querySelector(
@@ -69,8 +91,11 @@ export function closeModal(id) {
   modalRequests.delete(id);
   modalGenerations.set(id, (modalGenerations.get(id) || 0) + 1);
   el.querySelectorAll('img').forEach(img => {
-    if (img.src.includes('/stream/')) img.src = '';
+    // 换成占位图而不是 img.src = ''：后者会被解析成当前页面 URL 再发一次请求，
+    // 而且不保证立刻中止 multipart 长连接。
+    if (img.src.includes('/stream/')) img.src = BLANK_IMAGE;
   });
+  syncModalStreamSuspend(id, false);
   el.dispatchEvent(new CustomEvent('modal:closed'));
   const opener = modalOpeners.get(id);
   modalOpeners.delete(id);
@@ -184,7 +209,7 @@ export async function showTrajectoryModal(global_id) {
         <div class="timeline-dot"></div>
         <div class="timeline-content">
           <div class="timeline-header">
-            <span class="timeline-cam">节点 ${idx + 1}: ${escapeHtml(t.camera).toUpperCase()}</span>
+            <span class="timeline-cam">节点 ${idx + 1}: ${escapeHtml(String(t.camera ?? '').toUpperCase())}</span>
             <span class="timeline-time">${escapeHtml(t.time_str)} ${t.end_time_str ? '➔ ' + escapeHtml(t.end_time_str) : ''}</span>
           </div>
           <div style="font-size: 11px; color: var(--text-muted);">
@@ -202,7 +227,7 @@ export async function showTrajectoryModal(global_id) {
         </div>
         <div class="meta-card">
           <div class="label">当前所在/最后镜头</div>
-          <div class="val" style="color: var(--primary);">${escapeHtml(res.last_camera).toUpperCase()}</div>
+          <div class="val" style="color: var(--primary);">${escapeHtml(String(res.last_camera ?? '').toUpperCase())}</div>
         </div>
       </div>
 

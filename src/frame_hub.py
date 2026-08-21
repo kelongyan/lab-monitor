@@ -108,25 +108,50 @@ class FrameHub:
     # Hub → Server                                                          #
     # ------------------------------------------------------------------ #
 
+    def get_generation(self, camera_id: str) -> int:
+        """只读获取当前帧序号，供 MJPEG 流做增量判断（不做 copy/编码，开销极低）。
+
+        未知摄像头返回 0；push_frame / mark_offline 都会让该值自增。
+        """
+        lock = self._cam_locks.get(camera_id)
+        if lock is None:
+            return 0
+        with lock:
+            s = self._states.get(camera_id)
+            return s.generation if s is not None else 0
+
     def get_jpeg(self, camera_id: str, quality: int = None) -> bytes | None:
         """返回最新帧的 JPEG 字节（带编码缓存），用于 MJPEG 流；摄像头离线返回 None"""
+        jpeg, _ = self.get_jpeg_with_generation(camera_id, quality)
+        return jpeg
+
+    def get_jpeg_with_generation(
+        self, camera_id: str, quality: int = None
+    ) -> tuple[bytes | None, int]:
+        """同 get_jpeg，但同时返回该 JPEG 对应的 generation。
+
+        MJPEG 流据此判断"这一帧是否已经推送过"，避免重复推送相同字节。
+        """
         if quality is None:
             quality = self.JPEG_QUALITY
 
         lock = self._cam_locks.get(camera_id)
         if lock is None:
-            return None
+            return None, 0
 
+        generation = 0
         # 编码期间若有新帧到达，最多重试两次，绝不把旧 generation 写回缓存。
         for _ in range(3):
             with lock:
                 s = self._states.get(camera_id)
-                if s is None or not s.is_online or s.latest_frame is None:
-                    return None
-                if s.latest_jpeg is not None:
-                    return s.latest_jpeg
-                frame = s.latest_frame.copy()
+                if s is None:
+                    return None, 0
                 generation = s.generation
+                if not s.is_online or s.latest_frame is None:
+                    return None, generation
+                if s.latest_jpeg is not None:
+                    return s.latest_jpeg, generation
+                frame = s.latest_frame.copy()
 
             h, w = frame.shape[:2]
             if w != self.DISPLAY_WIDTH or h != self.DISPLAY_HEIGHT:
@@ -136,17 +161,19 @@ class FrameHub:
                 ".jpg", frame, [cv2.IMWRITE_JPEG_QUALITY, quality]
             )
             if not success:
-                return None
+                return None, generation
             jpeg_bytes = buf.tobytes()
 
             with lock:
                 s = self._states.get(camera_id)
-                if s is None or not s.is_online:
-                    return None
+                if s is None:
+                    return None, 0
+                if not s.is_online:
+                    return None, s.generation
                 if s.generation == generation:
                     s.latest_jpeg = jpeg_bytes
-                    return jpeg_bytes
-        return None
+                    return jpeg_bytes, generation
+        return None, generation
 
     def get_frame(self, camera_id: str) -> np.ndarray | None:
         """返回在线 camera 最新帧的副本，供告警快照使用。"""

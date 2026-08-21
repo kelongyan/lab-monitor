@@ -3,14 +3,76 @@
  */
 import { BASE, showToast } from '../utils/api.js';
 import { escapeHtml, escapeAttr } from '../utils/formatter.js';
+import {
+  BLANK_IMAGE,
+  registerStreamImage,
+  resetStreamRegistry,
+  reconcileStreams,
+} from './stream_manager.js';
 
 let currentGridMode = 'auto'; // 'auto', 1, 2, '1n'
 let currentFocusCamId = '';
 let cachedCameras = [];
 let camIds = [];
+let gridResizeObserver = null;
+let gridResizeTimer = null;
 
 export function getCachedCameras() {
   return cachedCameras;
+}
+
+// 网格重建后重新登记全部视频流：焦点大屏常驻建流，其余按视口可见性动态建流
+function bindGridStreams(grid) {
+  grid.querySelectorAll('img[data-stream-src]').forEach(img => {
+    registerStreamImage(img, {
+      camId: img.getAttribute('data-cam-id') || '',
+      pinned: Boolean(img.closest('.theater-focus-card')),
+    });
+  });
+  reconcileStreams();
+}
+
+// auto 模式下按容器实际宽度与路数计算列数（窗口缩放时只改列数，不重建 DOM）
+function applyAutoColumns(grid, count) {
+  // 按摄像头数量动态计算列数：保证每路画面至少 ~250px 宽，32 路约 5~6 列
+  const containerWidth = grid.clientWidth || window.innerWidth;
+  const minCardWidth = 250;
+  let cols = Math.max(2, Math.floor(containerWidth / minCardWidth));
+  if (count <= 2) cols = 2;
+  else if (count <= 4) cols = 2;
+  else if (count <= 6) cols = 3;
+  else if (count <= 9) cols = 3;
+  else if (count <= 12) cols = Math.min(cols, 4);
+  else if (count <= 16) cols = Math.min(cols, 4);
+  else if (count <= 20) cols = Math.min(cols, 5);
+  else if (count <= 25) cols = Math.min(cols, 5);
+  else cols = Math.min(cols, 6); // 32 路 → 6 列
+  cols = Math.max(2, cols);
+  // 列数没变就不写样式：避免 ResizeObserver ↔ 样式变更来回触发
+  const template = `repeat(${cols}, 1fr)`;
+  if (grid.style.gridTemplateColumns === template) return;
+  grid.style.gridTemplateColumns = template;
+}
+
+// 监听网格容器尺寸变化（窗口缩放、侧栏变化），防抖后仅重算 auto 列数
+function ensureGridResizeWatcher(grid) {
+  const onResize = () => {
+    if (gridResizeTimer !== null) clearTimeout(gridResizeTimer);
+    gridResizeTimer = setTimeout(() => {
+      gridResizeTimer = null;
+      if (currentGridMode !== 'auto' || !cachedCameras.length) return;
+      const target = document.getElementById('cam-grid');
+      if (target) applyAutoColumns(target, cachedCameras.length);
+    }, 150);
+  };
+  if (typeof ResizeObserver !== 'undefined') {
+    if (gridResizeObserver) return;
+    gridResizeObserver = new ResizeObserver(onResize);
+    gridResizeObserver.observe(grid);
+  } else if (!gridResizeObserver) {
+    gridResizeObserver = true;   // 占位，避免重复绑定 window 事件
+    window.addEventListener('resize', onResize);
+  }
 }
 
 export function setFocusCamera(camId) {
@@ -30,6 +92,8 @@ export function buildSingleCamCardHTML(cam, isFocus = false) {
   const isReconnecting = cam.status_text === 'RECONNECTING';
   const camIdAttr = escapeAttr(cam.camera_id);
   const camIdHtml = escapeHtml(cam.camera_id);
+  // 先转大写再转义，否则 &lt; 会被写成 &LT; 导致转义失效
+  const camIdUpper = escapeHtml(String(cam.camera_id).toUpperCase());
   const streamUrl = `${BASE}/stream/${encodeURIComponent(cam.camera_id)}`;
   const streamState = cam.is_online ? 'LIVE' : (cam.status_text || 'OFFLINE');
   const streamSpec = `${cam.display_width || '--'}x${cam.display_height || '--'} MJPEG`;
@@ -38,7 +102,7 @@ export function buildSingleCamCardHTML(cam, isFocus = false) {
       <div class="cam-header">
         <div class="cam-title-box">
           <div class="cam-status-dot ${cam.is_online ? '' : (isReconnecting ? 'reconnecting' : 'offline')}" id="dot-${camIdHtml}"></div>
-          <span class="cam-name">${camIdHtml.toUpperCase()}</span>
+          <span class="cam-name">${camIdUpper}</span>
         </div>
         <div class="cam-controls">
           <button class="cam-control-btn" title="手动画围栏" data-action="roi" data-cam="${camIdAttr}">ROI 围栏</button>
@@ -51,7 +115,7 @@ export function buildSingleCamCardHTML(cam, isFocus = false) {
         </div>
       </div>
       <div class="cam-view">
-        <img src="${streamUrl}" id="stream-img-${camIdHtml}" alt="${camIdHtml}" loading="lazy">
+        <img src="${BLANK_IMAGE}" data-stream-src="${escapeAttr(streamUrl)}" data-cam-id="${camIdAttr}" id="stream-img-${camIdHtml}" alt="${camIdHtml}">
         <div class="cam-hud-tag" id="spec-${camIdHtml}">${streamState} | ${streamSpec}</div>
       </div>
     </div>
@@ -65,6 +129,7 @@ export function renderCamGrid(cameras, forceRefresh = false) {
   if (!cameras || cameras.length === 0) {
     camIds = [];
     currentFocusCamId = '';
+    resetStreamRegistry();
     grid.innerHTML = '<div class="empty-state">暂无已注册摄像头通道</div>';
     grid.removeAttribute('style');
     const statCams = document.getElementById('stat-cams');
@@ -85,6 +150,8 @@ export function renderCamGrid(cameras, forceRefresh = false) {
   }
   camIds = newIds;
 
+  // 先注销旧连接再重建 DOM，避免旧的 MJPEG 长连接残留占用槽位
+  resetStreamRegistry();
   grid.innerHTML = '';
   grid.removeAttribute('style');
 
@@ -102,10 +169,13 @@ export function renderCamGrid(cameras, forceRefresh = false) {
       const activeCls = c.camera_id === focusCam.camera_id ? 'active' : '';
       const cIdAttr = escapeAttr(c.camera_id);
       const cIdHtml = escapeHtml(c.camera_id);
+      // 先转大写再转义，避免 &lt; 被写成 &LT;
+      const cIdUpper = escapeHtml(String(c.camera_id).toUpperCase());
+      const cStreamUrl = `${BASE}/stream/${encodeURIComponent(c.camera_id)}`;
       html += `
         <div class="carousel-thumb-item ${activeCls}" data-action="focus" data-cam="${cIdAttr}">
-          <img src="${BASE}/stream/${encodeURIComponent(c.camera_id)}" alt="${cIdHtml}">
-          <div class="carousel-thumb-tag">${cIdHtml.toUpperCase()}</div>
+          <img src="${BLANK_IMAGE}" data-stream-src="${escapeAttr(cStreamUrl)}" data-cam-id="${cIdAttr}" alt="${cIdHtml}">
+          <div class="carousel-thumb-tag">${cIdUpper}</div>
         </div>
       `;
     });
@@ -142,22 +212,7 @@ export function renderCamGrid(cameras, forceRefresh = false) {
   } else {
     grid.style.display = 'grid';
     if (currentGridMode === 'auto') {
-      // 按摄像头数量动态计算列数：保证每路画面至少 ~250px 宽，32 路约 5~6 列
-      const count = cameras.length;
-      const containerWidth = grid.clientWidth || window.innerWidth;
-      const minCardWidth = 250;
-      let cols = Math.max(2, Math.floor(containerWidth / minCardWidth));
-      if (count <= 2) cols = 2;
-      else if (count <= 4) cols = 2;
-      else if (count <= 6) cols = 3;
-      else if (count <= 9) cols = 3;
-      else if (count <= 12) cols = Math.min(cols, 4);
-      else if (count <= 16) cols = Math.min(cols, 4);
-      else if (count <= 20) cols = Math.min(cols, 5);
-      else if (count <= 25) cols = Math.min(cols, 5);
-      else cols = Math.min(cols, 6); // 32 路 → 6 列
-      cols = Math.max(2, cols);
-      grid.style.gridTemplateColumns = `repeat(${cols}, 1fr)`;
+      applyAutoColumns(grid, cameras.length);
     } else {
       grid.style.gridTemplateColumns = `repeat(${currentGridMode}, 1fr)`;
     }
@@ -168,6 +223,9 @@ export function renderCamGrid(cameras, forceRefresh = false) {
       grid.appendChild(wrap.firstElementChild);
     });
   }
+
+  bindGridStreams(grid);
+  ensureGridResizeWatcher(grid);
 
   const statCams = document.getElementById('stat-cams');
   if (statCams) statCams.textContent = cameras.filter(c => c.is_online).length;

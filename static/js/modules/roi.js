@@ -62,8 +62,11 @@ function setRoiBusy(isBusy) {
 
 function getImageRect(targetWidth, targetHeight) {
   const image = document.getElementById('roi-preview-bg');
-  const sourceWidth = image?.naturalWidth || 16;
-  const sourceHeight = image?.naturalHeight || 9;
+  // 关闭弹窗后预览图会被换成 1x1 占位图，不能当作真实分辨率，
+  // 否则会按 1:1 计算画布区域导致归一化坐标失真，这里回退到 16:9。
+  const hasFrame = (image?.naturalWidth || 0) > 1 && (image?.naturalHeight || 0) > 1;
+  const sourceWidth = hasFrame ? image.naturalWidth : 16;
+  const sourceHeight = hasFrame ? image.naturalHeight : 9;
   const scale = Math.min(targetWidth / sourceWidth, targetHeight / sourceHeight);
   const width = sourceWidth * scale;
   const height = sourceHeight * scale;

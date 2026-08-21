@@ -3,6 +3,25 @@
  */
 export const BASE = location.protocol + '//' + location.host;
 
+// 后端对写请求（POST/PUT/PATCH/DELETE）设有守卫：缺少该自定义头一律 403，
+// 用于挡掉跨站表单/img 之类的简单请求。所有写接口都经 fetchJson 统一出口注入。
+export const WRITE_GUARD_HEADER = 'X-Lab-Monitor-Request';
+const WRITE_METHODS = new Set(['POST', 'PUT', 'PATCH', 'DELETE']);
+
+function withWriteGuardHeader(fetchOptions) {
+  const method = String(fetchOptions.method || 'GET').toUpperCase();
+  if (!WRITE_METHODS.has(method)) return fetchOptions;
+  const headers = fetchOptions.headers;
+  if (typeof Headers !== 'undefined' && headers instanceof Headers) {
+    headers.set(WRITE_GUARD_HEADER, '1');
+    return fetchOptions;
+  }
+  return {
+    ...fetchOptions,
+    headers: { ...(headers || {}), [WRITE_GUARD_HEADER]: '1' },
+  };
+}
+
 export class ApiError extends Error {
   constructor(message, status = 0) {
     super(message);
@@ -12,7 +31,8 @@ export class ApiError extends Error {
 }
 
 export async function fetchJson(url, options = {}) {
-  const { timeoutMs = 5000, signal: externalSignal, ...fetchOptions } = options;
+  const { timeoutMs = 5000, signal: externalSignal, ...rawOptions } = options;
+  const fetchOptions = withWriteGuardHeader(rawOptions);
   const controller = new AbortController();
   const abortFromExternal = () => controller.abort(externalSignal?.reason);
   if (externalSignal) {

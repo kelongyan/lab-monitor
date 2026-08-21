@@ -19,6 +19,7 @@ import time
 import csv
 import io
 import socket
+import urllib.parse
 import urllib.request
 from pathlib import Path
 
@@ -48,6 +49,19 @@ _calibrator = None
 _pipelines = None
 _shutdown_callback = None
 _mjpeg_sleep = 0.033  # 默认 ~30fps（GPU），CPU 模式由 init_server 覆盖为 0.067（15fps）
+
+# F9a：MJPEG 增量推送 —— 帧序号未变化时不重复发字节，但最长 5 秒必须心跳重发一次，
+# 否则中间代理/浏览器可能把长时间静默的连接判定为假死。
+_MJPEG_HEARTBEAT_SECONDS = 5.0
+
+# F5：写接口跨站保护
+# - Host 白名单由实际绑定的 host/port 生成（见 _configure_allowed_hosts），空集合表示未配置（不拦截）
+# - 写方法必须带自定义头，浏览器发跨站自定义头需先过预检，没有 CORS 允许头就根本发不出来
+_allowed_hosts: set[str] = set()
+_WRITE_METHODS = frozenset({"POST", "PUT", "PATCH", "DELETE"})
+_REQUEST_HEADER_NAME = "x-lab-monitor-request"
+_REQUEST_HEADER_VALUE = "1"
+_WILDCARD_BIND_HOSTS = frozenset({"0.0.0.0", "::", "*", ""})
 
 # ROI 校验常量与文件锁
 _ROI_MAX_VERTICES = 64
@@ -121,10 +135,14 @@ def _authorization_valid(authorization: str | None) -> bool:
     except (ValueError, UnicodeDecodeError):
         return False
     expected_username, expected_password = credentials
-    return (
-        secrets.compare_digest(supplied_username, expected_username)
-        and secrets.compare_digest(supplied_password, expected_password)
-    )
+    try:
+        return (
+            secrets.compare_digest(supplied_username, expected_username)
+            and secrets.compare_digest(supplied_password, expected_password)
+        )
+    except TypeError:
+        # compare_digest 对含非 ASCII 字符的 str 抛 TypeError → 按鉴权失败处理，不要 500
+        return False
 
 
 def _is_loopback_host(host: str) -> bool:
@@ -154,7 +172,98 @@ async def require_basic_auth(request: Request, call_next):
     )
 
 
-def init_server(frame_hub, broadcaster, identity_store, calibrator=None, pipelines=None, topology=None, mjpeg_fps: float = 30.0, shutdown_callback=None):
+# ------------------------------------------------------------------ #
+# F5：写接口最小安全边界（Host 白名单 + 跨站写保护）                        #
+# 注意：Starlette 的 add_middleware 是 insert(0)，最后注册的中间件最外层，     #
+#      因此本守卫必须定义在 require_basic_auth 之后，才能先于鉴权执行。        #
+# ------------------------------------------------------------------ #
+
+def _build_allowed_hosts(host: str, port: int) -> set[str]:
+    """由实际绑定参数生成 Host 白名单（防 DNS rebinding），不硬编码端口。"""
+    allowed = {
+        "127.0.0.1", f"127.0.0.1:{port}",
+        "localhost", f"localhost:{port}",
+        "[::1]", f"[::1]:{port}",
+    }
+    name = (host or "").strip().lower()
+    if name and name not in _WILDCARD_BIND_HOSTS:
+        if ":" in name and not name.startswith("["):
+            name = f"[{name}]"        # 裸 IPv6 在 Host 头里必须带方括号
+        allowed.add(name)
+        allowed.add(f"{name}:{port}")
+    for item in os.getenv("LAB_MONITOR_ALLOWED_HOSTS", "").split(","):
+        item = item.strip().lower()
+        if item:
+            allowed.add(item)
+    return allowed
+
+
+def _configure_allowed_hosts(host: str, port: int) -> None:
+    """记录允许的 Host 集合；绑定通配地址且未显式配置时关闭该校验（避免误杀局域网访问）。"""
+    global _allowed_hosts
+    if (host or "").strip().lower() in _WILDCARD_BIND_HOSTS and not os.getenv(
+        "LAB_MONITOR_ALLOWED_HOSTS"
+    ):
+        _allowed_hosts = set()
+        logger.warning(
+            "绑定通配地址且未配置 LAB_MONITOR_ALLOWED_HOSTS，Host 白名单校验已关闭"
+        )
+        return
+    _allowed_hosts = _build_allowed_hosts(host, port)
+
+
+def _host_allowed(host_header: str | None) -> bool:
+    if not _allowed_hosts:
+        return True          # 未配置（单测/直接调用 app）时不拦截
+    if not host_header:
+        return True          # Host 缺失：部分内部探活不带 Host，放行
+    return host_header.strip().lower() in _allowed_hosts
+
+
+def _origin_allowed(origin: str, host_header: str | None) -> bool:
+    """写方法的 Origin 必须与本服务同源。"""
+    candidate = origin.strip().lower()
+    if not candidate or candidate == "null":
+        return False
+    parsed = urllib.parse.urlsplit(candidate)
+    if parsed.scheme not in {"http", "https"} or not parsed.netloc:
+        return False
+    origins = {parsed.netloc}
+    if ":" not in parsed.netloc or parsed.netloc.endswith("]"):
+        # Origin 省略了默认端口，补全后再与带端口的 Host 比对
+        origins.add(f"{parsed.netloc}:{'80' if parsed.scheme == 'http' else '443'}")
+    if host_header and host_header.strip().lower() in origins:
+        return True
+    return bool(_allowed_hosts and (origins & _allowed_hosts))
+
+
+@app.middleware("http")
+async def guard_request(request: Request, call_next):
+    host_header = request.headers.get("host")
+    if not _host_allowed(host_header):
+        logger.warning("拒绝非白名单 Host: %s", host_header)
+        return JSONResponse(
+            {"error": "Host 头不在允许列表内"}, status_code=421
+        )
+    if request.method.upper() in _WRITE_METHODS:
+        origin = request.headers.get("origin")
+        if origin and not _origin_allowed(origin, host_header):
+            logger.warning("拒绝跨站写请求: origin=%s path=%s", origin, request.url.path)
+            return JSONResponse(
+                {"error": "跨站来源被拒绝（Origin 与本服务不同源）"}, status_code=403
+            )
+        if request.headers.get(_REQUEST_HEADER_NAME) != _REQUEST_HEADER_VALUE:
+            return JSONResponse(
+                {
+                    "error": "写操作必须携带请求头 X-Lab-Monitor-Request: 1"
+                             "（防止跨站简单请求直接触发写操作）"
+                },
+                status_code=403,
+            )
+    return await call_next(request)
+
+
+def init_server(frame_hub, broadcaster, identity_store, calibrator=None, pipelines=None, topology=None, mjpeg_fps: float = 30.0, shutdown_callback=None, host: str | None = None, port: int | None = None):
     global _frame_hub, _broadcaster, _identity_store, _calibrator, _pipelines, _topology, _mjpeg_sleep, _shutdown_callback
     _frame_hub = frame_hub
     _broadcaster = broadcaster
@@ -164,6 +273,9 @@ def init_server(frame_hub, broadcaster, identity_store, calibrator=None, pipelin
     _topology = topology
     _mjpeg_sleep = 1.0 / max(1.0, mjpeg_fps)
     _shutdown_callback = shutdown_callback
+    # host/port 已知时立即生成 Host 白名单；未传则由 run_server/start_server_thread 生成
+    if host is not None and port is not None:
+        _configure_allowed_hosts(host, port)
 
 
 
@@ -585,24 +697,63 @@ async def get_stats():
 # ------------------------------------------------------------------ #
 
 async def _mjpeg_generator(cam_id: str):
-    """异步生成器：持续推送 MJPEG 帧"""
-    boundary = b"--frame\r\n"
-    offline_frame = _make_offline_frame(cam_id)
+    """异步生成器：持续推送 MJPEG 帧
 
-    while True:
-        jpeg = _frame_hub.get_jpeg(cam_id) if _frame_hub else None
-        data = jpeg if jpeg else offline_frame
-        yield (
-            boundary
-            + b"Content-Type: image/jpeg\r\n\r\n"
-            + data
-            + b"\r\n"
-        )
-        await asyncio.sleep(_mjpeg_sleep)
+    F9a：JPEG 编码（copy + resize + imencode，实测 ~8.7ms/次）通过 run_in_threadpool
+    卸出 uvicorn 唯一事件循环；并按 FrameHub.generation 做增量推送 —— 帧未更新时
+    只 await sleep 让出控制权，不重复发送同样的字节（最长 5 秒仍会心跳重发一次）。
+    """
+    boundary = b"--frame\r\n"
+    offline_frame = await run_in_threadpool(_make_offline_frame, cam_id)
+    last_generation = None
+    last_sent = 0.0
+
+    try:
+        while True:
+            generation = _frame_hub.get_generation(cam_id) if _frame_hub else 0
+            now = time.monotonic()
+            if generation != last_generation or (now - last_sent) >= _MJPEG_HEARTBEAT_SECONDS:
+                jpeg = None
+                if _frame_hub is not None:
+                    jpeg, generation = await run_in_threadpool(
+                        _frame_hub.get_jpeg_with_generation, cam_id
+                    )
+                data = jpeg if jpeg else offline_frame
+                last_generation = generation
+                last_sent = time.monotonic()
+                yield (
+                    boundary
+                    + b"Content-Type: image/jpeg\r\n\r\n"
+                    + data
+                    + b"\r\n"
+                )
+            await asyncio.sleep(_mjpeg_sleep)
+    except (asyncio.CancelledError, GeneratorExit):
+        # 客户端断开：停止再向线程池提交编码任务，交由上层正常收尾
+        logger.debug("MJPEG 客户端断开: %s", cam_id)
+        raise
+
+
+def _known_camera_ids() -> set[str]:
+    """已配置的摄像头集合（pipelines ∪ FrameHub 注册表），用于流接口白名单。"""
+    ids: set[str] = set()
+    if _pipelines:
+        ids.update(p.camera_id for p in _pipelines if hasattr(p, "camera_id"))
+    if _frame_hub is not None:
+        try:
+            ids.update(_frame_hub.camera_ids())
+        except Exception:
+            logger.debug("读取 FrameHub 摄像头列表失败", exc_info=True)
+    return ids
 
 
 @app.get("/stream/{cam_id}")
 async def video_stream(cam_id: str):
+    # 未知 id 直接 404：白名单为空时同样拒绝（fail-closed），避免刷出无限路 OFFLINE 流
+    if cam_id not in _known_camera_ids():
+        return JSONResponse(
+            {"error": f"未知摄像头 ID: {cam_id}"}, status_code=404
+        )
     return StreamingResponse(
         _mjpeg_generator(cam_id),
         media_type="multipart/x-mixed-replace; boundary=frame",
@@ -729,6 +880,7 @@ async def startup():
 
 def run_server(host: str = "127.0.0.1", port: int = 8000) -> None:
     _ensure_secure_bind(host)
+    _configure_allowed_hosts(host, port)
     uvicorn.run(app, host=host, port=port, log_level="warning")
 
 
@@ -779,6 +931,7 @@ def _wait_for_health(
 def start_server_thread(host: str = "127.0.0.1", port: int = 8000, startup_timeout: float = 15.0) -> threading.Thread:
     _ensure_secure_bind(host)
     _ensure_port_available(host, port)
+    _configure_allowed_hosts(host, port)   # 线程启动前先就位，避免健康检查撞上未配置窗口
     t = threading.Thread(
         target=run_server,
         args=(host, port),
