@@ -66,7 +66,7 @@ lab-monitor/
 │   ├── topology.py          # 相机拓扑关系
 │   └── tracker.py           # 目标轨迹跟踪器
 ├── static/                  # Web 前端静态资源（index.html + css/ + js/ ES module）
-├── tests/                   # stdlib unittest 测试用例（7 个文件 / 60 例）
+├── tests/                   # stdlib unittest 测试用例（10 个文件 / 103 例）+ 1 个 Node 前端用例
 ├── main.py                  # 系统主入口
 ├── server.py                # FastAPI Web 服务器
 ├── demo.py                  # 快速演示脚本

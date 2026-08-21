@@ -44,12 +44,30 @@ http://localhost:8000
 
 > **监听地址与鉴权**：默认只监听 `127.0.0.1`（`main.py --host` 可改）。`LAB_MONITOR_USERNAME` / `LAB_MONITOR_PASSWORD` 两个环境变量都为空时**所有接口无鉴权**（此时 `server.py` 会拒绝绑定非本机地址）。另存在 `POST /api/admin/shutdown`（仅接受回环地址调用）可直接停服，调试时勿误触。
 
+> **所有写接口（POST/PUT/PATCH/DELETE）必须带请求头 `X-Lab-Monitor-Request: 1`**，否则被守卫中间件 403 拒绝；`Origin` 存在时还必须同源，`Host` 必须在白名单内（否则 421）。前端已在 `static/js/utils/api.js` 统一注入，`stop.ps1` 也已补头。**手工 curl 写接口时别忘了带**，且中文字段要以 UTF-8 发送（Git Bash 直接 `-d` 会按 GBK 编码导致 400）：
+>
+> ```bash
+> curl -X POST http://127.0.0.1:8000/api/roi -H "Content-Type: application/json" -H "X-Lab-Monitor-Request: 1" --data-binary @payload.json
+> ```
+
+**环境变量一览**（全部可选）：
+
+| 变量 | 默认 | 作用 |
+|------|------|------|
+| `LAB_MONITOR_MODEL_POOL` | `0`（自动） | 推理模型实例池大小。0 时 GPU 取 `min(6, 源数)`、CPU 取 1。设 `1` 可回退到改造前的串行行为（但线程钳制不随之回退，见 `main.py`） |
+| `LAB_MONITOR_ALLOWED_HOSTS` | 空（按绑定地址推导） | 逗号分隔的 Host 白名单，绑定通配地址时必须显式配置，否则 Host 校验会被关闭 |
+| `LAB_MONITOR_USERNAME` / `_PASSWORD` | 空 | Basic 鉴权凭据；都为空即无鉴权 |
+| `LAB_MONITOR_MAX_IDENTITIES` | `10000` | 全局身份库上限，超出按 `last_seen` 淘汰最旧 |
+| `LAB_MONITOR_RETENTION_DAYS` | `30` | 告警/截图保留天数（仅在启动时执行一次清理） |
+| `LAB_MONITOR_RTSP_OPEN_TIMEOUT_MS` / `_READ_TIMEOUT_MS` | `10000` | RTSP 连接/读取超时 |
+
 ### 测试与验证
 
-**stdlib `unittest`（没有 pytest）**，`tests/` 下 7 个文件共 60 个用例：
+**stdlib `unittest`（没有 pytest）**，`tests/` 下 10 个 Python 文件共 103 个用例；另有一个纯 Node 的前端用例（19 项，测 MJPEG 连接管理器与写请求守卫头）：
 
 ```bash
 ./.venv/Scripts/python.exe -m unittest discover -s tests -t .
+node tests/test_stream_manager_frontend.mjs
 ```
 
 > **注意**：`src/db.py` 末尾有模块级单例 `db = Database()`，import 即连上生产库 `outputs/lab_monitor.db`——跑测试会碰生产数据，必要时先备份。
@@ -79,6 +97,7 @@ main.py (主线程)
 
 | 组件 | 文件 | 作用 | 线程安全 |
 |------|------|------|----------|
+| `PooledDetector` / `PooledReIDExtractor` | `src/model_pool.py` | 有界模型实例池（默认 GPU `min(6, 源数)`），并发度 = 池大小 | 队列借还，`try/finally` 保证归还；池空时阻塞形成背压 |
 | `IdentityStore` | `src/identity_store.py` | 全局 ReID 身份库（含 feature_bank 与 ReIDMetrics） | 内置锁保护（含 register_if_new 原子操作） |
 | `FrameHub` | `src/frame_hub.py` | JPEG 帧缓冲区（供 MJPEG 流消费） | 内置锁保护 |
 | `AlertManager` | `src/alerter.py` | 告警逻辑与历史记录 | 锁内原子修改状态 |
@@ -237,11 +256,12 @@ CameraPipeline (src/pipeline.py)
 **已模块化**（不再是单文件）：
 - `static/index.html`：311 行，只剩结构与资源引用
 - `static/css/`：8 个文件（`main.css` / `variables.css` / `layout.css` / `utilities.css` + `components/` 下 4 个）
-- `static/js/`：8 个文件，原生 **ES module**（`app.js` + `modules/` 5 个 + `utils/` 2 个）
+- `static/js/`：9 个文件，原生 **ES module**（`app.js` + `modules/` 6 个 + `utils/` 2 个）
 
 - 无构建流程，由 FastAPI 在 `server.py:174-175` 的 `index()` 路由直接读取托管
 - 使用原生 JavaScript + WebSocket + MJPEG `<img>` 标签
-- **改任何 CSS/JS 后必须同步 bump `static/index.html` 里的 `?v=` 版本号**（当前 `?v=11.1`，见 index.html 第 13、309 行），否则浏览器会用旧缓存
+- **`modules/stream_manager.js` 管理 MJPEG 长连接**：浏览器对同域并发连接上限为 6，22 路全量建流会把连接池占满（只有约 6 路能出图，REST 轮询也会挨饿）。它用 `IntersectionObserver` 只给视口内的卡片建流、同时建流上限 4、超限时整批轮转、断流前把最后一帧冻结成占位图；焦点大屏常驻，标签页切后台全部断流。**改网格/弹窗相关代码时注意调用 `resetStreamRegistry()` / `registerStreamImage()` 的时机**，否则会出现"卡片可见但永不建流"或连接泄漏。纯 Node 用例：`node tests/test_stream_manager_frontend.mjs`
+- **改任何 CSS/JS 后必须同步 bump `static/index.html` 里的 `?v=` 版本号**（当前 `?v=11.2`）。注意 `app.js` 里的 `import './modules/*.js'` 与 `main.css` 的 `@import` 子路径**不带版本号**，改子模块后需要 `Ctrl+F5` 硬刷新才能看到效果
 - 只改前端资源时刷新浏览器即可（无需重启后端）
 
 ## Git 工作流
