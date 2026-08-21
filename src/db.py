@@ -118,6 +118,21 @@ class Database:
                 "CREATE INDEX IF NOT EXISTS idx_identity_appearances_gid_ts "
                 "ON identity_appearances(global_id, timestamp DESC, id DESC)"
             )
+            # 保留期清理按 timestamp 全表删除，没有单列索引会退化成全表扫描
+            cursor.execute(
+                "CREATE INDEX IF NOT EXISTS idx_identity_appearances_ts "
+                "ON identity_appearances(timestamp)"
+            )
+            # 身份按 last_seen 做保留期清理与最近活跃排序
+            cursor.execute(
+                "CREATE INDEX IF NOT EXISTS idx_identities_last_seen "
+                "ON identities(last_seen)"
+            )
+            # 告警历史最常见的组合是「按相机过滤 + 按时间倒序分页」
+            cursor.execute(
+                "CREATE INDEX IF NOT EXISTS idx_alerts_cam_ts "
+                "ON alerts(camera_id, timestamp DESC)"
+            )
             conn.commit()
         logger.info("SQLite 数据库初始化完成: %s", self.db_path)
 
@@ -328,15 +343,22 @@ class Database:
         feature_blob: bytes,
         feature_bank_count: int,
         feature_bank_blob: bytes,
-        appearances: list[dict],
         total_appearances: int,
         last_camera: str,
         last_seen: float,
         feature_space: str,
+        first_seen: float | None = None,
         new_appearance: dict | None = None,
         schema_version: int = 1,
     ) -> bool:
-        first_seen = appearances[0].get("time", last_seen) if appearances else last_seen
+        """
+        整行落盘（含特征列）。轨迹只以增量行写入 identity_appearances，
+        不再写 appearances_json（该列保留但已停写，见 load_identities 的兼容读取）。
+        first_seen 取 MIN 防止被单调改写；last_seen / last_camera 带旧值守卫，
+        因为调用方在锁外持久化，先后顺序可能颠倒。
+        """
+        if first_seen is None:
+            first_seen = last_seen
         try:
             with self._get_conn() as conn:
                 conn.execute(
@@ -345,18 +367,25 @@ class Database:
                         global_id, first_seen, last_seen, last_camera,
                         total_appearances, feature_dim, feature_blob,
                         feature_bank_count, feature_bank_blob,
-                        appearances_json, feature_space, feature_schema_version
-                    ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                        feature_space, feature_schema_version
+                    ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
                     ON CONFLICT(global_id) DO UPDATE SET
-                        first_seen = excluded.first_seen,
-                        last_seen = excluded.last_seen,
-                        last_camera = excluded.last_camera,
-                        total_appearances = excluded.total_appearances,
+                        first_seen = MIN(
+                            COALESCE(NULLIF(identities.first_seen, 0), excluded.first_seen),
+                            excluded.first_seen
+                        ),
+                        last_seen = MAX(COALESCE(identities.last_seen, 0), excluded.last_seen),
+                        last_camera = CASE
+                            WHEN excluded.last_seen >= COALESCE(identities.last_seen, 0)
+                            THEN excluded.last_camera ELSE identities.last_camera END,
+                        total_appearances = MAX(
+                            COALESCE(identities.total_appearances, 0),
+                            excluded.total_appearances
+                        ),
                         feature_dim = excluded.feature_dim,
                         feature_blob = excluded.feature_blob,
                         feature_bank_count = excluded.feature_bank_count,
                         feature_bank_blob = excluded.feature_bank_blob,
-                        appearances_json = excluded.appearances_json,
                         feature_space = excluded.feature_space,
                         feature_schema_version = excluded.feature_schema_version
                     """,
@@ -370,7 +399,6 @@ class Database:
                         feature_blob,
                         feature_bank_count,
                         feature_bank_blob,
-                        json.dumps(appearances, ensure_ascii=False),
                         feature_space,
                         schema_version,
                     ),
@@ -395,6 +423,54 @@ class Database:
             logger.error("持久化身份特征失败: %s", e)
             return False
 
+    def record_appearance(
+        self,
+        global_id: str,
+        camera_id: str,
+        timestamp: float,
+        bbox: list,
+        total_appearances: int,
+    ) -> bool:
+        """
+        轻量持久化路径：一次事务内插入一条 identity_appearances 增量行，
+        并只更新 identities 的 last_seen / last_camera / total_appearances 三个小列，
+        不重写 feature_blob / feature_bank_blob（由调用方节流后走 save_identity）。
+        last_seen / last_camera 带旧值守卫，防乱序写入把新值改回旧值。
+        返回 False 表示 identities 里没有该身份行，调用方需退回整行写入。
+        """
+        try:
+            with self._get_conn() as conn:
+                conn.execute(
+                    """
+                    INSERT INTO identity_appearances (
+                        global_id, camera_id, timestamp, bbox_json
+                    ) VALUES (?, ?, ?, ?)
+                    """,
+                    (global_id, camera_id, float(timestamp), json.dumps(list(bbox))),
+                )
+                cursor = conn.execute(
+                    """
+                    UPDATE identities SET
+                        last_seen = MAX(COALESCE(last_seen, 0), ?),
+                        last_camera = CASE
+                            WHEN ? >= COALESCE(last_seen, 0) THEN ? ELSE last_camera END,
+                        total_appearances = MAX(COALESCE(total_appearances, 0), ?)
+                    WHERE global_id = ?
+                    """,
+                    (
+                        float(timestamp),
+                        float(timestamp),
+                        camera_id,
+                        int(total_appearances),
+                        global_id,
+                    ),
+                )
+                conn.commit()
+            return cursor.rowcount > 0
+        except Exception as e:
+            logger.error("持久化轨迹增量失败: %s", e)
+            return False
+
     def load_identities(self) -> list[dict[str, Any]]:
         """加载具有完整特征数据的身份；旧元数据行会保留但不参与 ReID。"""
         try:
@@ -411,6 +487,7 @@ class Database:
                 ).fetchall()
             result = []
             for row in rows:
+                # appearances_json 已停写，仅作老库兼容回退；有增量行时一律以下面的表数据为准
                 try:
                     appearances = json.loads(row["appearances_json"] or "[]")
                 except json.JSONDecodeError:

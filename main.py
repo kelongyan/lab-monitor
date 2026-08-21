@@ -15,8 +15,11 @@ from pathlib import Path
 # （损坏视频源会持续刷 "PPS out of range" / "no start code" 等噪声日志）
 os.environ.setdefault("OPENCV_FFMPEG_LOGLEVEL", "-8")
 
+import cv2  # 必须在上面的 OPENCV_FFMPEG_LOGLEVEL 之后导入
+
 from src.detector import PersonDetector
 from src.reid import build_reid_extractor
+from src.model_pool import PooledDetector, PooledReIDExtractor, resolve_pool_size
 from src.identity_store import IdentityStore
 from src.topology import CameraTopology, TopologyValidationError
 from src.alerter import AlertManager, AlertBroadcaster
@@ -88,6 +91,23 @@ def clear_pid_file() -> None:
             PID_FILE.unlink()
     except (OSError, ValueError):
         pass
+
+
+def flush_identity_features(identity_store) -> None:
+    """
+    关停前补写被节流的 ReID 主特征与 feature_bank。
+
+    IdentityStore 为消除写放大，对特征列做了「累计 N 次更新或间隔 M 秒」的落盘节流，
+    不显式 flush 就会在每次停服时静默丢掉最近一段的滑动平均结果（轨迹不受影响，
+    它每次都写增量行）。异常一律吞掉：关停路径不能因为落盘失败而抛出。
+    """
+    try:
+        flushed = identity_store.flush()
+    except Exception:
+        logger.exception("关停前补写 ReID 特征失败")
+        return
+    if flushed:
+        logger.info("关停前补写 %d 个身份的 ReID 特征", flushed)
 
 
 def apply_output_retention(retention_days: int) -> dict[str, int]:
@@ -188,10 +208,32 @@ def main(
         )
         logger.info("⚙️ 性能模式: CPU 节能 (15fps / YOLO每3帧 / ReID每15帧)")
 
+    # ---- 线程钳制：22 路解码线程 + 池化并发推理会把 CPU 打满，
+    # OpenCV 与 torch 各自的内部线程池再抢核只会加剧上下文切换（吞吐反而下降）。
+    # 解码每路固定 1 线程（并发度由 pipeline 线程数提供），单次推理最多 2 线程。
+    cv2.setNumThreads(1)
+    torch.set_num_threads(2)
+
     # ---- 初始化共享组件 ----
-    logger.info("加载模型中（首次运行会自动下载权重）...")
-    detector       = PersonDetector(model_name="yolov8n.pt", conf_thresh=0.4, device=device)
-    reid_extractor = build_reid_extractor(device=device)
+    # 池化模型实例：打破 detector/reid 的单实例锁，让 N 路 pipeline 真正并发推理
+    pool_size = resolve_pool_size(device, len(sources))
+    logger.info(
+        "加载模型中（模型池大小=%d, device=%s, 视频源=%d 路；首次运行会自动下载权重，"
+        "加载耗时 ≈ 池大小 × 单实例耗时）...",
+        pool_size, device, len(sources),
+    )
+    detector = PooledDetector(
+        lambda: PersonDetector(model_name="yolov8n.pt", conf_thresh=0.4, device=device),
+        size=pool_size,
+    )
+    reid_extractor = PooledReIDExtractor(
+        lambda: build_reid_extractor(device=device),
+        size=pool_size,
+    )
+    logger.info(
+        "模型池就绪: detector×%d / reid×%d (device=%s, 特征空间=%s)",
+        detector.pool_size, reid_extractor.pool_size, device, reid_extractor.feature_space,
+    )
     imported_alerts = db.import_alert_log(ALERT_LOG)
     if imported_alerts:
         logger.info("已将 %d 条旧 JSONL 告警合并进 SQLite", imported_alerts)
@@ -300,6 +342,7 @@ def main(
             for pipeline in pipelines:
                 pipeline.join(timeout=5)
             alert_manager.close()
+            flush_identity_features(identity_store)
             calibrator.flush()
             db.close()
             clear_pid_file()
@@ -331,6 +374,7 @@ def main(
         for pipeline in pipelines:
             pipeline.join(timeout=5)
         ticker.join(timeout=2)
+        flush_identity_features(identity_store)
         calibrator.flush()
         alert_manager.close()
         db.close()

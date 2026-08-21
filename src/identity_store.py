@@ -16,6 +16,12 @@ from .reid import match_feature_detailed
 # 每个身份最多保留最近 N 条出现记录，防止长时间运行后内存耗尽
 _MAX_APPEARANCES = 200
 _FEATURE_SCHEMA_VERSION = 1
+# 特征列（feature_blob / feature_bank_blob）落盘节流阈值：
+# 特征是滑动平均结果，单次 appearance 的变化极小，没必要每次都重写整行 BLOB。
+# 同一 gid 满足「累计 M 次特征更新」或「距上次落盘超过 N 秒」之一即整行落盘，
+# 其余时刻只插一条 identity_appearances 增量行 + 更新三个轻量列。
+_FEATURE_FLUSH_EVERY_UPDATES = 50
+_FEATURE_FLUSH_INTERVAL_SECONDS = 30.0
 logger = logging.getLogger("identity_store")
 
 
@@ -118,6 +124,8 @@ class IdentityStore:
         self._feature_space = feature_space
         self._max_records = max(1, max_records)
         self._feature_dim: int | None = None
+        # gid -> [距上次特征落盘的更新次数, 上次特征落盘时间]，只在持有 self._lock 时读写
+        self._feature_flush_state: dict[str, list] = {}
         self.metrics = ReIDMetrics()
         if self._database is not None:
             self._restore()
@@ -204,25 +212,87 @@ class IdentityStore:
             last_seen=rec.last_seen,
         )
 
-    def _persist(self, rec: PersonRecord, new_appearance: dict | None = None) -> None:
-        if self._database is None:
-            return
+    def _persist_payload(self, rec: PersonRecord) -> dict:
+        """
+        在锁内采集整行落盘所需的载荷。只复制特征向量（tobytes/stack 本身即拷贝），
+        不深拷贝最多 200 条的 appearances deque，避免每次持久化都产生大对象。
+        """
         feature = np.asarray(rec.feature, dtype=np.float32)
         bank = np.stack(rec.feature_bank).astype(np.float32, copy=False)
+        if rec.appearances:
+            first_seen = float(rec.appearances[0].get("time", rec.last_seen))
+        elif rec.last_seen > 0:
+            first_seen = rec.last_seen
+        else:
+            # 刚注册、还没有任何 appearance：用当前时间，避免写入 0（1970 年）
+            first_seen = time.time()
+        return {
+            "global_id": rec.global_id,
+            "feature_dim": int(feature.size),
+            "feature_blob": feature.tobytes(),
+            "feature_bank_count": len(bank),
+            "feature_bank_blob": bank.tobytes(),
+            "total_appearances": rec.total_appearances,
+            "last_camera": rec.last_camera,
+            "last_seen": rec.last_seen,
+            "first_seen": first_seen,
+        }
+
+    def _write_identity_row(self, payload: dict, new_appearance: dict | None = None) -> None:
+        """整行落盘（含特征列）。payload 必须由 _persist_payload 在锁内采集。"""
+        if self._database is None:
+            return
         self._database.save_identity(
-            global_id=rec.global_id,
-            feature_dim=int(feature.size),
-            feature_blob=feature.tobytes(),
-            feature_bank_count=len(bank),
-            feature_bank_blob=bank.tobytes(),
-            appearances=list(rec.appearances),
-            total_appearances=rec.total_appearances,
-            last_camera=rec.last_camera,
-            last_seen=rec.last_seen,
+            global_id=payload["global_id"],
+            feature_dim=payload["feature_dim"],
+            feature_blob=payload["feature_blob"],
+            feature_bank_count=payload["feature_bank_count"],
+            feature_bank_blob=payload["feature_bank_blob"],
+            total_appearances=payload["total_appearances"],
+            last_camera=payload["last_camera"],
+            last_seen=payload["last_seen"],
             feature_space=self._feature_space,
+            first_seen=payload["first_seen"],
             new_appearance=new_appearance,
             schema_version=_FEATURE_SCHEMA_VERSION,
         )
+
+    def _should_persist_feature_locked(self, global_id: str, now: float) -> bool:
+        """特征列节流判定（必须在持有 self._lock 时调用）"""
+        state = self._feature_flush_state.setdefault(global_id, [0, now])
+        state[0] += 1
+        if (
+            state[0] >= _FEATURE_FLUSH_EVERY_UPDATES
+            or now - state[1] >= _FEATURE_FLUSH_INTERVAL_SECONDS
+        ):
+            state[0] = 0
+            state[1] = now
+            return True
+        return False
+
+    def flush(self) -> int:
+        """
+        把节流期内尚未落盘的特征列补写进 SQLite，返回补写的身份数。
+        进程退出前必须调用（main.py 关停路径），否则最近一段滑动平均会丢失。
+        """
+        if self._database is None:
+            return 0
+        with self._lock:
+            payloads = []
+            now = time.time()
+            for gid, state in self._feature_flush_state.items():
+                if state[0] <= 0:
+                    continue
+                state[0] = 0
+                state[1] = now
+                rec = self._records.get(gid)
+                if rec is not None:
+                    payloads.append(self._persist_payload(rec))
+        for payload in payloads:
+            self._write_identity_row(payload)
+        if payloads:
+            logger.info("已补写 %d 个身份的 ReID 特征到 SQLite", len(payloads))
+        return len(payloads)
 
     def _make_room_locked(self) -> list[str]:
         if len(self._records) < self._max_records:
@@ -232,6 +302,7 @@ class IdentityStore:
             key=lambda record: record.last_seen,
         )
         self._records.pop(victim.global_id, None)
+        self._feature_flush_state.pop(victim.global_id, None)
         return [victim.global_id]
 
     def _delete_persisted(self, global_ids: list[str]) -> None:
@@ -288,8 +359,9 @@ class IdentityStore:
                 appearances=deque(maxlen=_MAX_APPEARANCES),
             )
             self._records[gid] = rec
-            snapshot = self._snapshot(rec)
-        self._persist(snapshot)
+            self._feature_flush_state[gid] = [0, time.time()]
+            payload = self._persist_payload(rec)
+        self._write_identity_row(payload)
         self._delete_persisted(evicted)
         return gid
 
@@ -353,8 +425,9 @@ class IdentityStore:
             )
             self._records[gid] = rec
             self._feature_dim = int(feat_copy.size)
-            snapshot = self._snapshot(rec)
-        self._persist(snapshot)
+            self._feature_flush_state[gid] = [0, time.time()]
+            payload = self._persist_payload(rec)
+        self._write_identity_row(payload)
         self._delete_persisted(evicted)
         return IdentityResolution(global_id=gid, status="created")
 
@@ -370,12 +443,13 @@ class IdentityStore:
         """
         记录出现事件，并用质量加权的滑动平均更新特征向量（P1-3）。
         同时动态维护多姿态特征向量库 (Feature Bank, max_size=5)。
+        持久化只走增量路径：整行（含特征 BLOB）按 _FEATURE_FLUSH_* 节流写入。
         """
         quality = min(1.0, max(0.0, quality_score))
         self.metrics.record_quality(quality)
         alpha = base_alpha + (1.0 - base_alpha) * (1.0 - quality)
         feat_copy = feature.copy()
-        snapshot = None
+        payload = None
         with self._lock:
             rec = self._records.get(global_id)
             if rec is None:
@@ -409,8 +483,36 @@ class IdentityStore:
                 "bbox": list(bbox),
             })
             rec.total_appearances += 1
-            snapshot = self._snapshot(rec)
-        self._persist(snapshot, new_appearance=dict(snapshot.appearances[-1]))
+            new_appearance = dict(rec.appearances[-1])
+            total_appearances = rec.total_appearances
+            if self._should_persist_feature_locked(global_id, rec.last_seen):
+                payload = self._persist_payload(rec)
+        if self._database is None:
+            return
+        if payload is not None:
+            # 到期：整行落盘，顺带把这条 appearance 一并插入（同一事务）
+            self._write_identity_row(payload, new_appearance=new_appearance)
+            return
+        recorded = self._database.record_appearance(
+            global_id=global_id,
+            camera_id=new_appearance["camera"],
+            timestamp=new_appearance["time"],
+            bbox=new_appearance["bbox"],
+            total_appearances=total_appearances,
+        )
+        if not recorded:
+            # identities 行缺失（例如被保留期清理掉）：退回整行写入，避免特征永久丢失
+            self._persist_full(global_id)
+
+    def _persist_full(self, global_id: str) -> None:
+        """重新采集指定身份的特征载荷并整行落盘（轻量路径的兜底）"""
+        if self._database is None:
+            return
+        with self._lock:
+            rec = self._records.get(global_id)
+            payload = self._persist_payload(rec) if rec is not None else None
+        if payload is not None:
+            self._write_identity_row(payload)
 
     def all_ids(self) -> list[str]:
         with self._lock:
