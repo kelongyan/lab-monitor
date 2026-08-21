@@ -180,7 +180,22 @@ class MjpegGeneratorTests(ServerGlobalsMixin, unittest.IsolatedAsyncioTestCase):
     async def asyncTearDown(self):
         self.restore_globals()
 
-    async def _collect(self, cam_id: str, seconds: float, after_first=None):
+    async def _collect(
+        self,
+        cam_id: str,
+        seconds: float,
+        after_first=None,
+        min_chunks: int = 0,
+        settle: float = 0.0,
+    ):
+        """
+        驱动 MJPEG 生成器并收集推送出的 part。
+
+        不要用固定的墙钟窗口去推断"应该收到几个 part"：本机跑着 22 路推理时事件循环
+        会被饿到只调度一两次，曾导致心跳用例偶发失败（20 轮 1 次）。改为等到攒够
+        min_chunks 个 part 为止（seconds 作为兜底上限），再可选地静置 settle 秒确认
+        没有多余推送。
+        """
         chunks = []
         generator = server._mjpeg_generator(cam_id)
 
@@ -188,12 +203,27 @@ class MjpegGeneratorTests(ServerGlobalsMixin, unittest.IsolatedAsyncioTestCase):
             async for chunk in generator:
                 chunks.append(chunk)
 
+        async def wait_for(target: int, deadline: float) -> None:
+            loop_deadline = asyncio.get_running_loop().time() + deadline
+            while len(chunks) < target:
+                if asyncio.get_running_loop().time() > loop_deadline:
+                    return
+                await asyncio.sleep(0.01)
+
         task = asyncio.create_task(pump())
         try:
-            await asyncio.sleep(seconds)
+            if min_chunks:
+                await wait_for(min_chunks, seconds)
+            else:
+                await asyncio.sleep(seconds)
             if after_first is not None:
                 after_first()
-                await asyncio.sleep(seconds)
+                if min_chunks:
+                    await wait_for(min_chunks + 1, seconds)
+                else:
+                    await asyncio.sleep(seconds)
+            if settle:
+                await asyncio.sleep(settle)
         finally:
             task.cancel()
             with contextlib.suppress(asyncio.CancelledError):
@@ -215,9 +245,11 @@ class MjpegGeneratorTests(ServerGlobalsMixin, unittest.IsolatedAsyncioTestCase):
             hub.push_frame("cam_01", np.full((18, 32, 3), 255, dtype=np.uint8))
 
         with patch.object(server, "run_in_threadpool", spy):
-            chunks = await self._collect("cam_01", 0.2, after_first=push_new_frame)
+            chunks = await self._collect(
+                "cam_01", 5.0, after_first=push_new_frame, min_chunks=1, settle=0.15,
+            )
 
-        # 20 次循环只推送 2 帧：初始帧 + generation 变化后的新帧
+        # 只推送 2 帧：初始帧 + generation 变化后的新帧；静置期内不应再有重复推送
         self.assertEqual(2, len(chunks))
         self.assertNotEqual(chunks[0], chunks[1])
         self.assertIn("get_jpeg_with_generation", offloaded)   # 编码必须在线程池
@@ -229,7 +261,7 @@ class MjpegGeneratorTests(ServerGlobalsMixin, unittest.IsolatedAsyncioTestCase):
         server._frame_hub = hub
 
         with patch.object(server, "_MJPEG_HEARTBEAT_SECONDS", 0.05):
-            chunks = await self._collect("cam_01", 0.25)
+            chunks = await self._collect("cam_01", 5.0, min_chunks=3)
 
         self.assertGreaterEqual(len(chunks), 3)   # 心跳兜底：静默连接仍会重发
         self.assertEqual({chunks[0]}, set(chunks))
