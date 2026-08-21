@@ -34,10 +34,14 @@ outputs/*
 Thumbs.db
 
 # Route Archives & Reference PDFs (large binaries)
-# 注意：点位 xlsx 是相机拓扑的唯一依据，必须保持可提交，不要忽略 *.xlsx
 *.7z
 docs/*.pdf
 docs/routes/*.pdf
+
+# 现场点位表：含真实摄像头 IP（172.20.x.x）、图纸点号与物理位置对照。
+# 本仓库在 GitHub 上是公开的，这类设施网络信息不入库；它是相机拓扑的唯一依据，
+# 请自行留存（压缩包 常规路线.7z / 随机路线.7z 内也有一份）。
+docs/*.xlsx
 
 # Agent Workspace
 .workbuddy/
