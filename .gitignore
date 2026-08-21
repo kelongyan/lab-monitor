@@ -32,3 +32,12 @@ outputs/*
 .vscode/
 .DS_Store
 Thumbs.db
+
+# Route Archives & Reference PDFs (large binaries)
+# 注意：点位 xlsx 是相机拓扑的唯一依据，必须保持可提交，不要忽略 *.xlsx
+*.7z
+docs/*.pdf
+docs/routes/*.pdf
+
+# Agent Workspace
+.workbuddy/

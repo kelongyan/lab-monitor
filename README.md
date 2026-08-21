@@ -20,9 +20,9 @@
   - 支持本地视频文件及 RTSP 网络摄像头视频流的并发接入与多线程实时推流处理。
 - 🔍 **智能目标检测与追踪**
   - 基于 **YOLOv8** 模型完成高精度人员检测（`PersonDetector`）。
-  - 集成单相机内的轻量化目标跟踪算法（`PersonTracker`），实现轨迹平滑与目标连贯标识。
+  - 单相机内追踪基于 ultralytics 内置 **BYTETracker** 的轻量封装（`src/tracker.py`），实现轨迹平滑与目标连贯标识。
 - 🆔 **跨视角 ReID 身份重识别**
-  - 基于专用 ReID 模型 **OSNet-x0.25**（`ReIDExtractor`），512维特征向量，Market-1501 数据集 Rank-1 精度约78%，远超通用分类模型。
+  - 基于 **OSNet-x0.25** 骨干网络（`ReIDExtractor`）提取 512 维特征向量。当前加载的是 **ImageNet 预训练权重（非 ReID 专用权重）**，跨镜头判别力有限，替换为 ReID 数据集权重是已知待办项。
   - 跨不同摄像头视角建立全局身份库（`IdentityStore`），解决视角遮挡与离场重进识别难题。
   - 多帧确认机制（`ReIDValidator`）结合 Ratio Test，有效降低误识别率。
 - 🗺️ **相机拓扑与穿越时延校验**
@@ -43,8 +43,11 @@ lab-monitor/
 │   ├── sources.json         # 视频源配置（本地视频 / RTSP）
 │   ├── topology.json        # 摄像头拓扑与预估穿越时间配置
 │   └── notify.json          # 告警通知渠道配置（Console / Email）
-├── data/                    # 本地数据库持久化目录（自动生成）
-│   └── lab_monitor.db       # SQLite 数据库文件（身份履历与告警记录）
+├── outputs/                 # 运行时输出目录（自动生成，已被 .gitignore 排除）
+│   ├── lab_monitor.db       # SQLite 数据库文件（身份履历与告警记录）
+│   ├── alerts.jsonl         # 追加式告警日志
+│   ├── transit_stats.json   # 穿越时延统计
+│   └── screenshots/         # 告警截图
 ├── docs/                    # 项目文档与资源
 │   ├── deployment.md        # 详细部署与 GPU 配置指南
 │   ├── SYSTEM_PRINCIPLES.md # 系统核心技术原理与机制说明
@@ -62,7 +65,8 @@ lab-monitor/
 │   ├── reid_validator.py    # 特征校验与匹配
 │   ├── topology.py          # 相机拓扑关系
 │   └── tracker.py           # 目标轨迹跟踪器
-├── static/                  # Web 前端静态资源
+├── static/                  # Web 前端静态资源（index.html + css/ + js/ ES module）
+├── tests/                   # stdlib unittest 测试用例（7 个文件 / 60 例）
 ├── main.py                  # 系统主入口
 ├── server.py                # FastAPI Web 服务器
 ├── demo.py                  # 快速演示脚本
@@ -79,8 +83,8 @@ lab-monitor/
 ### 1. 环境要求
 
 - **操作系统**: Windows / Linux / macOS
-- **Python 版本**: Python 3.8+
-- **PyTorch**: 建议安装支持当前环境的 PyTorch 和 Torchvision
+- **Python 版本**: Python 3.10+（当前实测环境为 **Python 3.13**）
+- **PyTorch**: 建议安装支持当前环境的 PyTorch 和 Torchvision（当前实测环境为 **torch CUDA 12.6 + NVIDIA RTX 3090**）
 
 ### 2. 安装依赖
 
@@ -97,11 +101,11 @@ pip install -r requirements.txt
 
 #### 选项 B：NVIDIA GPU (CUDA) 版本安装 (推荐，高帧率)
 ```bash
-# CUDA 11.8 版本
-pip install torch torchvision --index-url https://download.pytorch.org/whl/cu118
+# CUDA 12.6 版本（当前实测环境：Python 3.13 + RTX 3090）
+pip install torch torchvision --index-url https://download.pytorch.org/whl/cu126
 
-# 或 CUDA 12.1 版本
-# pip install torch torchvision --index-url https://download.pytorch.org/whl/cu121
+# 或按驱动支持的版本改用 cu118 / cu121
+# pip install torch torchvision --index-url https://download.pytorch.org/whl/cu118
 
 # 安装项目依赖（含 OSNet ReID 模型依赖：torchreid + gdown + tensorboard）
 pip install -r requirements.txt
@@ -121,15 +125,16 @@ pip install -r requirements.txt
 编辑 `config/` 目录下的配置文件：
 
 - **视频源配置** (`config/sources.json`):
+  超算中心 L2 层实拍录像，原始素材 32 路：`reg_01..reg_10`（常规巡检环）+ `rnd_01..rnd_22`（随机路线）。
   ```json
   {
-    "cam_01": "videos/people_sample.mp4",
-    "cam_02": "videos/store_sample.mp4",
-    "cam_03": "videos/street_sample.mp4",
-    "cam_04": "videos/hall_sample.mp4"
+    "reg_01": "videos/常规路线/L2东侧走廊南北向南_20260731141700-20260731142100_1.mp4",
+    "reg_02": "videos/常规路线/L2东侧走廊南南向北_20260731141700-20260731142100_1.mp4",
+    "rnd_01": "videos/随机路线/L2东侧走廊北北向南_20260731143025-20260731143100_1.mp4",
+    "cam_rtsp": "rtsp://admin:password@192.168.1.100:554/stream1"
   }
   ```
-  *(注：视频路径支持本地视频文件及 RTSP 视频流 `rtsp://...`)*
+  *(注：视频路径支持本地视频文件及 RTSP 视频流 `rtsp://...`；其中 9 路原始录像解码损坏、1 路与其他点位重复，已从配置摘除，当前实际启用 22 路，详见 [docs/deployment.md](docs/deployment.md)。)*
 
 - **拓扑关系配置** (`config/topology.json`):
   配置各摄像头之间的连通关系及预计通行时间（单位：秒）。
@@ -143,7 +148,8 @@ pip install -r requirements.txt
 #### 方式一：直接运行 (前台控制台)
 
 ```bash
-python main.py
+# 使用项目自带虚拟环境的解释器（Windows 上不要用系统 python）
+./.venv/Scripts/python.exe main.py
 ```
 
 #### 方式二：一键后台运行 (Windows PowerShell)
@@ -163,6 +169,8 @@ python main.py
 服务启动后，在浏览器中打开：
 
 👉 **[http://localhost:8000](http://localhost:8000)**
+
+> **注意**：服务默认只监听 `127.0.0.1`，局域网内其他设备无法直接访问。确需远程访问请先配置 `LAB_MONITOR_USERNAME` / `LAB_MONITOR_PASSWORD` 登录凭据，再用 `--host` 显式指定监听地址（详见 [docs/deployment.md](docs/deployment.md)）。
 
 在监控大屏中可实时查看多路摄像头推流、人脸/身份识别轨迹、实时告警面板及拓扑数据分析。
 

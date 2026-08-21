@@ -30,7 +30,7 @@
 | **显卡 (GPU)** | N/A | NVIDIA GTX 1060 (6GB) 及以上，推荐 RTX 3060/4060+ |
 | **内存 (RAM)** | 至少 8 GB | 推荐 16 GB 及以上 |
 | **显存 (VRAM)**| N/A | 至少 4 GB，多路 4K 建议 8GB+ |
-| **Python 版本**| Python 3.8 ~ 3.11 | Python 3.8 ~ 3.11 |
+| **Python 版本**| Python 3.10 ~ 3.13 | Python 3.10 ~ 3.13（当前实测：3.13） |
 
 ---
 
@@ -43,14 +43,17 @@
 - **存放目录**：项目根目录下的 `videos/` 文件夹（例如 `F:\lab-monitor\videos\`）。
 - **支持格式**：`.mp4`、`.avi`、`.mkv`、`.mov`。
 - **推荐编码**：H.264 / AVC 编码（兼容性最佳），推荐分辨率 1080p (1920x1080) 或 720p。
-- **放置示例**：
+- **放置示例**（当前项目为超算中心 L2 层实拍录像，按巡检路线分两个子目录）：
   ```text
   lab-monitor/
   └── videos/
-      ├── people_sample.mp4   # 摄像头 1 示例视频
-      ├── store_sample.mp4    # 摄像头 2 示例视频
-      ├── street_sample.mp4   # 摄像头 3 示例视频
-      └── hall_sample.mp4     # 摄像头 4 示例视频
+      ├── 常规路线/
+      │   ├── L2东侧走廊南北向南_20260731141700-20260731142100_1.mp4   # reg_01
+      │   ├── L2东侧走廊南南向北_20260731141700-20260731142100_1.mp4   # reg_02
+      │   └── ...                                                      # 其余 reg_xx 点位
+      └── 随机路线/
+          ├── L2东侧走廊北北向南_20260731143025-20260731143100_1.mp4   # rnd_01
+          └── ...                                                      # 其余 rnd_xx 点位
   ```
   *(注：`videos/` 目录中的大文件视频默认已被 `.gitignore` 排除，不会提交到 Git 远程仓库。)*
 
@@ -72,12 +75,19 @@ $env:LAB_MONITOR_RTSP_READ_TIMEOUT_MS = "15000"
 
 ## 3. 依赖环境安装 (CPU / GPU)
 
-首先建议使用 `conda` 或 `venv` 创建干净的虚拟环境：
+**本项目已自带虚拟环境 `.venv`（Python 3.13）**，日常运行与测试请直接使用其解释器，不要用系统 `python`（Windows 上 PATH 里的 `python` 往往是 Microsoft Store 存根，会静默退出）：
 
 ```bash
-# 使用 conda 创建虚拟环境
-conda create -n lab-monitor python=3.10 -y
-conda activate lab-monitor
+./.venv/Scripts/python.exe main.py
+./.venv/Scripts/python.exe -m unittest discover -s tests -t .
+```
+
+若需在新机器上重建环境：
+
+```bash
+# 创建虚拟环境（Python 3.10 ~ 3.13）
+python -m venv .venv
+./.venv/Scripts/python.exe -m pip install --upgrade pip
 ```
 
 ### CPU 版本安装
@@ -86,10 +96,10 @@ conda activate lab-monitor
 
 ```bash
 # 1. 安装 PyTorch CPU 版本
-pip install torch torchvision --index-url https://download.pytorch.org/whl/cpu
+./.venv/Scripts/python.exe -m pip install torch torchvision --index-url https://download.pytorch.org/whl/cpu
 
 # 2. 安装项目基础依赖
-pip install -r requirements.txt
+./.venv/Scripts/python.exe -m pip install -r requirements.txt
 ```
 
 ### GPU CUDA 版本安装 (推荐)
@@ -97,29 +107,29 @@ pip install -r requirements.txt
 在包含 NVIDIA 显卡的机器上部署 GPU 版本可以大幅提升 YOLOv8 人员检测和 ReID 特征提取的帧率。
 
 #### 步骤 1：检查 NVIDIA 驱动与 CUDA 版本
-在终端运行 `nvidia-smi` 确认显卡驱动支持的最高 CUDA 版本（如 11.8 或 12.1）。
+在终端运行 `nvidia-smi` 确认显卡驱动支持的最高 CUDA 版本（如 11.8 / 12.1 / 12.6）。
 
 #### 步骤 2：安装 PyTorch GPU (CUDA) 版本
 
+- **CUDA 12.6 版本（当前实测环境：RTX 3090 + Python 3.13）**：
+  ```bash
+  ./.venv/Scripts/python.exe -m pip install torch torchvision --index-url https://download.pytorch.org/whl/cu126
+  ```
 - **CUDA 11.8 版本**：
   ```bash
-  pip install torch torchvision --index-url https://download.pytorch.org/whl/cu118
-  ```
-- **CUDA 12.1 版本**：
-  ```bash
-  pip install torch torchvision --index-url https://download.pytorch.org/whl/cu121
+  ./.venv/Scripts/python.exe -m pip install torch torchvision --index-url https://download.pytorch.org/whl/cu118
   ```
 
 #### 步骤 3：安装项目依赖
 ```bash
-pip install -r requirements.txt
+./.venv/Scripts/python.exe -m pip install -r requirements.txt
 ```
 
 #### 步骤 4：运行系统（自动触发 GPU 加速）
 `main.py` 内部会自动调用 `torch.cuda.is_available()` 检测 GPU 硬件，并自动完成 CUDA + FP16 半精度加速配置和优化参数切换（如 30fps 高帧率模式），无需手动修改代码逻辑：
 
 ```bash
-python main.py
+./.venv/Scripts/python.exe main.py
 ```
 
 ---
@@ -130,33 +140,35 @@ python main.py
 
 ### 视频源配置 (`config/sources.json`)
 
-配置各摄像头 ID 与对应视频源（文件路径或 RTSP 地址）：
+配置各摄像头 ID 与对应视频源（文件路径或 RTSP 地址）。当前项目为超算中心 L2 层实拍录像，原始素材 32 路：`reg_01..reg_10` 为常规巡检环、`rnd_01..rnd_22` 为随机路线；其中 9 路解码损坏（见 Q4）、`rnd_03` 与 `rnd_04` 内容重复，均已摘除，实际启用 22 路：
 
 ```json
 {
-  "cam_01": "videos/people_sample.mp4",
-  "cam_02": "videos/store_sample.mp4",
-  "cam_03": "videos/street_sample.mp4",
-  "cam_04": "rtsp://admin:123456@192.168.1.100:554/stream1"
+  "reg_01": "videos/常规路线/L2东侧走廊南北向南_20260731141700-20260731142100_1.mp4",
+  "reg_02": "videos/常规路线/L2东侧走廊南南向北_20260731141700-20260731142100_1.mp4",
+  "rnd_01": "videos/随机路线/L2东侧走廊北北向南_20260731143025-20260731143100_1.mp4",
+  "cam_rtsp": "rtsp://admin:123456@192.168.1.100:554/stream1"
 }
 ```
 
 ### 相机拓扑配置 (`config/topology.json`)
 
-定义多摄像头之间的逻辑物理连通关系与期望通行时延（单位：秒），系统将根据该拓扑进行跨视角转移时延校验与滞留预警：
+定义多摄像头之间的逻辑物理连通关系与期望通行时延（单位：秒），系统将根据该拓扑进行跨视角转移时延校验与滞留预警。实际按巡检路线的点位顺序串联：共位反向相机对（同一走廊两个朝向）用 `5 / 10` 秒，走廊相邻点位按步行距离取 `20~60` 秒，跨区长边（中间点位因视频损坏被摘除）用 `120~180` 秒：
 
 ```json
 {
-  "cam_01": [
+  "reg_02": [
     {
-      "next": "cam_02",
-      "expected_seconds": 30,
-      "tolerance_seconds": 15
-    },
+      "next": "reg_01",
+      "expected_seconds": 5,
+      "tolerance_seconds": 10
+    }
+  ],
+  "reg_01": [
     {
-      "next": "cam_03",
-      "expected_seconds": 45,
-      "tolerance_seconds": 15
+      "next": "reg_05",
+      "expected_seconds": 180,
+      "tolerance_seconds": 90
     }
   ]
 }
@@ -189,9 +201,9 @@ python main.py
 ## 5. 系统启动与后台服务运行
 
 ### 方式一：前台控制台调试模式
-直接在终端中运行：
+直接在终端中运行（必须用项目自带虚拟环境的解释器）：
 ```bash
-python main.py
+./.venv/Scripts/python.exe main.py
 ```
 
 ### 方式二：Windows PowerShell 后台后台守护运行
@@ -205,7 +217,7 @@ python main.py
   .\stop.ps1
   ```
 
-`start.ps1` 只有在 `/healthz` 返回本项目的健康响应后才提示启动成功。Python logging 写入 `outputs/server.log`，标准输出写入 `outputs/server.stdout.log`。`stop.ps1` 优先调用本机安全停止接口，等待 pipeline、校准文件、JSONL 和 SQLite 完成收尾；只有超时后才强制终止已通过 PID、命令行和监听端口共同校验的项目进程。
+`start.ps1` 只有在 `/healthz` 返回本项目的健康响应后才提示启动成功。Python logging 写入 `outputs/server.log`（`RotatingFileHandler`，单个 64MB 保留 5 份）；进程的 stdout/stderr 由脚本兜底重定向到 `outputs/server.stdout.log` 与 `outputs/server.stderr.log`（超过 64MB 自动改名 `.old`），只用于捕获 FFmpeg 等 C 层输出。`stop.ps1` 优先调用本机安全停止接口，等待 pipeline、校准文件、JSONL 和 SQLite 完成收尾；只有超时后才强制终止已通过 PID、命令行和监听端口共同校验的项目进程。
 
 ### 访问 Web 监控面板
 服务启动后，使用浏览器访问：
@@ -216,8 +228,10 @@ python main.py
 ```powershell
 $env:LAB_MONITOR_USERNAME = "operator"
 $env:LAB_MONITOR_PASSWORD = "请替换为高强度密码"
-python main.py --host 0.0.0.0 --port 8000
+.\.venv\Scripts\python.exe main.py --host 0.0.0.0 --port 8000
 ```
+
+> **无鉴权风险**：`LAB_MONITOR_USERNAME` 与 `LAB_MONITOR_PASSWORD` 两者都为空时，所有 API 接口（含 `POST /api/admin/shutdown` 停服接口）**均无任何鉴权**，因此绝不要在未配置凭据的情况下绑定非本机地址（程序会主动拒绝启动）。
 
 浏览器首次访问时会显示 HTTP Basic 登录框。远程部署必须通过 Nginx、Caddy 等可信反向代理启用 HTTPS；Basic 认证本身不加密用户名、密码和监控数据。不要把密码写入仓库文件或 PowerShell 脚本。
 
@@ -238,7 +252,26 @@ python main.py --host 0.0.0.0 --port 8000
 
 ### Q3: 端口 8000 被占用，无法启动？
 - **原因**：上一次运行的服务未完全退出，或其它程序占用了 8000 端口。
-- **解决**：若是本项目旧实例，运行 `.\stop.ps1` 安全停止；若是其他程序，请先确认归属后自行处理，或运行 `python main.py --port 8001` 使用其他端口。停止脚本不会终止无法确认归属的进程。
+- **解决**：若是本项目旧实例，运行 `.\stop.ps1` 安全停止；若是其他程序，请先确认归属后自行处理，或运行 `.\.venv\Scripts\python.exe main.py --port 8001` 使用其他端口。停止脚本不会终止无法确认归属的进程。
+
+### Q4: 摄像头日志显示打开成功，但一帧都读不出来？
+- **现象**：`cv2.VideoCapture.isOpened()` 返回 `True`，首帧 `read()` 却直接失败；用 ffprobe 看元数据是 `fps=90000`、`frame_count=INT64_MIN`。
+- **原因**：录像文件本身在导出/切片时损坏——H.264 码流缺少 PPS，或 HEVC 报 `PPS id out of range`，属于源文件问题，不是代码 bug。
+- **实例**：本项目 32 路素材中有 9 路属此情况（`reg_03`/`reg_04`/`reg_07`/`reg_09`、`rnd_09`/`rnd_13`/`rnd_14`/`rnd_15`/`rnd_20`），已从 `config/sources.json` 摘除。
+- **解决**：重新从录像机导出该点位视频，或用 `ffmpeg -i 坏文件.mp4 -c copy 修复.mp4` 尝试重封装后再验证首帧可读。
+
+### Q5: 改完 `.ps1` 脚本后，PowerShell 报语法错误或部分语句被莫名跳过？
+- **原因**：PowerShell 5.1 读取无 BOM 的 UTF-8 文件时按 GBK 解析，中文注释会被解码成乱码并"吃掉"其后的语句。
+- **解决**：`start.ps1` / `stop.ps1` 必须保存为 **UTF-8 with BOM**（带签名）。修改后先跑一次确认脚本能完整执行。
+
+### Q6: `outputs/server.pid` 里的 PID 和实际服务进程对不上？
+- **原因**：虚拟环境的 `.venv\Scripts\python.exe` 是一层 launcher，`Start-Process` 返回的 PID 是启动器而非真正跑 `main.py` 的工作进程。
+- **现状（已修复）**：`main.py` 启动时自己把真实 PID 写入 `outputs/server.pid`，`start.ps1` 启动前先清理残留、健康检查通过后读回真实值打印；`stop.ps1` 以监听端口为主依据，端口无监听时才回查 PID 文件（并校验进程名与命令行含 `main.py`，防误杀）。
+- **手工排查**：仍可按端口反查交叉验证：
+  ```powershell
+  Get-NetTCPConnection -LocalPort 8000 -State Listen | Select-Object -ExpandProperty OwningProcess
+  Get-Process -Id <上面得到的PID> | Select-Object Id, ProcessName, Path
+  ```
 
 ---
 
@@ -249,7 +282,7 @@ python main.py --host 0.0.0.0 --port 8000
 ```powershell
 $env:LAB_MONITOR_RETENTION_DAYS = "30"
 $env:LAB_MONITOR_MAX_IDENTITIES = "10000"
-python main.py
+.\.venv\Scripts\python.exe main.py
 ```
 
 `outputs/lab_monitor.db` 中的 ReID 主特征和 Feature Bank 属于敏感生物特征数据。部署时应限制 `outputs/` 的文件系统访问权限，备份必须加密，不应上传到公共对象存储或代码仓库。切换 ReID 模型时，系统会按 `feature_space` 隔离不兼容特征，不会把同维度但不同模型的向量混入同一身份库。
