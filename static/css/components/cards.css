@@ -200,25 +200,42 @@
   container-type: inline-size;
 }
 
-/* 窄卡片（多路网格时）自动精简头部，避免控件挤压 */
-@container (max-width: 300px) {
-  .cam-controls {
-    display: none;
+/* 窄卡片分级降级（容器 = 单张 .cam-card，见 .cam-card 的 container-type）。
+   此前容器挂在 #cam-grid 上，宽屏多列时卡片已很窄却永不触发，按钮被挤压变形。
+   现在按卡片实际宽度分档让出空间：先藏次要徽标 → 按钮紧凑 → 极窄才隐藏按钮。
+   阈值从 460 提到 480，因为新加了 flex: 0 0 auto + min-width: max-content 后
+   按钮占的最小宽度比原来更大，旧的 460 触发点会让出空间不足、按钮又被压一次。 */
+@container (max-width: 480px) {
+  .cam-badges .cam-fps-badge {
+    display: none;   /* FPS 重复在 cam-hud-tag 已显示，先隐藏，腾出 ~60px */
   }
-  .cam-header {
-    padding: 6px 8px;
-  }
-  .cam-name {
-    font-size: 11px;
+}
+
+@container (max-width: 400px) {
+  .cam-control-btn {
+    font-size: 10px;
+    padding: 2px 5px;
   }
   .cam-badges .cam-rec-badge,
-  .cam-badges .cam-fps-badge {
+  .cam-badges .rtsp-diag-badge {
     font-size: 9px;
     padding: 1px 4px;
   }
   .cam-hud-tag {
     font-size: 8px;
     padding: 1px 4px;
+  }
+}
+
+@container (max-width: 320px) {
+  .cam-controls {
+    display: none;   /* 极窄只保留名称 + 状态点 + 录制徽标 */
+  }
+  .cam-header {
+    padding: 6px 8px;
+  }
+  .cam-name {
+    font-size: 11px;
   }
 }
 
@@ -240,6 +257,9 @@
   flex-direction: column;
   position: relative;
   transition: all 0.3s cubic-bezier(0.4, 0, 0.2, 1);
+  /* 以单张卡片宽度作为容器查询基准（此前挂在 #cam-grid 上，判断的是整个
+     网格宽度，宽屏下列多时卡片已很窄却永不触发降级 → 按钮被 flex 挤压变形） */
+  container-type: inline-size;
 }
 
 .cam-card:hover {
@@ -280,6 +300,9 @@
   display: flex;
   align-items: center;
   gap: 10px;
+  /* 允许收缩：名称可截断，把空间让给右侧按钮，避免按钮被挤压 */
+  min-width: 0;
+  flex: 0 1 auto;
 }
 
 .cam-status-dot {
@@ -306,12 +329,22 @@
   font-weight: 700;
   letter-spacing: 0.5px;
   color: var(--text-main);
+  /* 名称过长时截断为省略号，绝不把按钮挤出 */
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
 }
 
 .cam-controls {
   display: flex;
   align-items: center;
   gap: 6px;
+  /* 按钮组整体禁止被 flex 压缩、永远按内容自然宽度展示。
+     flex: 0 0 auto = 不放大不缩小、基础宽度由内容决定。
+     单纯写 flex-shrink: 0 在外层有 min-width: 0 透传时仍会被压成方块，
+     这里再叠一层 min-width: max-content 兜底锁住自然尺寸。 */
+  flex: 0 0 auto;
+  min-width: max-content;
 }
 
 .cam-control-btn {
@@ -323,6 +356,11 @@
   font-size: 11px;
   cursor: pointer;
   transition: all 0.2s ease;
+  /* 与 .cam-controls 同等保险：自身不参与 flex 压缩，文字不换行，
+     兜底 min-width: max-content 防止被任何祖先 min-width 透传挤压变形 */
+  flex: 0 0 auto;
+  min-width: max-content;
+  white-space: nowrap;
 }
 .cam-control-btn:hover {
   color: var(--primary);
@@ -334,6 +372,10 @@
   display: flex;
   align-items: center;
   gap: 8px;
+  /* 徽标区允许被压缩（次要信息），必要时溢出隐藏，绝不挤压按钮 */
+  min-width: 0;
+  flex-shrink: 1;
+  overflow: hidden;
 }
 
 .cam-rec-badge {

@@ -48,7 +48,7 @@ _identity_store = None
 _calibrator = None
 _pipelines = None
 _shutdown_callback = None
-_mjpeg_sleep = 0.033  # 默认 ~30fps（GPU），CPU 模式由 init_server 覆盖为 0.067（15fps）
+_mjpeg_sleep = 0.033  # 兜底值；实际由 main.py 经 init_server(mjpeg_fps=...) 覆盖
 
 # F9a：MJPEG 增量推送 —— 帧序号未变化时不重复发字节，但最长 5 秒必须心跳重发一次，
 # 否则中间代理/浏览器可能把长时间静默的连接判定为假死。
@@ -693,6 +693,72 @@ async def get_stats():
 
 
 # ------------------------------------------------------------------ #
+# WebSocket 状态请求（HTTP 轮询改走 WS 通道，腾出浏览器连接槽位）           #
+# ------------------------------------------------------------------ #
+# 浏览器同域 HTTP/1.1 并发连接上限 6，MJPEG 长连接占用过多会把 REST 轮询
+# 饿死（见 stream_manager.js 注释）。将 /api/status、/api/identities、
+# /api/metrics/reid、/api/stats 四类轮询并入 WS 请求-响应后，连接预算变为
+# 5 MJPEG + 1 WS = 6，恰好占满且互不饥饿。
+# 协议约定：前端发送 {"type": "status"|"identities"|"reid"|"calib"}，
+# 服务端应答 {"type": <同名>, "data": {...}}；告警推送保持原格式（无 type 字段）。
+
+
+def _status_payload() -> dict:
+    if _frame_hub is None:
+        return {"cameras": []}
+    return {"cameras": _frame_hub.get_status()}
+
+
+def _identities_payload() -> dict:
+    if _identity_store is None:
+        return {"count": 0, "ids": []}
+    ids = _identity_store.all_ids()
+    return {"count": len(ids), "ids": ids}
+
+
+def _reid_metrics_payload() -> dict:
+    if _identity_store is None:
+        return {
+            "gallery_size": 0,
+            "total_searches": 0,
+            "successful_matches": 0,
+            "ratio_blocked_count": 0,
+            "match_rate": 0.0,
+            "avg_top1_similarity": 0.0,
+            "avg_ratio_margin": 0.0,
+            "avg_latency_ms": 0.0,
+            "avg_feature_quality": 0.0,
+        }
+    return _identity_store.get_metrics()
+
+
+def _calib_payload() -> dict:
+    if _calibrator is None:
+        return {"calibration": {}}
+    return {"calibration": _calibrator.stats()}
+
+
+async def _handle_ws_request(raw: str) -> str | None:
+    """处理前端经 WS 发来的数据请求；非请求消息（保持活跃的 ping 等）返回 None"""
+    try:
+        msg = json.loads(raw)
+        req_type = msg.get("type")
+    except (json.JSONDecodeError, AttributeError):
+        return None
+    if req_type == "status":
+        payload = _status_payload()
+    elif req_type == "identities":
+        payload = _identities_payload()
+    elif req_type == "reid":
+        payload = _reid_metrics_payload()
+    elif req_type == "calib":
+        payload = _calib_payload()
+    else:
+        return None
+    return json.dumps({"type": req_type, "data": payload}, ensure_ascii=False)
+
+
+# ------------------------------------------------------------------ #
 # MJPEG 视频流                                                          #
 # ------------------------------------------------------------------ #
 
@@ -819,7 +885,12 @@ async def websocket_endpoint(ws: WebSocket):
                 return
     try:
         while True:
-            await ws.receive_text()   # 保持连接活跃（client ping）
+            # 保持连接活跃（client ping）的同时支持状态数据请求-响应
+            raw = await ws.receive_text()
+            reply = await _handle_ws_request(raw)
+            if reply is not None:
+                if not await _send_ws_message(ws, reply):
+                    break
     except WebSocketDisconnect:
         pass
     finally:

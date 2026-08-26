@@ -35,6 +35,31 @@ _RTSP_READ_TIMEOUT_MS = int(os.getenv("LAB_MONITOR_RTSP_READ_TIMEOUT_MS", "10000
 _FILE_INITIAL_DELAY = 0.5
 _FILE_MAX_DELAY = 60.0
 
+# 离场宽限（F2b）：track_id 从 tracker 输出里消失多少个「处理帧」才算真的离场。
+#
+# ultralytics 8.4 的 BYTETracker._format_output() 只返回 is_activated 的轨迹，
+# 一次 IoU 关联失败该 track 当帧就从输出里消失（tracker 内部仍按 track_buffer=30
+# 帧保留、后续可复活）。若当帧即判离场，代价是三重的：
+#   1. watch() 起 MISSING_PERSON 倒计时 → 人根本没走，纯误报；
+#   2. _track_to_global 弹出 → 同一个人复活后要重新走一遍身份识别；
+#   3. _validator.clear() 把攒了一半的 ReID 缓冲清空 → 8 帧缓冲永远填不满、
+#      register_if_new() 没有机会执行。
+#
+# 注意宽限期只在帧率足够时才有收益：实测 12.5fps 下伪离场事件 18 → 10（清零），
+# 但 1.5~3fps 下 11 → 11（毫无变化）—— 低帧率时 tracker 压根关联不上、直接分配
+# 新 track_id，旧 id 不会在宽限期内回来。所以这条改动必须和「把帧率提到 10fps
+# 以上」一起才成立，别指望它单独救低帧率下的 MISSING_PERSON 误报。
+# 宽限期必须小于 track_buffer（30，见 src/tracker.py:_default_args），
+# 超过之后 tracker 已彻底丢弃该轨迹，人再出现也会拿到新的 track_id —— 故上限钳到 30。
+#
+# 默认 12 帧是在 7 路真实素材上扫出来的（12.5fps 工作点，10 条真实轨迹）：
+#   grace  1 → 18 次离场事件（8 次是误报）      grace  5 → 12 次（2 误报）
+#   grace  8 → 11 次（1 误报）                  grace 12 → 10 次（0 误报）
+# 代价是真离场要晚约 grace/fps 秒才上报（12 帧 @12.5fps ≈ 0.96s）。相对
+# MISSING_PERSON 的 5~180s 时间窗可忽略，但会给 TransitCalibrator 的通行时间
+# 带来同量级的正偏差（共位反向相机对那种 5s/10s 的短边上约占 20%，仍在容忍内）。
+_LEAVE_GRACE_FRAMES = min(30, max(1, int(os.getenv("LAB_MONITOR_LEAVE_GRACE_FRAMES", "12"))))
+
 
 def _is_rtsp(source: str) -> bool:
     return isinstance(source, str) and source.lower().startswith("rtsp://")
@@ -73,7 +98,7 @@ class CameraPipeline(threading.Thread):
         display: bool = False,
         detect_every_n: int = 1,      # YOLO 跳帧：每 N 帧推理一次（CPU=3，GPU=1）
         reid_every_n: int = 5,        # ReID 跳帧：每 N 帧提取一次特征（CPU=15，GPU=5）
-        frame_rate_cap: float = 30.0, # 帧率上限（CPU=15，GPU=30）
+        frame_rate_cap: float = 30.0, # 帧率上限（这个默认值只是兜底，实际由 main.py 传入）
     ):
         super().__init__(name=f"pipeline-{camera_id}", daemon=True)
         self.camera_id = camera_id
@@ -90,7 +115,10 @@ class CameraPipeline(threading.Thread):
 
         self._stop_event = threading.Event()
         self._track_to_global: dict[int, str] = {}
+        # 在场的 track_id（含仍处于离场宽限期内的），不是「上一帧 tracker 输出」
         self._prev_track_ids: set[int] = set()
+        # track_id → 连续从 tracker 输出中缺席的处理帧数（F2b 离场宽限）
+        self._absent_streak: dict[int, int] = {}
         self._reid_frame_counter: dict[int, int] = {}
         self._tracker = PersonTracker(fps=25)
         self._frame_idx = 0
@@ -194,7 +222,7 @@ class CameraPipeline(threading.Thread):
 
         不重置时新片头的检测框与旧轨迹关联不上，旧 track_id 会集体从 tracker
         输出中消失，被 _process_frame 误判为人员离场 → watch() → MISSING_PERSON 误报。
-        清空 _prev_track_ids 即可消除这批伪离场事件。
+        清空 _prev_track_ids 与 _absent_streak 即可消除这批伪离场事件。
 
         注意：**不要**在这里重建 PersonTracker。BYTETracker.__init__ 会调用
         reset_id()，而 BaseTrack._count 是**类级共享**计数器，重建会把全部
@@ -210,6 +238,7 @@ class CameraPipeline(threading.Thread):
             threshold=0.75,
         )
         self._prev_track_ids = set()
+        self._absent_streak = {}
         self._track_to_global = {}
         self._reid_frame_counter = {}
         self._last_tracks = []
@@ -430,9 +459,17 @@ class CameraPipeline(threading.Thread):
             frame=frame,
         )
 
-        left_ids = self._prev_track_ids - current_track_ids
-        for tid in left_ids:
-            self._on_person_leave(tid, snapshot_frame=frame)
+        # 离场判定带宽限期（F2b，原因见 _LEAVE_GRACE_FRAMES 注释）：
+        # 重新出现就把缺席计数清零，连续缺席够 _LEAVE_GRACE_FRAMES 帧才按离场处理。
+        for tid in current_track_ids:
+            self._absent_streak.pop(tid, None)
+        for tid in self._prev_track_ids - current_track_ids:
+            streak = self._absent_streak.get(tid, 0) + 1
+            if streak >= _LEAVE_GRACE_FRAMES:
+                self._absent_streak.pop(tid, None)
+                self._on_person_leave(tid, snapshot_frame=frame)
+            else:
+                self._absent_streak[tid] = streak
 
         for track in tracks:
             tid = track["track_id"]
@@ -566,7 +603,9 @@ class CameraPipeline(threading.Thread):
             cv2.putText(frame, label_text, (x1 + 5, text_y - 1), cv2.FONT_HERSHEY_SIMPLEX, font_scale, (0, 0, 0), font_thick + 2, cv2.LINE_AA)
             cv2.putText(frame, label_text, (x1 + 5, text_y - 1), cv2.FONT_HERSHEY_SIMPLEX, font_scale, text_color, font_thick, cv2.LINE_AA)
 
-        self._prev_track_ids = current_track_ids
+        # 宽限期内的 track_id 仍算「在场」，否则它下一帧就从 _prev_track_ids 里消失，
+        # 缺席计数再也累加不到阈值 —— 宽限期会静默失效，离场事件永远不触发。
+        self._prev_track_ids = current_track_ids | set(self._absent_streak)
 
     def _record_arrival(self, gid: str) -> None:
         """人员到达本摄像头时，计算并记录通行时间"""

@@ -36,14 +36,16 @@ class FrameHub:
     - server 调用 get_jpeg() 获取 JPEG 字节用于 MJPEG 流
     """
 
-    # Web 展示用的缩放尺寸
-    DISPLAY_WIDTH = 640
-    DISPLAY_HEIGHT = 360
-    # GPU 服务器：提高 JPEG 编码质量（带宽充裕，画面更清晰）
-    JPEG_QUALITY = 85
+    # Web 展示用的缩放尺寸（L1：640×360 → 480×270，编码时间再砍 ~40%）
+    DISPLAY_WIDTH = 480
+    DISPLAY_HEIGHT = 270
+    # L1：85→50，配合 480×270 让单帧编码总耗时从 ~8.7ms 降到 ~2-3ms，
+    # 22 路 + 5 路激活的 MJPEG 流能省出 ~3-4fps 余量分给所有 pipeline。
+    # 监控大屏的卡片最终渲染到 ~150-200px，q=50 视觉损失肉眼基本不可见。
+    JPEG_QUALITY = 50
 
-    def __init__(self, jpeg_quality: int = None, display_width: int = 640, display_height: int = 360):
-        # jpeg_quality 参数优先，否则用类默认值（CPU=65，GPU=85）
+    def __init__(self, jpeg_quality: int = None, display_width: int = 480, display_height: int = 270):
+        # jpeg_quality 参数优先，否则用类默认值（CPU=65，GPU=85→L1=50）
         if jpeg_quality is not None:
             self.JPEG_QUALITY = jpeg_quality
         self.DISPLAY_WIDTH  = display_width

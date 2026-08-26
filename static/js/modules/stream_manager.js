@@ -12,9 +12,10 @@
  *   - 不支持 IntersectionObserver 时回退为全量建流（与改造前行为一致）。
  */
 
-// 同时建流上限。浏览器上限 6，这里留 2 个槽位：pollStatus 会并发发两个 REST
-// 请求（/api/status 与 /api/identities），只留 1 个槽会让它们互相排队。
-export const MAX_CONCURRENT_STREAMS = 4;
+// 同时建流上限。浏览器上限 6，REST 轮询改走 WebSocket 后不再占 HTTP 连接，
+// 预算变为 5 MJPEG + 1 WS = 6 恰好占满：既让更多画面实时，又不饿死状态通道。
+// （旧值 4 是为 /api/status + /api/identities 两个 REST 轮询各留 1 槽，2026-08-25 起轮询并入 WS）
+export const MAX_CONCURRENT_STREAMS = 5;
 // 预留视口高度的 20%：只把「真正快要看到」的卡片算作可见。留太多（如整屏）
 // 会把大量离屏卡片也塞进轮转队列，拉长每一路轮到连接的间隔。
 const OBSERVER_ROOT_MARGIN = '20% 0px';

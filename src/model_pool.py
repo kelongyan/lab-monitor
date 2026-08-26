@@ -8,7 +8,7 @@ model_pool.py — 有界模型实例池：打破全局推理锁，让多路流�
 本模块用「有界实例池」替代单实例：预建 size 个彼此独立的模型实例，并发度 = size；
 池空时借出会阻塞，形成天然背压（等价于原来的实例锁，只是并发度不再恒为 1）。
 不做「每路一个实例」：22 个 YOLO + 22 个 OSNet 常驻内存不可控，且 Python 侧预处理受
-GIL 限制，实例数超过 6~8 后收益快速衰减。池大小 = 1 时行为与改动前完全一致
+GIL 限制，实例数超过 2 后收益就没了（实测数据见 MAX_AUTO_POOL_SIZE 注释）。池大小 = 1 时行为与改动前完全一致
 （LAB_MONITOR_MODEL_POOL=1 可一键回退）。
 """
 
@@ -25,8 +25,11 @@ logger = logging.getLogger("model_pool")
 
 # 借出等待多久算异常：只记 warning 提示背压，不抛异常
 DEFAULT_BORROW_TIMEOUT = 30.0
-# 自动推导池大小的上限：再多受 GIL 限制收益快速衰减，内存却线性增长
-MAX_AUTO_POOL_SIZE = 6
+# 自动推导池大小的上限。原设 6；2026-08-25 在 22 路真实素材上实测（解码 + detect）：
+#     池=1 → 22.9 帧/s    池=2 → 38.0    池=4 → 38.4    池=6 → 38.9
+# 池 ≥2 之后曲线就平了 —— 瓶颈已从「实例锁」转移到 GIL，多出来的实例只增显存占用
+# 与启动耗时（每个实例都要单独加载一份权重）。要更大就显式设 LAB_MONITOR_MODEL_POOL。
+MAX_AUTO_POOL_SIZE = 2
 
 
 def resolve_pool_size(

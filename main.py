@@ -64,6 +64,27 @@ def load_sources() -> dict[str, str]:
         return json.load(f)
 
 
+def _env_positive(name: str, default, cast):
+    """
+    读取一个正数环境变量；缺失 / 非法 / 非正一律回落到 default。
+
+    性能档位在调优过程中要跟着实测吞吐反复回调，走环境变量比每次改代码方便；
+    配置写错只降级到默认值，绝不让启动失败。
+    """
+    raw = os.getenv(name, "").strip()
+    if not raw:
+        return default
+    try:
+        value = cast(raw)
+    except ValueError:
+        logger.warning("%s=%r 不是合法数字，改用默认值 %s", name, raw, default)
+        return default
+    if value <= 0:
+        logger.warning("%s=%s 必须为正数，改用默认值 %s", name, value, default)
+        return default
+    return value
+
+
 def alert_ticker(
     alert_manager: AlertManager,
     stop_event: threading.Event,
@@ -189,15 +210,25 @@ def main(
         logger.info("ℹ️ 未检测到 CUDA 显卡，当前运行于 CPU 模式")
 
     # ---- 性能配置：根据设备自动切换 CPU / GPU 参数 ----
+    #
+    # GPU 档的取帧上限与 ReID 间隔是按 videos/ 里的真实素材实测定的：
+    #   - 22 路素材全是 25fps。抽帧到 10fps 时 ByteTrack 相邻处理帧的 IoU 中位 0.87、
+    #     关联失败率 0.1%；1~2fps 才是崩塌区。所以 10fps 足够跟踪，比追 25fps 省 2.5 倍算力。
+    #   - 单相机内轨迹时长中位 7.1s。ReIDValidator 要攒满 buffer_size=8 个样本才会调
+    #     register_if_new()，填满耗时 = 8 × reid_every_n / **实际达到的** fps 秒：
+    #         10fps + R=3 → 2.4s ✓         25fps + R=5 → 1.6s ✓
+    #          2fps + R=5 → 23.5s ✗（比轨迹本身还长 → 身份永远注册不上）
+    #     所以 R 必须和实际帧率一起看：当前单进程实测只有约 1.7fps，R 取 3 还是 5 都填不满，
+    #     调小只会白烧算力，因此暂时保持 5；等吞吐真上到 8fps 以上再降到 3
+    #     （直接设 LAB_MONITOR_REID_EVERY_N=3 即可，不用改代码）。
     if device == "cuda":
         perf = dict(
             detect_every_n  = 1,     # GPU：每帧检测
-            reid_every_n    = 5,     # GPU：每5帧 ReID
-            frame_rate_cap  = 30.0,  # GPU：上限30fps
-            mjpeg_fps       = 30.0,  # GPU：MJPEG 30fps
-            jpeg_quality    = 85,    # GPU：高画质
+            reid_every_n    = 10,    # L1：5→10，省 ReID 推理次数（约 5ms/次 × 22 路）
+            frame_rate_cap  = 10.0,  # GPU：上限10fps（实测足够跟踪，也给后续优化留头寸）
+            mjpeg_fps       = 30.0,  # L1：15→30，浏览器拉流更密，画面"刷新感"更强；服务端未变帧只返同 generation
+            jpeg_quality    = 50,    # L1：85→50，编码耗时 8.7ms → ~3.5ms（监控缩略图质量损失可接受）
         )
-        logger.info("⚙️ 性能模式: GPU 高帧率 (30fps / YOLO每帧 / ReID每5帧)")
     else:
         perf = dict(
             detect_every_n  = 3,     # CPU：每3帧检测，中间帧 Kalman 预测
@@ -206,7 +237,16 @@ def main(
             mjpeg_fps       = 15.0,  # CPU：MJPEG 15fps
             jpeg_quality    = 65,    # CPU：降低编码成本
         )
-        logger.info("⚙️ 性能模式: CPU 节能 (15fps / YOLO每3帧 / ReID每15帧)")
+
+    perf["frame_rate_cap"] = _env_positive("LAB_MONITOR_FRAME_RATE_CAP", perf["frame_rate_cap"], float)
+    perf["mjpeg_fps"]      = _env_positive("LAB_MONITOR_MJPEG_FPS", perf["mjpeg_fps"], float)
+    perf["reid_every_n"]   = _env_positive("LAB_MONITOR_REID_EVERY_N", perf["reid_every_n"], int)
+    logger.info(
+        "⚙️ 性能模式: %s (取帧上限 %.0ffps / YOLO每%d帧 / ReID每%d帧 / MJPEG %.0ffps / JPEG q%d)",
+        "GPU" if device == "cuda" else "CPU",
+        perf["frame_rate_cap"], perf["detect_every_n"],
+        perf["reid_every_n"], perf["mjpeg_fps"], perf["jpeg_quality"],
+    )
 
     # ---- 线程钳制：22 路解码线程 + 池化并发推理会把 CPU 打满，
     # OpenCV 与 torch 各自的内部线程池再抢核只会加剧上下文切换（吞吐反而下降）。

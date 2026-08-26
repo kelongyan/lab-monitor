@@ -34,9 +34,14 @@ function bindGridStreams(grid) {
 
 // auto 模式下按容器实际宽度与路数计算列数（窗口缩放时只改列数，不重建 DOM）
 function applyAutoColumns(grid, count) {
-  // 按摄像头数量动态计算列数：保证每路画面至少 ~250px 宽，32 路约 5~6 列
+  // 按摄像头数量动态计算列数：保证每路画面至少 ~320px 宽。
+  // 11.5 起从 250 提到 320：8/25 那次修复只是把按钮"不被无限挤压"，
+  // 但 22 路 × 6 列下每路 ~210px，cam-header 的 6 个子项（状态点+名+ROI+焦点+REC+FPS）
+  // 在 ~210px 容器里就是装不下，FPS 徽标虽然在 480px 容器查询点被隐藏，但
+  // REC 还在，硬挤会让 ROI 按钮文字换行。升 320 后默认 22 路 → 5 列 ≈ 280~320px，
+  // 配合容器查询隐藏 FPS，仍能保证按钮不被压成方块。
   const containerWidth = grid.clientWidth || window.innerWidth;
-  const minCardWidth = 250;
+  const minCardWidth = 320;
   let cols = Math.max(2, Math.floor(containerWidth / minCardWidth));
   if (count <= 2) cols = 2;
   else if (count <= 4) cols = 2;

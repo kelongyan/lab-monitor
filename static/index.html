@@ -10,12 +10,13 @@
 <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
 <link href="https://fonts.googleapis.com/css2?family=JetBrains+Mono:wght@400;500;700&family=Plus+Jakarta+Sans:wght@400;500;600;700;800&display=swap" rel="stylesheet">
 <!-- 模块化样式表入口 -->
-<!-- 缓存说明：?v= 只作用于顶层入口文件。main.css 的 @import 子表与 app.js 的
-     import './modules/*.js' 均不带版本号，因此只 bump 这里不足以刷新子模块 —— 改
-     css/components/*.css 或 js/modules/*.js 后需硬刷新（Ctrl+F5 / DevTools 禁用缓存）。
-     （不给子模块 import 加查询串是刻意的：一旦某处漏加，同一模块会被加载成两个实例，
-     grid.js / stream_manager.js 的模块级状态就会分裂。） -->
-<link rel="stylesheet" href="/static/css/main.css?v=11.2">
+<!-- 缓存说明：
+     - main.css 上的 ?v= 作用于 main.css 自身。
+     - 11.5 起，main.css 内部的 @import 也带了 ?v=11.5（见 static/css/main.css），
+       这样 bump 顶层版本能带动子 CSS 一起被浏览器重抓。
+     - app.js 的 import './modules/*.js' 仍不带版本号（避免 grid.js / stream_manager.js
+       的模块级状态被分裂成两份实例），改 js/modules/*.js 后需硬刷新（Ctrl+F5）。 -->
+<link rel="stylesheet" href="/static/css/main.css?v=11.5">
 </head>
 <body>
 
@@ -311,6 +312,6 @@
 </div>
 
 <!-- 模块化 JavaScript 入口 -->
-<script type="module" src="/static/js/app.js?v=11.2"></script>
+<script type="module" src="/static/js/app.js?v=11.5"></script>
 </body>
 </html>

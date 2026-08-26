@@ -2,7 +2,6 @@
  * WebSocket 与数据轮询模块
  */
 import { escapeHtml, escapeAttr, playAlertBeep } from '../utils/formatter.js';
-import { fetchJson } from '../utils/api.js';
 import { renderCamGrid, updateCamStatus } from './grid.js';
 import { openAlertDetailModal, showTrajectoryModal, pushAlertToModalHistory, clearModalAlertHistory, updateFocusCameraStatus } from './modals.js';
 
@@ -14,6 +13,41 @@ let lastAlertId = '';
 const seenAlertIds = new Set();
 const seenAlertOrder = [];
 const MAX_SEEN_ALERT_IDS = 1000;
+
+// WS 请求-响应表：type → resolve 回调。状态轮询经 WS 完成，不占用浏览器
+// HTTP 连接池（同域上限 6），把连接预算让给 MJPEG 实时流（见 stream_manager.js）。
+const pendingResolvers = new Map();
+
+/**
+ * 经 WS 发起一次数据请求，等待服务端应答。
+ * @param {string} type 请求类型：status / identities / reid / calib
+ * @param {number} timeoutMs 超时毫秒
+ * @returns {Promise<object>} 服务端应答的 data 字段
+ */
+function wsRequest(type, timeoutMs = 4000) {
+  return new Promise((resolve, reject) => {
+    if (!ws || ws.readyState !== WebSocket.OPEN) {
+      reject(new Error('WS 未连接'));
+      return;
+    }
+    const timer = setTimeout(() => {
+      pendingResolvers.delete(type);
+      reject(new Error(`WS ${type} 请求超时`));
+    }, timeoutMs);
+    // 同一 type 的并发请求以后到者为准（旧请求由超时兜底）
+    pendingResolvers.set(type, data => {
+      clearTimeout(timer);
+      resolve(data);
+    });
+    try {
+      ws.send(JSON.stringify({ type }));
+    } catch (error) {
+      clearTimeout(timer);
+      pendingResolvers.delete(type);
+      reject(error);
+    }
+  });
+}
 
 // 全局告警历史缓存（最近 100 条）
 const alertHistoryCache = [];
@@ -35,7 +69,19 @@ export function connectWS() {
     }
   };
   ws.onmessage = e => {
-    try { addAlert(JSON.parse(e.data)); } catch {}
+    try {
+      const msg = JSON.parse(e.data);
+      // 有 type 字段 → 状态请求应答；无 type → 告警推送（保持原格式兼容）
+      if (msg && typeof msg === 'object' && msg.type) {
+        const resolver = pendingResolvers.get(msg.type);
+        if (resolver) {
+          pendingResolvers.delete(msg.type);
+          resolver(msg.data);
+        }
+        return;
+      }
+      addAlert(msg);
+    } catch {}
   };
   ws.onclose = () => {
     if (statusEl) {
@@ -177,11 +223,11 @@ export function hydrateAlerts(alerts, summary = {}) {
 
 export async function pollCalibStats() {
   try {
-    const res = await fetchJson('/api/stats', { timeoutMs: 5000 });
-    const data = res.calibration || {};
+    const data = await wsRequest('calib');
+    const calibration = data.calibration || {};
     const container = document.getElementById('calib-content');
     if (!container) return;
-    const entries = Object.entries(data);
+    const entries = Object.entries(calibration);
     if (entries.length === 0) {
       container.innerHTML = '<div class="empty-state" style="padding: 10px 0;">数据积累中（需 5 条记录生效）</div>';
       return;
@@ -203,8 +249,8 @@ export async function pollCalibStats() {
 export async function pollStatus() {
   try {
     const [statusRes, idsRes] = await Promise.all([
-      fetchJson('/api/status', { timeoutMs: 4000 }),
-      fetchJson('/api/identities', { timeoutMs: 4000 }),
+      wsRequest('status'),
+      wsRequest('identities'),
     ]);
     const cameras = statusRes.cameras || [];
     renderCamGrid(cameras);
@@ -219,7 +265,7 @@ export async function pollStatus() {
 
 export async function pollReidMetrics() {
   try {
-    const res = await fetchJson('/api/metrics/reid', { timeoutMs: 4000 });
+    const res = await wsRequest('reid');
     
     const simPct = (res.avg_top1_similarity * 100).toFixed(1);
     const matchRatePct = (res.match_rate * 100).toFixed(1);

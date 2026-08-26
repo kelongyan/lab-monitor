@@ -1,6 +1,9 @@
 import asyncio
 import json
+import logging
+import os
 import socket
+import sys
 import tempfile
 import threading
 import time
@@ -14,6 +17,50 @@ from src import alerter
 from src.alerter import AlertBroadcaster, AlertManager
 from src.db import Database
 from src.pipeline import redact_source
+
+
+def _load_main():
+    """导入 main 模块供配置层用例使用。
+
+    main.py 在模块级就调 logging.basicConfig() 并把 RotatingFileHandler 挂到生产
+    outputs/server.log，测试进程里必须中和掉，否则全套用例的日志都会写进生产日志。
+    """
+    if "main" in sys.modules:
+        return sys.modules["main"]
+    with patch("logging.basicConfig"), patch("logging.handlers.RotatingFileHandler"):
+        import main
+    return main
+
+
+class PerfProfileEnvTests(unittest.TestCase):
+    """性能档位可被环境变量覆盖；非法配置只降级，不能让启动失败"""
+
+    def setUp(self):
+        self.main = _load_main()
+        logging.getLogger("main").setLevel(logging.CRITICAL)
+        self.addCleanup(logging.getLogger("main").setLevel, logging.WARNING)
+
+    def test_missing_or_blank_env_keeps_device_default(self):
+        for env in ({}, {"LAB_MONITOR_FRAME_RATE_CAP": ""}, {"LAB_MONITOR_FRAME_RATE_CAP": "   "}):
+            with self.subTest(env=env), patch.dict(os.environ, env, clear=True):
+                self.assertEqual(
+                    10.0, self.main._env_positive("LAB_MONITOR_FRAME_RATE_CAP", 10.0, float)
+                )
+
+    def test_valid_env_overrides_default(self):
+        with patch.dict(os.environ, {"LAB_MONITOR_REID_EVERY_N": " 3 "}, clear=True):
+            self.assertEqual(3, self.main._env_positive("LAB_MONITOR_REID_EVERY_N", 5, int))
+        with patch.dict(os.environ, {"LAB_MONITOR_FRAME_RATE_CAP": "12.5"}, clear=True):
+            self.assertEqual(
+                12.5, self.main._env_positive("LAB_MONITOR_FRAME_RATE_CAP", 10.0, float)
+            )
+
+    def test_invalid_or_non_positive_falls_back_to_default(self):
+        for raw in ("abc", "0", "-3", "1e", "", "nan"):
+            with self.subTest(raw=raw), patch.dict(
+                os.environ, {"LAB_MONITOR_REID_EVERY_N": raw}, clear=True
+            ):
+                self.assertEqual(5, self.main._env_positive("LAB_MONITOR_REID_EVERY_N", 5, int))
 
 
 def alert(alert_id: str) -> dict:
