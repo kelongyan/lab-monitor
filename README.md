@@ -42,6 +42,7 @@ lab-monitor/
 ├── config/                  # 系统配置文件目录
 │   ├── sources.json         # 视频源配置（本地视频 / RTSP）
 │   ├── topology.json        # 摄像头拓扑与预估穿越时间配置
+│   ├── camera_map.json      # 摄像头在楼层平面图上的点位（路线可视化）
 │   └── notify.json          # 告警通知渠道配置（Console / Email）
 ├── outputs/                 # 运行时输出目录（自动生成，已被 .gitignore 排除）
 │   ├── lab_monitor.db       # SQLite 数据库文件（身份履历与告警记录）
@@ -57,6 +58,7 @@ lab-monitor/
 │   ├── calibrator.py        # 轨迹转移时延校准器
 │   ├── db.py                # SQLite 数据库操作层
 │   ├── detector.py          # YOLOv8 目标检测器
+│   ├── floorplan.py         # 平面图点位映射（轨迹回放底图）
 │   ├── frame_hub.py         # 视频帧共享缓冲区
 │   ├── identity_store.py    # 全局 ReID 身份数据库（多姿态 Feature Bank）
 │   ├── notifier.py          # 告警通知发送器
@@ -66,7 +68,7 @@ lab-monitor/
 │   ├── topology.py          # 相机拓扑关系
 │   └── tracker.py           # 目标轨迹跟踪器
 ├── static/                  # Web 前端静态资源（index.html + css/ + js/ ES module）
-├── tests/                   # stdlib unittest 测试用例（10 个文件 / 103 例）+ 1 个 Node 前端用例
+├── tests/                   # stdlib unittest 测试用例（13 个文件 / 158 例）+ 1 个 Node 前端用例
 ├── main.py                  # 系统主入口
 ├── server.py                # FastAPI Web 服务器
 ├── demo.py                  # 快速演示脚本

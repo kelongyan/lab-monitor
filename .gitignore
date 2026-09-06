@@ -45,3 +45,6 @@ docs/*.xlsx
 
 # Agent Workspace
 .workbuddy/
+
+# 客户平面图渲染底图：与 docs/*.xlsx 同级敏感（设施图纸，公开仓库不入库）
+assets/floorplan/

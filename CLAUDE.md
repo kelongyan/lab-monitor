@@ -66,7 +66,7 @@ http://localhost:8000
 
 ### 测试与验证
 
-**stdlib `unittest`（venv 里没装 pytest，别写 pytest 专有语法）**，`tests/` 下 10 个 Python 文件共 113 个用例；另有一个纯 Node 的前端用例（19 项，测 MJPEG 连接管理器与写请求守卫头）：
+**stdlib `unittest`（venv 里没装 pytest，别写 pytest 专有语法）**，`tests/` 下 13 个 Python 文件共 158 个用例；另有一个纯 Node 的前端用例（19 项，测 MJPEG 连接管理器与写请求守卫头）：
 
 ```bash
 # 全量
@@ -138,6 +138,7 @@ main.py (主线程)
 | `AlertBroadcaster` | `src/alerter.py` | WebSocket 告警推送 | 线程安全（asyncio.Queue / sync queue） |
 | `TransitCalibrator` | `src/calibrator.py` | 相机间穿越时延统计 | 内置锁保护 |
 | `Database` | `src/db.py` | SQLite 数据库持久化（`outputs/lab_monitor.db`，见 `src/db.py:17`） | 单例模式与独立连接 |
+| `Floorplan` | `src/floorplan.py` | 平面图点位映射（`config/camera_map.json`） | `RLock` 保护，按 mtime 热重载 |
 
 ### ReID 身份识别流程
 
@@ -193,7 +194,7 @@ CameraPipeline (src/pipeline.py)
 | 分组 | 端点 |
 |------|------|
 | 页面 / 流 | `GET /`、`GET /stream/{cam_id}`（MJPEG）、`WS /ws`（告警推送） |
-| 读接口 | `/api/status`、`/api/alerts`、`/api/alerts/history`、`/api/alerts/export`（CSV，上限 5 万行）、`/api/identities`、`/api/identities/{global_id}`、`/api/stats`、`/api/roi`、`/api/topology`、`/api/metrics/reid`、`/api/system/metrics` |
+| 读接口 | `/api/status`、`/api/alerts`、`/api/alerts/history`、`/api/alerts/export`（CSV，上限 5 万行）、`/api/identities`、`/api/identities/{global_id}`、`/api/identities/{global_id}/trajectory`、`/api/floorplan`、`/api/stats`、`/api/roi`、`/api/topology`、`/api/metrics/reid`、`/api/system/metrics` |
 | 写接口（需守卫头） | `POST /api/roi`、`POST /api/topology`、`POST /api/admin/shutdown`（仅回环） |
 | 运维 | `GET /healthz`（`start.ps1` 靠它判断启动成功） |
 
@@ -240,6 +241,28 @@ CameraPipeline (src/pipeline.py)
   ]
 }
 ```
+
+### config/camera_map.json
+
+**摄像头在楼层平面图上的点位，仅供「路线可视化」使用**。按 system_id（`reg_XX` / `rnd_XX`）映射：
+
+```json
+{
+  "rnd_19": {
+    "plan_id": "IP79",
+    "desc": "L2高性能机房04通道东南向北",
+    "map_xy": [0.43, 0.52],
+    "facing_deg": 90,
+    "fov_deg": 80
+  }
+}
+```
+
+- ⚠️ **`map_xy` 与 `roi.json` 的 polygon 是两套坐标系，别混用**：`map_xy` 是「楼层平面图」上的归一化点位；ROI 是「相机画面内」的归一化多边形（用于 INTRUSION）
+- `map_xy` 为 `null` 表示该相机**尚未标注**，接口照常返回但坐标是 null，前端应跳过而不是画到原点
+- 加载器 `src/floorplan.py` 会清洗非法值（裁剪到 `[0,1]`、拒绝 NaN/Inf/非数值），文件损坏时**保留上一次的有效映射**
+- 手改文件后无需重启（`Floorplan.maybe_reload()` 按 mtime 热重载）
+- 标注工具：`outputs/dev/calibrate_floorplan.html`（单文件，浏览器打开点图落点后导出 JSON）
 
 ### config/roi.json
 
@@ -382,3 +405,11 @@ pip install torch torchvision --index-url https://download.pytorch.org/whl/cu126
 13. **离场判定带宽限期（F2b）**：ultralytics 8.4 的 `BYTETracker._format_output()` 只返回 `is_activated` 的轨迹，一次 IoU 关联失败该 track 当帧就从输出里消失（内部仍按 `track_buffer=30` 帧保留、可复活）。所以 `_process_frame` **不能**看到 id 消失就判离场——那会误报 MISSING_PERSON 并清空攒了一半的 ReID 缓冲（`buffer_size=8` 永远填不满 → 无法注册身份）。现在改成连续缺席 `_LEAVE_GRACE_FRAMES`（默认 12）个处理帧才调 `_on_person_leave()`，状态记在 `_absent_streak` 里，`_prev_track_ids` 的语义也随之变成"在场（含宽限期内）"而不是"上一帧输出"
 14. **ReID 特征落盘是节流的**：`IdentityStore` 对特征列做「累计 50 次更新或间隔 30 秒」节流（`src/identity_store.py:23-24`），不调 `flush()` 就会静默丢掉最近一段滑动平均结果。`main.py` 的 `flush_identity_features()` 在关停路径上补写，新增退出分支时别漏掉它
 15. **`demo.py` 不读真实录像**：它生成合成视频（矩形模拟人员移动）跑通检测→跟踪→ReID→告警链路，适合在没有素材或想快速验证改动时用
+16. **轨迹数据里绝大多数是循环播放的产物，不是真实路线**：本地 MP4 会自动循环（`pipeline._run_file`），而部分素材只有 **40 秒**（如 `rnd_08`）。一个在镜头里走一趟的人会被反复记录 9 天——实测 `32c70435` 在 `rnd_03`↔`rnd_04` 之间产生 **9340 段**（11.8 万行）。**直接画路线会得到「这个人在两点之间来回跑了 4670 次」的假象**
+    - `GET /api/identities/{global_id}/trajectory` 默认开启 `collapse_loops=true` 折叠，两种策略：
+      - `period`：相机序列严格周期时截断到第一轮（时间线连续，播放动画不瞬移）
+      - `fingerprint`：按 (camera, 首帧 bbox 中心 20px 量化) 去重，覆盖非严格周期
+    - **周期检测必须用差分判据 `seq[i] == seq[i - period]`，不能用相位对齐 `seq[i] == seq[i % period]`**。真实数据里 A→B→A→B 中途会翻成 B→A→B→A，相位对齐在翻转点之后会 100% 判不匹配（实测 9340 段严格交替序列只有 **5%** 匹配率）
+    - 硬截断到第一轮前会做**覆盖校验**：若后续轮次出现了第一轮没有的相机，降级用 fingerprint，宁可少折叠也不丢轨迹
+    - 返回值里的 `loop` 字段说明是否折叠、用什么策略、折掉了多少，前端应展示提示
+17. **`src/floorplan.py` 不提供模块级单例**，用 `build_floorplan()` 构造（`src/db.py` 的教训是 import 即连生产库）。`server.py` 在 `init_server(floorplan=...)` 注入，未注入时 `GET /api/floorplan` 惰性构造，单测裸 `TestClient(app)` 也能用
