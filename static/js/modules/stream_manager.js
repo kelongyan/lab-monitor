@@ -20,7 +20,10 @@ export const MAX_CONCURRENT_STREAMS = 5;
 // 会把大量离屏卡片也塞进轮转队列，拉长每一路轮到连接的间隔。
 const OBSERVER_ROOT_MARGIN = '20% 0px';
 // 可见卡片数超过上限时的轮转周期（毫秒）；置 0 可关闭轮转（被挤下的卡片将长期冻结）
-const ROTATE_INTERVAL_MS = 12000;
+// L2：12000 → 6000。22 路 ÷ 5 一批 = 4.4 批，最长轮转 53s → 26s。
+// 代价：每秒约 8% 时间花在重连上（5 路 × ~100ms 重连 ÷ 6s），
+// 已被 L1 提效（JPEG 编码 8.7ms → 2-3ms）覆盖。
+const ROTATE_INTERVAL_MS = 6000;
 // 首轮填充周期：仍有可见卡片一帧未出过时用更短的间隔，避免大批卡片长时间全黑
 const FILL_INTERVAL_MS = 3000;
 // 冻结帧最大宽度，控制 dataURL 体积（多路卡片同时冻结时的内存占用）
