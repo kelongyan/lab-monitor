@@ -569,6 +569,62 @@ class Database:
             })
         return int(total), appearances
 
+    def query_trajectory(
+        self,
+        global_id: str,
+        start: float | None = None,
+        end: float | None = None,
+        camera_id: str | None = None,
+        limit: int = 20000,
+    ) -> tuple[int, list[dict]]:
+        """按时间窗 / 相机过滤查询某身份的原始出现序列（轨迹回放用）。
+
+        与 query_identity_appearances 的区别：
+        - 支持 start/end/camera_id 过滤（轨迹回放要按时间窗切片）
+        - 不分页，改为单次上限（回放需要完整时序，分页会切断连续性）
+        - 返回的 total 是「过滤后、未截断」的行数，用于前端提示数据被裁剪
+
+        limit 的作用与 P2-13 同类：identity_appearances 全表 20 万行，
+        单个身份可占 11 万行（rnd_08 这种长期停留的相机），不设上限会
+        把整张表读进内存。达到上限时前端应提示用户缩小时间窗。
+        """
+        with self._get_conn() as conn:
+            total = conn.execute(
+                """
+                SELECT COUNT(*) FROM identity_appearances
+                WHERE global_id = ?
+                  AND (? IS NULL OR timestamp >= ?)
+                  AND (? IS NULL OR timestamp <= ?)
+                  AND (? IS NULL OR camera_id = ?)
+                """,
+                (global_id, start, start, end, end, camera_id, camera_id),
+            ).fetchone()[0]
+            rows = conn.execute(
+                """
+                SELECT camera_id, timestamp, bbox_json
+                FROM identity_appearances
+                WHERE global_id = ?
+                  AND (? IS NULL OR timestamp >= ?)
+                  AND (? IS NULL OR timestamp <= ?)
+                  AND (? IS NULL OR camera_id = ?)
+                ORDER BY timestamp, id
+                LIMIT ?
+                """,
+                (global_id, start, start, end, end, camera_id, camera_id, limit),
+            ).fetchall()
+        appearances = []
+        for row in rows:
+            try:
+                bbox = json.loads(row["bbox_json"] or "[]")
+            except json.JSONDecodeError:
+                bbox = []
+            appearances.append({
+                "camera": row["camera_id"],
+                "time": row["timestamp"],
+                "bbox": bbox,
+            })
+        return int(total), appearances
+
     def get_stats(self) -> dict[str, int]:
         """获取数据库总统计数据"""
         try:

@@ -5,6 +5,8 @@ server.py — FastAPI Web 服务器
 - GET  /api/alerts        → 最近告警列表 JSON
 - GET  /stream/{cam_id}   → MJPEG 实时视频流
 - WS   /ws                → WebSocket 实时告警推送
+- GET  /api/floorplan     → 平面图底图 + 摄像头点位（路线可视化）
+- GET  /api/identities/{gid}/trajectory → 时序轨迹（路线回放）
 """
 
 import asyncio
@@ -39,6 +41,17 @@ screenshots_dir = Path(__file__).parent / "outputs" / "screenshots"
 screenshots_dir.mkdir(parents=True, exist_ok=True)
 app.mount("/screenshots", StaticFiles(directory=screenshots_dir), name="screenshots")
 
+# 平面图底图（/floorplan/floorplan.jpg）
+# 底图是客户设施图纸渲染产物，与 docs/*.xlsx 同级敏感，已 gitignore——
+# 新克隆的仓库里 assets/floorplan/ 不存在，此 mount 会在目录缺失时抛错，
+# 所以用 try 包住：无底图 = 前端只显示点位与连线，不阻塞服务。
+_floorplan_assets = Path(__file__).parent / "assets" / "floorplan"
+try:
+    _floorplan_assets.mkdir(parents=True, exist_ok=True)
+    app.mount("/floorplan", StaticFiles(directory=_floorplan_assets), name="floorplan")
+except Exception:
+    logger.warning("平面图资源目录不可用: %s", _floorplan_assets)
+
 
 # 运行时注入（main.py 启动前赋值）
 _frame_hub = None
@@ -48,6 +61,7 @@ _identity_store = None
 _calibrator = None
 _pipelines = None
 _shutdown_callback = None
+_floorplan = None
 _mjpeg_sleep = 0.033  # 兜底值；实际由 main.py 经 init_server(mjpeg_fps=...) 覆盖
 
 # F9a：MJPEG 增量推送 —— 帧序号未变化时不重复发字节，但最长 5 秒必须心跳重发一次，
@@ -263,8 +277,8 @@ async def guard_request(request: Request, call_next):
     return await call_next(request)
 
 
-def init_server(frame_hub, broadcaster, identity_store, calibrator=None, pipelines=None, topology=None, mjpeg_fps: float = 30.0, shutdown_callback=None, host: str | None = None, port: int | None = None):
-    global _frame_hub, _broadcaster, _identity_store, _calibrator, _pipelines, _topology, _mjpeg_sleep, _shutdown_callback
+def init_server(frame_hub, broadcaster, identity_store, calibrator=None, pipelines=None, topology=None, mjpeg_fps: float = 30.0, shutdown_callback=None, host: str | None = None, port: int | None = None, floorplan=None):
+    global _frame_hub, _broadcaster, _identity_store, _calibrator, _pipelines, _topology, _mjpeg_sleep, _shutdown_callback, _floorplan
     _frame_hub = frame_hub
     _broadcaster = broadcaster
     _identity_store = identity_store
@@ -273,6 +287,8 @@ def init_server(frame_hub, broadcaster, identity_store, calibrator=None, pipelin
     _topology = topology
     _mjpeg_sleep = 1.0 / max(1.0, mjpeg_fps)
     _shutdown_callback = shutdown_callback
+    # 平面图未显式注入时惰性构造（见 _get_floorplan），单元测试直接 TestClient(app) 也能用
+    _floorplan = floorplan
     # host/port 已知时立即生成 Host 白名单；未传则由 run_server/start_server_thread 生成
     if host is not None and port is not None:
         _configure_allowed_hosts(host, port)
@@ -682,6 +698,264 @@ async def get_identity_detail(
         "offset": offset,
         "trajectory": trajectory
     })
+
+
+# ------------------------------------------------------------------ #
+# 平面图与轨迹回放（客户诉求：按拍摄时刻在地图上还原人员路线）                #
+# ------------------------------------------------------------------ #
+# 坐标系分两套，别混：
+#   - config/roi.json   → 相机「画面内」的归一化多边形，用于 INTRUSION 判定
+#   - config/camera_map.json → 相机在「楼层平面图」上的归一化点位，用于画路线
+# 轨迹点位来自 identity_appearances 表（global_id + camera_id + timestamp），
+# 地图坐标不是算出来的，是由 camera_map.json 查表注入的，未标注的点 map_xy 为 null，
+# 前端应跳过而不是画到原点。
+
+_FLOORPLAN_LOAD_FAILED = object()  # 已尝试加载但失败，避免每次请求重复 import
+
+
+def _get_floorplan():
+    """惰性构造平面图映射。未注入时直接读 config/camera_map.json。"""
+    global _floorplan
+    if _floorplan is None:
+        try:
+            from src.floorplan import build_floorplan
+            _floorplan = build_floorplan()
+        except Exception:
+            logger.exception("平面图加载失败，轨迹接口退化为无坐标模式")
+            _floorplan = _FLOORPLAN_LOAD_FAILED
+    return None if _floorplan is _FLOORPLAN_LOAD_FAILED else _floorplan
+
+
+def _empty_floorplan_payload() -> dict:
+    return {
+        "image": None,
+        "image_size": [0, 0],
+        "total": 0,
+        "mapped": 0,
+        "complete": False,
+        "cameras": {},
+    }
+
+
+@app.get("/api/floorplan")
+async def get_floorplan():
+    """平面图底图 + 全部摄像头点位（含未标注的，供标注工具/前端灰度显示）。"""
+    fp = _get_floorplan()
+    if fp is None:
+        return JSONResponse(_empty_floorplan_payload())
+    return JSONResponse(fp.payload(camera_ids=_known_camera_ids() or None))
+
+
+_APPROARANCE_QUERY_LIMIT = 20000
+
+
+def _collapse_loop_period(seq: list[str]) -> int | None:
+    """检测相机序列的最小重复周期（严格周期，快速路径）。
+
+    背景：本地 MP4 素材会自动循环播放（pipeline._run_file），而部分素材只有
+    40 秒。一个在镜头里走一趟的人，会被持续记录成上千段「A→B→A→B...」，
+    直接画路线会得到「这个人在两点之间来回跑了 545 次」的假象。
+
+   判据用差分而非相位对齐：`seq[i] == seq[i - period]`。
+    朴素写法 `seq[i] == seq[i % period]` 看着等价，实际对相位漂移极其敏感——
+    真实数据里 A→B→A→B 中途翻成 B→A→B→A 时，后半段会 100% 判不匹配
+    （实测 9340 段严格交替的序列因此只有 5% 匹配率）。差分判据只受翻转点
+    那一两处影响，剩余部分照常成立，配合 90% 阈值即可吸收抖动。
+
+    周期上限压到 200：一轮真实轨迹不会经过上百个停留段，同时避免
+    O(n × period) 在 n 接近 2 万时把请求打爆。
+    """
+    n = len(seq)
+    if n < 4:
+        return None
+    max_period = min(n // 2, 200)
+    for period in range(1, max_period + 1):
+        checked = n - period
+        if checked <= 0:
+            break
+        match = sum(1 for i in range(period, n) if seq[i] == seq[i - period])
+        if match / checked >= 0.9:
+            return period
+    return None
+
+
+def _collapse_by_fingerprint(segments: list[dict]) -> list[int]:
+    """按 (camera, 首帧 bbox 中心 20px 量化) 去重，保留首次出现的段。
+
+    兜底路径：真实数据往往不是严格周期（人在素材里出现的时机有抖动、
+    偶尔漏检会让 A→B→A→B 变成 A→B→A→A→B），周期检测会失败。
+    但循环播放的本质是「同一段像素被反复播放」，所以段的起始画面位置
+    几乎完全一致——用位置指纹去重比序列周期更鲁棒。
+
+    20px 量化是权衡：太细（<5px）会因检测抖动漏折叠，太粗（>50px）
+    会把真实的不同停留点误折叠。
+    """
+    seen: set = set()
+    keep: list[int] = []
+    for i, seg in enumerate(segments):
+        key = seg["camera"]
+        bb = seg.get("bbox_start") or []
+        if len(bb) >= 4:
+            try:
+                cx = (float(bb[0]) + float(bb[2])) / 2.0
+                cy = (float(bb[1]) + float(bb[3])) / 2.0
+                key = (seg["camera"], round(cx / 20), round(cy / 20))
+            except (TypeError, ValueError):
+                pass  # bbox 异常时退化为只按相机去重
+        if key in seen:
+            continue
+        seen.add(key)
+        keep.append(i)
+    return keep
+
+
+@app.get("/api/identities/{global_id}/trajectory")
+async def get_identity_trajectory(
+    global_id: str,
+    start: float | None = Query(default=None, description="起始 Unix 秒，缺省不限"),
+    end: float | None = Query(default=None, description="结束 Unix 秒，缺省不限"),
+    camera: str | None = Query(default=None, description="只看某一路相机"),
+    max_points: int = Query(default=2000, ge=1, le=20000, description="返回路径点上限"),
+    min_gap_s: float = Query(default=0.0, ge=0.0, le=3600.0,
+                             description="相邻路径点最小时间间隔，用于抽稀；0 表示不抽稀"),
+    split_gap_s: float = Query(default=30.0, ge=0.0, le=7200.0,
+                               description="同相机内时间间隔超过该值则拆成新停留段"),
+    collapse_loops: bool = Query(default=True,
+                                 description="折叠循环播放产生的重复轨迹（素材仅数十秒时必开）"),
+):
+    """按时间窗返回某身份的时序轨迹，用于平面图路线回放。
+
+    返回两类数据：
+    - segments：按「连续停留」聚合的段，每段一个相机，用于画停留气泡与统计驻留时长
+    - path：降采样后的时序点序列，用于播放动画（含每个点的地图坐标）
+
+    单次最多返回 max_points 个路径点；原始点数超过 20000 时 truncated=True，
+    前端应提示缩小时间窗（rnd_08 这类长期停留相机单个身份可达 11 万行）。
+    """
+    from src.db import db  # 延迟导入：模块级会连生产库
+
+    if start is not None and end is not None and start > end:
+        return JSONResponse({"error": "start must not be greater than end"}, status_code=400)
+
+    fp = _get_floorplan()
+
+    try:
+        total, rows = await run_in_threadpool(
+            db.query_trajectory, global_id, start, end, camera, _APPROARANCE_QUERY_LIMIT
+        )
+    except Exception:
+        logger.exception("查询轨迹失败: %s", global_id)
+        return JSONResponse({"error": "Trajectory query failed"}, status_code=500)
+
+    # 抽稀：相邻点间隔小于 min_gap_s 的丢弃（保留第一个）
+    if min_gap_s > 0 and rows:
+        kept = [rows[0]]
+        last_t = rows[0]["time"]
+        for row in rows[1:]:
+            if row["time"] - last_t >= min_gap_s:
+                kept.append(row)
+                last_t = row["time"]
+        rows = kept
+
+    # 分段：连续同相机合并；间隔超过 split_gap_s 视为重新进入视野，拆开
+    segments: list[dict] = []
+    for row in rows:
+        cam, ts = row["camera"], row["time"]
+        if (segments and segments[-1]["camera"] == cam
+                and ts - segments[-1]["exit"] <= split_gap_s):
+            seg = segments[-1]
+            seg["exit"] = ts
+            seg["frames"] += 1
+            seg["bbox_end"] = row["bbox"]
+        else:
+            segments.append({
+                "camera": cam,
+                "enter": ts,
+                "exit": ts,
+                "frames": 1,
+                "bbox_start": row["bbox"],
+                "bbox_end": row["bbox"],
+            })
+    for seg in segments:
+        seg["duration_s"] = round(seg["exit"] - seg["enter"], 2)
+        xy = fp.point(seg["camera"]) if fp else None
+        seg["map_xy"] = xy
+        meta = fp.meta(seg["camera"]) if fp else None
+        seg["desc"] = (meta or {}).get("desc") or ""
+
+    # 折叠循环播放：把循环素材反复播出的同一条轨迹压回一轮。
+    # 素材只有几十秒时，不折叠会得到「这个人在两点之间来回跑了 545 次」的假象。
+    loop_info = {"detected": False, "method": None, "period_segments": 0,
+                 "loops": 1, "raw_segments": len(segments)}
+    if collapse_loops and len(segments) >= 4:
+        raw = len(segments)
+        period = _collapse_loop_period([s["camera"] for s in segments])
+
+        # 覆盖校验：硬截断到第一轮会丢掉「只在后续轮次出现的相机」。
+        # 实测 9cd02946 的序列是 rnd_08→rnd_08→reg_08→…，检测到周期 2 后
+        # 截断成 [rnd_08, rnd_08]，把只在第 3 段出现的 reg_08 整个丢了。
+        # 宁可少折叠也不能丢轨迹，覆盖不全就降级到指纹法。
+        if period and raw // period >= 2:
+            cams_first = {s["camera"] for s in segments[:period]}
+            cams_all = {s["camera"] for s in segments}
+            if not cams_all <= cams_first:
+                period = None
+
+        if period and raw // period >= 2:
+            # 严格周期且覆盖完整：截断到第一轮，时间线连续，播放动画不会瞬移
+            loop_info = {"detected": True, "method": "period",
+                         "period_segments": period, "loops": raw // period,
+                         "raw_segments": raw}
+            cut_at = segments[period]["enter"]
+            segments = segments[:period]
+            rows = [r for r in rows if r["time"] < cut_at]
+        else:
+            keep = _collapse_by_fingerprint(segments)
+            if len(keep) < raw:
+                # 非严格周期（或覆盖不全）：按画面位置指纹去重，只保留独特停留段的点
+                windows = [(segments[i]["enter"], segments[i]["exit"]) for i in keep]
+                segments = [segments[i] for i in keep]
+                rows = [r for r in rows
+                        if any(a <= r["time"] <= b for a, b in windows)]
+                loop_info = {"detected": True, "method": "fingerprint",
+                             "period_segments": len(segments),
+                             "loops": round(raw / max(1, len(segments)), 1),
+                             "raw_segments": raw}
+
+    # 路径点降采样（等距抽样，保证首尾都在）
+    returned = len(rows)
+    truncated = False
+    if rows and len(rows) > max_points:
+        step = len(rows) / max_points
+        rows = [rows[min(len(rows) - 1, int(i * step))] for i in range(max_points)]
+        returned = len(rows)
+        truncated = total > len(rows)
+
+    path = []
+    for row in rows:
+        xy = fp.point(row["camera"]) if fp else None
+        path.append({
+            "t": row["time"],
+            "camera": row["camera"],
+            "map_xy": xy,
+            "bbox": row["bbox"],
+        })
+
+    payload = {
+        "global_id": global_id,
+        "start": start,
+        "end": end,
+        "camera_filter": camera,
+        "total": total,
+        "returned": returned,
+        "truncated": truncated,
+        "segment_count": len(segments),
+        "segments": segments,
+        "path": path,
+        "loop": loop_info,
+        "floorplan": fp.payload(camera_ids=_known_camera_ids() or None) if fp else _empty_floorplan_payload(),
+    }
+    return JSONResponse(payload)
 
 
 @app.get("/api/stats")

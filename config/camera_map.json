@@ -1,0 +1,156 @@
+{
+  "reg_01": {
+    "plan_id": "",
+    "desc": "L2东侧走廊南北向南",
+    "map_xy": null,
+    "facing_deg": 0,
+    "fov_deg": 80
+  },
+  "reg_02": {
+    "plan_id": "",
+    "desc": "L2东侧走廊南南向北",
+    "map_xy": null,
+    "facing_deg": 0,
+    "fov_deg": 80
+  },
+  "reg_05": {
+    "plan_id": "",
+    "desc": "L2中间走廊西东向西",
+    "map_xy": null,
+    "facing_deg": 0,
+    "fov_deg": 80
+  },
+  "reg_06": {
+    "plan_id": "",
+    "desc": "L2中间走廊西西向东",
+    "map_xy": null,
+    "facing_deg": 0,
+    "fov_deg": 80
+  },
+  "reg_08": {
+    "plan_id": "",
+    "desc": "L2南侧走廊西西向东",
+    "map_xy": null,
+    "facing_deg": 0,
+    "fov_deg": 80
+  },
+  "reg_10": {
+    "plan_id": "",
+    "desc": "L2西侧走廊南南向北",
+    "map_xy": null,
+    "facing_deg": 0,
+    "fov_deg": 80
+  },
+  "rnd_01": {
+    "plan_id": "",
+    "desc": "L2东侧走廊北北向南",
+    "map_xy": null,
+    "facing_deg": 0,
+    "fov_deg": 80
+  },
+  "rnd_02": {
+    "plan_id": "",
+    "desc": "L2东侧走廊北南向北",
+    "map_xy": null,
+    "facing_deg": 0,
+    "fov_deg": 80
+  },
+  "rnd_04": {
+    "plan_id": "",
+    "desc": "L2中间走廊东东向西",
+    "map_xy": null,
+    "facing_deg": 0,
+    "fov_deg": 80
+  },
+  "rnd_05": {
+    "plan_id": "",
+    "desc": "L2中间走廊东西向东",
+    "map_xy": null,
+    "facing_deg": 0,
+    "fov_deg": 80
+  },
+  "rnd_06": {
+    "plan_id": "",
+    "desc": "L2中间走廊西东向西",
+    "map_xy": null,
+    "facing_deg": 0,
+    "fov_deg": 80
+  },
+  "rnd_07": {
+    "plan_id": "",
+    "desc": "L2中间走廊西西向东",
+    "map_xy": null,
+    "facing_deg": 0,
+    "fov_deg": 80
+  },
+  "rnd_08": {
+    "plan_id": "",
+    "desc": "L2北侧走廊东东向西",
+    "map_xy": null,
+    "facing_deg": 0,
+    "fov_deg": 80
+  },
+  "rnd_10": {
+    "plan_id": "",
+    "desc": "L2南侧走廊西西向东",
+    "map_xy": null,
+    "facing_deg": 0,
+    "fov_deg": 80
+  },
+  "rnd_11": {
+    "plan_id": "",
+    "desc": "L2西侧走廊南北向南",
+    "map_xy": null,
+    "facing_deg": 0,
+    "fov_deg": 80
+  },
+  "rnd_12": {
+    "plan_id": "",
+    "desc": "L2西侧走廊南南向北",
+    "map_xy": null,
+    "facing_deg": 0,
+    "fov_deg": 80
+  },
+  "rnd_16": {
+    "plan_id": "",
+    "desc": "L2高性能机房02通道南西向东",
+    "map_xy": null,
+    "facing_deg": 0,
+    "fov_deg": 80
+  },
+  "rnd_17": {
+    "plan_id": "",
+    "desc": "L2高性能机房02通道西北向南",
+    "map_xy": null,
+    "facing_deg": 0,
+    "fov_deg": 80
+  },
+  "rnd_18": {
+    "plan_id": "",
+    "desc": "L2高性能机房02通道西南向北",
+    "map_xy": null,
+    "facing_deg": 0,
+    "fov_deg": 80
+  },
+  "rnd_19": {
+    "plan_id": "",
+    "desc": "L2高性能机房04通道东南向北",
+    "map_xy": null,
+    "facing_deg": 0,
+    "fov_deg": 80
+  },
+  "rnd_21": {
+    "plan_id": "",
+    "desc": "L2高性能机房04通道西南向北",
+    "map_xy": null,
+    "facing_deg": 0,
+    "fov_deg": 80
+  },
+  "rnd_22": {
+    "plan_id": "",
+    "desc": "L2高性能机房04通道西南向北",
+    "map_xy": null,
+    "facing_deg": 0,
+    "fov_deg": 80
+  }
+}

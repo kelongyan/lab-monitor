@@ -27,6 +27,7 @@ from src.frame_hub import FrameHub
 from src.notifier import build_notifier
 from src.calibrator import TransitCalibrator
 from src.pipeline import CameraPipeline, redact_source
+from src.floorplan import build_floorplan
 from src.db import db
 import server as web_server
 
@@ -369,11 +370,23 @@ def main(
 
     # ---- 启动 Web 服务器 ----
     if web:
+        # 平面图点位映射（轨迹回放用）。文件缺失/字段非法时降级为空映射，
+        # 只影响「路线可视化」这一个增强功能，不阻塞主流程启动。
+        try:
+            floorplan = build_floorplan()
+            logger.info(
+                "平面图点位加载完成：%d 路已标注 / %d 路",
+                floorplan.mapped_count(), floorplan.total_count(),
+            )
+        except Exception:
+            logger.exception("平面图点位加载失败，路线可视化功能不可用")
+            floorplan = None
         web_server.init_server(
             frame_hub, broadcaster, identity_store, calibrator,
             pipelines=pipelines, topology=topology,
             mjpeg_fps=perf["mjpeg_fps"],
             shutdown_callback=request_shutdown,
+            floorplan=floorplan,
         )
         try:
             web_server.start_server_thread(host=web_host, port=web_port)
