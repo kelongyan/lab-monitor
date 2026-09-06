@@ -42,8 +42,22 @@ if (-not (Test-Path -LiteralPath $pythonPath)) {
 $pidFile = Join-Path $outputsDir "server.pid"
 Remove-Item -LiteralPath $pidFile -Force -ErrorAction SilentlyContinue
 
+# Clash 等代理工具可能同时注入大小写两套 http_proxy / HTTP_PROXY。
+# Windows 环境变量本不区分大小写，但 .NET 的 ProcessStartInfo.Environment
+# 字典区分大小写——Start-Process 构建子进程环境时直接抛“已添加项...http_proxy”
+# （ArgumentException）。先清掉小写变体，保留大写（Python/urllib 认大写）。
+Remove-Item Env:http_proxy  -ErrorAction SilentlyContinue
+Remove-Item Env:https_proxy -ErrorAction SilentlyContinue
+
 # 使用 Start-Process 在后台独立启动 Python 进程，stdout/stderr 兜底重定向到 outputs/
-$process = Start-Process -FilePath $pythonPath -ArgumentList "main.py" -WorkingDirectory $scriptDir -RedirectStandardOutput $stdoutLogFile -RedirectStandardError $stderrLogFile -WindowStyle Hidden -PassThru
+try {
+    $process = Start-Process -FilePath $pythonPath -ArgumentList "main.py" -WorkingDirectory $scriptDir -RedirectStandardOutput $stdoutLogFile -RedirectStandardError $stderrLogFile -WindowStyle Hidden -PassThru
+} catch {
+    Write-Host "[X] Start-Process 启动失败: $($_.Exception.Message)" -ForegroundColor Red
+    Write-Host "[i] 若报 '已添加项...http_proxy/HTTP_PROXY'：先执行下方命令清掉重复代理变量再重试：" -ForegroundColor Yellow
+    Write-Host "    Remove-Item Env:http_proxy,Env:https_proxy -ErrorAction SilentlyContinue" -ForegroundColor Gray
+    exit 1
+}
 
 $headers = @{}
 if ($env:LAB_MONITOR_USERNAME -and $env:LAB_MONITOR_PASSWORD) {
