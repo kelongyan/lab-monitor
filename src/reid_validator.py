@@ -57,11 +57,17 @@ class ReIDValidator:
         track_id: int,
         gallery: list[tuple[str, np.ndarray]],
         metrics=None,
+        prepare=None,
     ) -> str | None:
         """
         尝试确认身份
         - 已确认：直接返回 global_id
         - 未确认：用平均特征做匹配，连续 confirm_frames 帧一致则确认
+
+        `prepare`：把平均特征变换到与 `gallery` 相同的坐标系，**必须**与 gallery 配套。
+        当前用于"减去公共分量"—— gallery 若是 `build_match_context().gallery`，
+        就必须传 `context.prepare`，否则 query 与 gallery 不在同一坐标系，
+        相似度全错却不报错。默认 None 表示不做变换（单测与旧调用方行为不变）。
         """
         # 已确认过直接返回
         if track_id in self._confirmed:
@@ -77,6 +83,9 @@ class ReIDValidator:
         if norm < 1e-8:
             return None
         avg_feat /= norm
+
+        if prepare is not None:
+            avg_feat = prepare(avg_feat)
 
         t0 = time.perf_counter()
         detail = match_feature_detailed(avg_feat, gallery, threshold=self._threshold)

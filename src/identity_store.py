@@ -31,6 +31,26 @@ _FEATURE_FLUSH_INTERVAL_SECONDS = 30.0
 # 需要靠阈值标定解决，不能一概报警。
 _COLLAPSE_SIMILARITY_ALERT = 0.999
 _COLLAPSE_WARN_INTERVAL = 60.0   # 告警日志节流间隔（秒）
+
+# 公共分量中心化（2026-09-12 新增，这是 ReID 识别失效的真正修复）
+# ---------------------------------------------------------------------------
+# 实测（scripts/diagnose_ema_collapse.py --center）：OSNet 无论用 ImageNet 还是
+# ReID 度量学习权重，输出的单位特征都和一个**全局方向**高度共线 ——
+# 全体特征的均值向量范数高达 0.80~0.83（随机方向的期望只有 ~0.1）。
+# 这个分量对区分身份毫无贡献，却让跨身份余弦虚高到 0.50~0.73：
+#     imagenet 原始   p50 0.4961 / 越过阈值 0.75 的异人对 21.4%
+#     减去公共分量后  p50 -0.1021 / 越过阈值 0.0%
+# 聚合（EMA 或窗口均值）之所以"有害"，只是因为它把这个残余的判别余量进一步挤掉
+# （聚合后 p50 升到 0.73、越阈 46.4%）；**病根是公共分量，不是聚合方式**。
+# 因此修复放在匹配路径上：query 与 gallery 统一减去中心向量再归一化。
+# 中心取全体已注册特征（主特征 + feature_bank）的均值，零额外状态、重启后自动可得。
+#
+# 两个护栏是必需的：
+#   · 身份太少时（特征数 < 下限）中心不可靠，且减完可能让范数趋零 —— 不启用
+#   · 中心向量范数太小时说明本来就没有公共分量 —— 不启用
+# 不启用时行为与改造前完全一致，因此冷启动是安全的。
+_CENTER_MIN_FEATURES = 8
+_CENTER_MIN_NORM = 0.35
 logger = logging.getLogger("identity_store")
 
 
@@ -118,6 +138,30 @@ class IdentityResolution:
         return self.status == "created"
 
 
+@dataclass(frozen=True)
+class MatchContext:
+    """
+    一次匹配所需的全部输入，**原子取得**。
+
+    为什么打包成一个对象而不是两个方法：中心向量与 gallery 必须严格配套 ——
+    gallery 里的每一行都是"减去该中心后归一化"的结果，query 若用另一个
+    （哪怕只是稍旧一点的）中心处理，两者就不在同一坐标系，相似度全错且**不会报错**。
+    若拆成 `get_match_gallery()` + `get_center()` 两次调用，中间另一个线程注册了
+    新身份就会让中心变化，从而制造这种静默错配。打包返回即从 API 上排除该可能。
+    """
+
+    gallery: list[tuple[str, np.ndarray]]
+    center: np.ndarray | None
+
+    def prepare(self, vector: np.ndarray) -> np.ndarray:
+        """把原始 query 特征变换到与 gallery 相同的坐标系。"""
+        return IdentityStore._prepare_for_match(vector, self.center)
+
+    @property
+    def centering_enabled(self) -> bool:
+        return self.center is not None
+
+
 class IdentityStore:
     """线程安全的全局人员身份库"""
 
@@ -138,6 +182,11 @@ class IdentityStore:
         # 特征塌缩护栏计数（见 _COLLAPSE_SIMILARITY_ALERT）
         self._collapse_warnings = 0
         self._collapse_warned_at = 0.0
+        # 公共分量中心（见 _feature_center_locked）与其缓存
+        self._center_cache: np.ndarray | None = None
+        self._center_cache_key = -1
+        self._center_uses_centering = False
+        self._gallery_version = 0
         self.metrics = ReIDMetrics()
         if self._database is not None:
             self._restore()
@@ -208,6 +257,7 @@ class IdentityStore:
                 )
         if restored:
             logger.info("已从 SQLite 恢复 %d 个 ReID 身份", restored)
+            self._invalidate_center_locked()
         if space_mismatch:
             logger.warning(
                 "跳过 %d 个身份：特征空间与当前 %r 不一致（当前库共 %d 条）。"
@@ -323,6 +373,7 @@ class IdentityStore:
         )
         self._records.pop(victim.global_id, None)
         self._feature_flush_state.pop(victim.global_id, None)
+        self._invalidate_center_locked()
         return [victim.global_id]
 
     def _delete_persisted(self, global_ids: list[str]) -> None:
@@ -334,34 +385,120 @@ class IdentityStore:
     # ------------------------------------------------------------------ #
 
     def get_gallery(self) -> list[tuple[str, np.ndarray]]:
-        """返回所有身份的 (global_id, 主特征) 列表 —— 严格一身份一行。
+        """返回所有身份的 (global_id, 主特征) 列表 —— 严格一身份一行，**未中心化**。
 
-        注意：主特征是 EMA 滑动平均，会指数抹平身份特异残差
-        （见 `scripts/diagnose_ema_collapse.py`）。**匹配请用 `get_match_gallery()`**，
-        它会把每个身份的 feature_bank 一起展开，由 `match_feature_detailed()`
-        按身份取 max，从而绕开 EMA 塌缩。本方法保留给"一身份一向量"的展示型用途。
+        注意：主特征是 EMA 滑动平均，会指数抹平身份特异残差；而且未减去公共分量。
+        **匹配请用 `get_match_gallery()`**，它展开 feature_bank 并做中心化。
+        本方法保留给"一身份一向量"的展示型用途。
         """
         with self._lock:
             return [(gid, rec.feature.copy()) for gid, rec in self._records.items()]
 
+    # ------------------------------------------------------------------ #
+    # 公共分量中心化（匹配路径专用）                                          #
+    # ------------------------------------------------------------------ #
+
+    def _invalidate_center_locked(self) -> None:
+        """
+        标记公共分量中心缓存失效。必须在持有 self._lock 时、且**任何**会改动
+        `_records` 或任一 `feature_bank` / 主特征之后调用。
+
+        中心是全体特征的均值，只要有一个身份新增/淘汰/特征更新，它就变了。
+        漏掉一处会导致 query 用新中心、gallery 用旧中心 —— 两者不在同一坐标系，
+        相似度全错且**不会报错**，是本模块最难排查的一类缺陷。
+        """
+        self._gallery_version += 1
+
+    def _feature_center_locked(self) -> np.ndarray | None:
+        """
+        计算/取缓存的全特征均值向量（公共分量方向）。必须在持有 self._lock 时调用。
+
+        返回 None 表示"不启用中心化"（身份太少或本来就没有公共分量），
+        此时匹配行为与改造前一致 —— 冷启动安全。
+        """
+        if self._center_cache_key == self._gallery_version and self._center_cache is not None:
+            return self._center_cache
+        if self._center_cache_key == self._gallery_version and self._center_cache is None:
+            return None
+
+        vectors = [
+            vec for rec in self._records.values()
+            for vec in (rec.feature, *rec.feature_bank)
+        ]
+        center: np.ndarray | None = None
+        if len(vectors) >= _CENTER_MIN_FEATURES:
+            candidate = np.mean(np.stack(vectors), axis=0)
+            if float(np.linalg.norm(candidate)) >= _CENTER_MIN_NORM:
+                center = candidate.astype(np.float32)
+
+        if center is None and self._center_uses_centering:
+            logger.warning(
+                "ReID 公共分量中心化已停用（有效特征 %d 个，低于下限 %d，或中心范数不足）—— "
+                "跨相机匹配退回改造前行为，准确率会明显下降",
+                len(vectors), _CENTER_MIN_FEATURES,
+            )
+        elif center is not None and not self._center_uses_centering:
+            logger.info(
+                "ReID 公共分量中心化已启用：中心范数 %.4f（%d 个特征参与估计）",
+                float(np.linalg.norm(center)), len(vectors),
+            )
+        self._center_uses_centering = center is not None
+        self._center_cache = center
+        self._center_cache_key = self._gallery_version
+        return center
+
+    @staticmethod
+    def _prepare_for_match(vector: np.ndarray, center: np.ndarray | None) -> np.ndarray:
+        """减去公共分量并重新 L2 归一化。center 为 None 时退化为普通归一化。"""
+        vector = np.asarray(vector, dtype=np.float32)
+        if center is not None:
+            vector = vector - center
+        norm = float(np.linalg.norm(vector))
+        if norm <= 1e-8:
+            # 减完趋零（该向量几乎就是公共分量本身）→ 退回原方向，避免产生 NaN
+            fallback = np.asarray(vector, dtype=np.float32)
+            fallback_norm = float(np.linalg.norm(fallback))
+            return fallback / fallback_norm if fallback_norm > 1e-8 else fallback
+        return vector / norm
+
+    def _build_match_context_locked(self) -> MatchContext:
+        """
+        构造匹配上下文（已中心化 + 已归一化的 gallery，连同所用中心）。
+        必须在持有 self._lock 时调用。
+
+        **单一实现点**：`build_match_context()` 与 `register_if_new()` 都用它，
+        避免"注册时的 gallery 与匹配时的 gallery 不一致"这种极难发现的缺陷。
+        """
+        center = self._feature_center_locked()
+        gallery = [
+            (gid, self._prepare_for_match(vec, center))
+            for gid, rec in self._records.items()
+            for vec in (rec.feature, *rec.feature_bank)
+        ]
+        return MatchContext(gallery=gallery, center=center)
+
+    def build_match_context(self) -> MatchContext:
+        """
+        取得一次匹配的完整上下文。调用方必须用返回的 `context.prepare()` 处理 query，
+        不要自己拼装 —— 见 `MatchContext` 的说明。
+        """
+        with self._lock:
+            return self._build_match_context_locked()
+
     def get_match_gallery(self) -> list[tuple[str, np.ndarray]]:
         """
-        返回用于匹配的 (global_id, feature) 行 —— 同一身份可能多行。
+        匹配用 gallery 的便捷访问（已中心化）。**返回的行必须与同一个中心配套使用**，
+        因此实际匹配请优先用 `build_match_context()`，它把 gallery 与中心原子返回。
 
-        每行是主特征或 feature_bank 中的一个姿态特征。`feature_bank` 存的是**原始**
-        特征且带多样性约束（与已有 bank 相似度 <0.92 才入池），因此不受 EMA 塌缩影响；
-        取 max 可显著提升同一人跨姿态/跨镜头的召回。
+        每行 = 主特征或 feature_bank 中的一个姿态特征，都减去了公共分量中心并
+        重新归一化（见 `_feature_center_locked`，这是识别能否工作的关键）。
 
         规模提示：行数 = 身份数 × (1 + bank 大小) ≤ 6 倍身份数。当前库只有几十个身份，
         开销可忽略；若将来 `LAB_MONITOR_MAX_IDENTITIES` 调到万级，需要改为
         预建特征矩阵或走 ANN 索引，否则每次匹配都要重算 6 万行。
         """
         with self._lock:
-            return [
-                (gid, feat.copy())
-                for gid, rec in self._records.items()
-                for feat in [rec.feature, *rec.feature_bank]
-            ]
+            return self._build_match_context_locked().gallery
 
     def get_full_gallery(self) -> list[tuple[str, list[np.ndarray]]]:
         """返回所有身份及其多姿态特征向量库，用于高精度多模态比对"""
@@ -405,6 +542,7 @@ class IdentityStore:
             )
             self._records[gid] = rec
             self._feature_flush_state[gid] = [0, time.time()]
+            self._invalidate_center_locked()
             payload = self._persist_payload(rec)
         self._write_identity_row(payload)
         self._delete_persisted(evicted)
@@ -430,20 +568,12 @@ class IdentityStore:
             if self._feature_dim is not None and feat_copy.size != self._feature_dim:
                 return IdentityResolution(global_id=None, status="invalid")
             if self._records:
-                # 展开每个身份的 [主特征, *feature_bank]，交给 match_feature_detailed
-                # 按身份去重（取 max）后再做阈值/Ratio 判定。
-                # 这里的去重是**语义要求**而不是优化：不去重时同一身份会同时占据
-                # best 与 second，Ratio Test 必然判"歧义"→ 调用方新建身份 →
-                # 身份表无限膨胀。库内现存的 45 个身份里有 27 个分属 7 组、
-                # 每组特征字节完全相同，就是这么长出来的。
-                gallery = [
-                    (global_id, feat)
-                    for global_id, record in self._records.items()
-                    for feat in [record.feature, *record.feature_bank]
-                ]
+                # gallery 与 query 必须用**同一个**中心向量处理，否则两者不在同一
+                # 坐标系，相似度没有意义 —— MatchContext 把两者原子打包。
+                context = self._build_match_context_locked()
                 detail = match_feature_detailed(
-                    feat_copy,
-                    gallery,
+                    context.prepare(feat_copy),
+                    context.gallery,
                     threshold=threshold,
                     ratio=ratio,
                 )
@@ -475,10 +605,12 @@ class IdentityStore:
                         logger.error(
                             "ReID 特征塌缩疑似：查询与已有身份相似度 %.4f（≥%.3f）"
                             "却被判为歧义，无法归并。累计 %d 次。"
-                            "根因见 scripts/diagnose_ema_collapse.py（主特征的 EMA "
-                            "滑动平均抹平身份特异残差）。修复方向见 "
-                            "docs/TODO_2026-09-12_worklist.md 项 1.6。"
-                            "在该问题解决前，身份识别结果不应采信。",
+                            "这个现象说明特征空间无法区分个体 —— 最常见的成因是"
+                            "**未减去的公共分量**（全体特征均值范数可达 0.8，"
+                            "远超随机方向的 ~0.1），其次是聚合把身份余量压掉。"
+                            "诊断见 scripts/diagnose_ema_collapse.py，"
+                            "修复方向见 docs/TODO_2026-09-12_worklist.md 项 1.6。"
+                            "在中心化生效前，身份识别结果不应采信。",
                             detail.best_sim, _COLLAPSE_SIMILARITY_ALERT,
                             self._collapse_warnings,
                         )
@@ -503,6 +635,7 @@ class IdentityStore:
             self._records[gid] = rec
             self._feature_dim = int(feat_copy.size)
             self._feature_flush_state[gid] = [0, time.time()]
+            self._invalidate_center_locked()
             payload = self._persist_payload(rec)
         self._write_identity_row(payload)
         self._delete_persisted(evicted)
@@ -554,6 +687,8 @@ class IdentityStore:
 
             rec.last_camera = camera_id
             rec.last_seen = time.time()
+            # 主特征与 feature_bank 都可能刚被改动 → 公共分量中心缓存失效
+            self._invalidate_center_locked()
             rec.appearances.append({
                 "camera": camera_id,
                 "time": rec.last_seen,
@@ -599,8 +734,12 @@ class IdentityStore:
         with self._lock:
             g_size = len(self._records)
             collapse = self._collapse_warnings
+            center = self._feature_center_locked()
+            center_norm = round(float(np.linalg.norm(center)), 4) if center is not None else 0.0
         summary = self.metrics.get_summary(gallery_size=g_size)
-        # 塌缩告警次数外露到 /api/metrics/reid 与 /api/system/metrics：
-        # 这个失败模式此前完全不可观测（只能靠人肉发现"身份数在慢慢变多"）。
+        # 塌缩告警次数与中心化状态外露到 /api/metrics/reid 与 /api/system/metrics：
+        # 这两个失败模式此前都完全不可观测（只能靠人肉发现"身份数在慢慢变多"）。
         summary["collapse_warnings"] = collapse
+        summary["center_enabled"] = center is not None
+        summary["center_norm"] = center_norm
         return summary

@@ -496,10 +496,16 @@ class CameraPipeline(threading.Thread):
             gid = self._track_to_global.get(tid)
             if gid is None:
                 # 用多帧平均特征做确认匹配
-                # 用展开后的 gallery（主特征 + feature_bank）：bank 存的是原始特征，
-                # 不受主特征 EMA 滑动平均的塌缩影响，同人跨姿态召回明显更好。
-                gallery = self.store.get_match_gallery()
-                confirmed_gid = self._validator.get_confirmed_match(tid, gallery, metrics=self.store.metrics)
+                # 匹配上下文把「已中心化的 gallery」与「所用中心」原子打包返回：
+                # 主特征是 EMA 滑动平均、且所有特征共享一个巨大的公共分量
+                # （均值范数 ~0.8），不减掉它跨身份余弦会虚高到 0.5~0.7、
+                # 越阈比例 21~46%（实测见 scripts/diagnose_ema_collapse.py）。
+                # query 必须用**同一个**中心处理，所以只能从 context 里取。
+                context = self.store.build_match_context()
+                confirmed_gid = self._validator.get_confirmed_match(
+                    tid, context.gallery, metrics=self.store.metrics,
+                    prepare=context.prepare,
+                )
 
                 if confirmed_gid:
                     gid = confirmed_gid

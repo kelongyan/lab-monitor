@@ -89,6 +89,8 @@ _ALERT_EXPORT_MAX_ROWS = 50000
 # IdentityStore 未注入时的空指标。字段必须与 IdentityStore.get_metrics() 的返回**同构**，
 # 否则前端在"服务刚起、store 还没就绪"的窗口里会读到缺字段的 payload 而报错。
 # collapse_warnings 是 ReID 特征塌缩护栏的计数（见 src/identity_store.py）。
+# center_enabled / center_norm 是公共分量中心化的状态 —— 它是识别能否工作的关键
+# （关掉中心化时跨身份余弦会从 ~-0.2 涨回 ~+0.7，实测见 scripts/diagnose_ema_collapse.py）。
 _EMPTY_REID_METRICS: dict = {
     "gallery_size": 0,
     "total_searches": 0,
@@ -100,6 +102,8 @@ _EMPTY_REID_METRICS: dict = {
     "avg_latency_ms": 0.0,
     "avg_feature_quality": 0.0,
     "collapse_warnings": 0,
+    "center_enabled": False,
+    "center_norm": 0.0,
 }
 
 
