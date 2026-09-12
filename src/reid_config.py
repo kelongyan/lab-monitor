@@ -43,7 +43,15 @@ logger = logging.getLogger("reid_config")
 # 未标定前的保守默认值。**这不是一个"已验证"的值**，只是保持与历史行为一致，
 # 避免换权重的同时又改阈值、两个变量纠缠在一起无法归因。
 # 真实工作点由 scripts/tune_reid_threshold.py 在标注集上扫出来后回填。
-_DEFAULT_THRESHOLD = 0.75
+#
+# 2026-09-12 已完成首次标定（scripts/build_label_set.py 自动标注 + tune_reid_threshold.py）：
+#   正样本 = 同相机相邻采样帧(0.4s) IoU>=0.25 的检测框（运动学约束，无需人工）；
+#   负样本 = 同帧不重叠框 + 重建库 22 身份的跨身份对（226 对，生产语义）。
+#   在负样本误报率 <= 5% 的约束下 F1 最大 → **阈值 0.68**（msmt17 与 market1501 相同）。
+#   注意方向与直觉相反：是**下调**而非上调 —— 中心化把异人分布的 p95 压到 0.673，
+#   0.75 会漏掉大量同人匹配（同人对 p50 只有 0.69~0.75）。
+#   指标：market1501 在 0.68 处 P=0.913 / R=0.639 / F1=0.752；msmt17 P=0.899 / R=0.544 / F1=0.678。
+_DEFAULT_THRESHOLD = 0.68
 _DEFAULT_RATIO = 0.85
 
 
@@ -112,22 +120,25 @@ class ReIDWeight:
         return CHECKPOINT_DIR / self.file_name
 
 
-#: 可选的 ReID 度量学习权重。指标取自 torchreid `docs/MODEL_ZOO.md` 的
+#: 可选的 ReID 度量学习权重。公开指标取自 torchreid `docs/MODEL_ZOO.md` 的
 #: Same-domain ReID 表（osnet_x0_25 行，rank-1 / mAP）。
 #:
-#: 为何默认 msmt17 而不是数字更漂亮的 market1501：msmt17 在**自己域上**数字低
-#: （61.4）是因为 MSMT17 本身更难（15 台相机、跨 4 天、室内外混合），不代表模型更差；
-#: 数据集规模与多样性更大通常意味着对未见域泛化更好。
-#: 本项目是固定室内走廊，与 Market1501（校园街道式取景）成像风格更接近，
-#: 因此这两个权重谁更合适**必须实测**，不能在纸面上拍定 ——
-#: 由 `scripts/tune_reid_threshold.py` 在同一标注集上对比后定稿。
+#: **2026-09-12 已实测选定 market1501**。在自动标注集上
+#: （`scripts/build_label_set.py`：同相机相邻采样帧 IoU≥0.25 = 同一人；
+#:   重建库 22 身份的跨身份对 = 异人），负样本误报率 ≤ 5% 约束下：
+#:     market1501  阈值 0.68  P=0.913  R=0.639  F1=0.752
+#:     msmt17      阈值 0.68  P=0.899  R=0.544  F1=0.678
+#: 相同阈值与误报率下 market1501 召回明显更高。公开指标里"msmt17 域内数字低
+#: 是因为数据集更难"的说法在本项目上不成立 —— 本项目是固定室内走廊，
+#: 与 Market1501（校园街道式取景）成像风格更接近。
+#: 明细见 `outputs/reports/reid_threshold_sweep.json`。
 REID_WEIGHTS: dict[str, ReIDWeight] = {
     "market1501": ReIDWeight(
         key="market1501",
         file_name="osnet_x0_25_market1501.pth",
         dataset="market1501",
         num_classes=751,
-        benchmark="Market1501 Rank-1 91.2 / mAP 75.0",
+        benchmark="Market1501 Rank-1 91.2 / mAP 75.0（本项目实测 F1=0.752，优于 msmt17）",
         drive_id="1z1UghYvOTtjx7kEoRfmqSMu-z62J6MAj",
     ),
     "msmt17": ReIDWeight(
@@ -135,7 +146,7 @@ REID_WEIGHTS: dict[str, ReIDWeight] = {
         file_name="osnet_x0_25_msmt17.pth",
         dataset="msmt17",
         num_classes=1041,
-        benchmark="MSMT17 Rank-1 61.4 / mAP 29.5（域内）",
+        benchmark="MSMT17 Rank-1 61.4 / mAP 29.5（域内；本项目实测 F1=0.678）",
         drive_id="1sSwXSUlj4_tHZequ_iZ8w_Jh0VaRQMqF",
     ),
     "dukemtmc": ReIDWeight(
@@ -169,7 +180,7 @@ DATASET_BY_CLASSES: dict[int, str] = {
     for weight in (*REID_WEIGHTS.values(), IMAGENET_WEIGHT)
 }
 
-DEFAULT_REID_WEIGHTS: str = os.getenv("LAB_MONITOR_REID_WEIGHTS", "msmt17").strip().lower()
+DEFAULT_REID_WEIGHTS: str = os.getenv("LAB_MONITOR_REID_WEIGHTS", "market1501").strip().lower()
 ALLOW_IMAGENET_FALLBACK: bool = os.getenv(
     "LAB_MONITOR_ALLOW_IMAGENET_FALLBACK", "1"
 ).strip().lower() not in {"0", "false", "no"}
@@ -188,7 +199,7 @@ def get_reid_weight(key: str | None = None) -> ReIDWeight:
             "未知的 ReID 权重 %r（可选：%s），改用 %s",
             name, "/".join(REID_WEIGHTS), DEFAULT_REID_WEIGHTS,
         )
-        weight = REID_WEIGHTS.get(DEFAULT_REID_WEIGHTS) or REID_WEIGHTS["msmt17"]
+        weight = REID_WEIGHTS.get(DEFAULT_REID_WEIGHTS) or REID_WEIGHTS["market1501"]
     return weight
 
 

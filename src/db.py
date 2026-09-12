@@ -369,6 +369,30 @@ class Database:
             )
             conn.commit()
 
+    def merge_identities(self, keep_id: str, drop_id: str) -> bool:
+        """
+        身份归并的落库部分（由 IdentityStore.consolidate() 调用）：
+        1. 把被并方的全部轨迹行改挂到主身份 —— 否则轨迹还留在旧 gid 下，检索会断；
+        2. 删除被并方的 identities 行。
+
+        主身份的特征 / 计数由调用方随后用 save_identity() 整行覆盖，
+        这里只负责"不能留下孤儿数据"。
+        """
+        if not keep_id or not drop_id or keep_id == drop_id:
+            return False
+        try:
+            with self._get_conn() as conn:
+                conn.execute(
+                    "UPDATE identity_appearances SET global_id = ? WHERE global_id = ?",
+                    (keep_id, drop_id),
+                )
+                conn.execute("DELETE FROM identities WHERE global_id = ?", (drop_id,))
+                conn.commit()
+            return True
+        except Exception as e:
+            logger.error("归并身份失败 %s <- %s: %s", keep_id, drop_id, e)
+            return False
+
     def save_identity(
         self,
         global_id: str,

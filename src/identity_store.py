@@ -7,6 +7,8 @@ import threading
 import uuid
 import time
 import logging
+from itertools import combinations
+
 import numpy as np
 from collections import deque
 from dataclasses import dataclass, field
@@ -281,6 +283,116 @@ class IdentityStore:
             last_camera=rec.last_camera,
             last_seen=rec.last_seen,
         )
+
+    # ------------------------------------------------------------------ #
+    # 身份归并（consolidation）                                              #
+    # ------------------------------------------------------------------ #
+
+    def consolidation_candidates(
+        self,
+        threshold: float = REID_MATCH_THRESHOLD,
+    ) -> list[dict]:
+        """
+        找出"中心化相似度 ≥ threshold"的身份对 —— 这些几乎必然是同一个人
+        被重复注册（见 worklist 1.8：冷启动窗口里中心化尚未生效，同一个人
+        在不同相机/不同播放轮次各自注册）。
+
+        只报告、不修改；真正合并走 `consolidate()`。返回按相似度降序排列。
+        """
+        with self._lock:
+            rows = self._bank_rows_locked()
+        candidates = []
+        for gi, gj in combinations(sorted(rows), 2):
+            sim = max(float(p @ q) for p in rows[gi] for q in rows[gj])
+            if sim >= threshold:
+                candidates.append({"keep": gi, "merge": gj,
+                                   "similarity": round(sim, 4)})
+        candidates.sort(key=lambda item: -item["similarity"])
+        return candidates
+
+    def consolidate(
+        self,
+        threshold: float = REID_MATCH_THRESHOLD,
+        dry_run: bool = False,
+    ) -> dict:
+        """
+        归并"中心化相似度 ≥ threshold"的身份。返回统计与合并明细。
+
+        合并规则：
+        - 保留 `total_appearances` 较多的一方作为主身份（轨迹更完整）；
+          相同时按 gid 字典序，保证幂等（重复执行结果一致）；
+        - feature_bank 取并集去重（用未中心化的原始向量比对，≥0.98 视为同一条）；
+        - appearances 合并后按时间排序、截断到 _MAX_APPEARANCES；
+        - **数据库侧把 identity_appearances 的 global_id 全部改指向主身份**，
+          再删除被并方的 identities 行 —— 否则轨迹还挂在旧 gid 下，检索会断。
+
+        `dry_run=True` 只返回候选清单，不做任何修改。
+        """
+        if dry_run:
+            return {"merged": [], "merged_count": 0, "dry_run": True,
+                    "candidates": self.consolidation_candidates(threshold)}
+
+        merged: list[dict] = []
+        with self._lock:
+            while True:
+                rows = self._bank_rows_locked()
+                gids = sorted(rows)
+                best = None
+                for gi, gj in combinations(gids, 2):
+                    sim = max(float(p @ q) for p in rows[gi] for q in rows[gj])
+                    if sim < threshold:
+                        continue
+                    keep, drop = sorted(
+                        (gi, gj),
+                        key=lambda gid: (-self._records[gid].total_appearances, gid),
+                    )
+                    if best is None or sim > best["similarity"]:
+                        best = {"keep": keep, "merge": drop, "similarity": sim}
+                if best is None:
+                    break
+
+                keep_id, drop_id = best["keep"], best["merge"]
+                keep_rec, drop_rec = self._records[keep_id], self._records[drop_id]
+
+                for vector in drop_rec.feature_bank:
+                    if all(float(vector @ existing) < 0.98
+                           for existing in keep_rec.feature_bank):
+                        keep_rec.feature_bank.append(vector.copy())
+                del keep_rec.feature_bank[5:]
+
+                combined = sorted(
+                    [*keep_rec.appearances, *drop_rec.appearances],
+                    key=lambda entry: entry.get("time", 0.0),
+                )
+                keep_rec.appearances.clear()
+                keep_rec.appearances.extend(combined[-_MAX_APPEARANCES:])
+                keep_rec.total_appearances += drop_rec.total_appearances
+                keep_rec.last_seen = max(keep_rec.last_seen, drop_rec.last_seen)
+                if drop_rec.last_seen >= keep_rec.last_seen:
+                    keep_rec.last_camera = drop_rec.last_camera
+
+                self._records.pop(drop_id, None)
+                self._feature_flush_state.pop(drop_id, None)
+                self._invalidate_center_locked()
+
+                if self._database is not None:
+                    self._database.merge_identities(keep_id, drop_id)
+                self._write_identity_row(self._persist_payload(keep_rec))
+
+                merged.append({**best,
+                               "kept_appearances": keep_rec.total_appearances})
+
+        return {"merged": merged, "merged_count": len(merged),
+                "dry_run": False,
+                "candidates": self.consolidation_candidates(threshold)}
+
+    def _bank_rows_locked(self) -> dict[str, list[np.ndarray]]:
+        """每个身份的全部匹配向量（主特征 + feature_bank），已中心化。锁内调用。"""
+        context = self._build_match_context_locked()
+        rows: dict[str, list[np.ndarray]] = {gid: [] for gid in self._records}
+        for gid, vector in context.gallery:
+            rows[gid].append(vector)
+        return rows
 
     def _persist_payload(self, rec: PersonRecord) -> dict:
         """

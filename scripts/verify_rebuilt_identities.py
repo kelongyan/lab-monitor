@@ -78,6 +78,8 @@ def main() -> int:
     same.sort(reverse=True)
 
     def stats(pairs: list[tuple[float, str, str]]) -> str:
+        if not pairs:
+            return "（无样本）"
         values = np.array([p[0] for p in pairs])
         return (f"p50={np.percentile(values, 50):.3f} p95={np.percentile(values, 95):.3f} "
                 f"max={values.max():.3f} 越阈={int((values >= THRESHOLD).sum())} 对"
@@ -86,6 +88,10 @@ def main() -> int:
     print(f"\n中心化 + 重新归一化（与线上 _prepare_for_match 完全一致）:")
     print(f"  跨相机 {len(cross)} 对: {stats(cross)}")
     print(f"  同相机 {len(same)} 对: {stats(same)}")
+    if not cross:
+        print("  （归并后所有身份的 last_camera 相同 → 无跨相机对；"
+              "last_camera 在归并时会跟随较新的一方，所以这个划分仅供参考，"
+              "完整分布见下）")
 
     print("\n跨相机最相似 5 对（决定阈值上限，越低越好）:")
     for sim, gi, gj in cross[:5]:
@@ -93,6 +99,14 @@ def main() -> int:
               f"{gj}({recs[gj][0]},{recs[gj][1]})")
     print("同相机最相似 5 对（高相似 = 同一人被重复注册）:")
     for sim, gi, gj in same[:5]:
+        print(f"   {sim:.4f}  {gi} <-> {gj}")
+
+    # 全体两两分布（不按相机切分，避免归并后 last_camera 相同导致跨相机对为空）
+    overall = sorted(cross + same, reverse=True)
+    print(f"\n全体身份对 {len(overall)} 个: {stats(overall)}")
+    over_all = [p for p in overall if p[0] >= THRESHOLD]
+    print(f"高于阈值 {THRESHOLD} 的对（即 live 匹配会视为同一人的身份对）: {len(over_all)} 个")
+    for sim, gi, gj in over_all[:8]:
         print(f"   {sim:.4f}  {gi} <-> {gj}")
 
     # 落库完整性
