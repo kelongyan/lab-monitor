@@ -256,5 +256,107 @@ class CollapseGuardrailTests(unittest.TestCase):
         )
 
 
+class CommonComponentCenteringTests(unittest.TestCase):
+    """
+    5. 公共分量中心化 —— ReID 识别失效的真正修复。
+
+    实测（scripts/diagnose_ema_collapse.py --center）：OSNet 输出的单位特征都和一个
+    全局方向高度共线（全体特征均值范数 0.80~0.83，随机方向的期望只有 ~0.1）。
+    跨身份余弦因此虚高：imagenet 原始 p50 0.4961、越阈 21.4%；
+    减去公共分量后 p50 -0.1021、越阈 0.0%。
+
+    本组用例构造"共享大公共分量 + 小身份余量"的特征，验证：
+      · 身份太少时**不启用**中心化（冷启动安全，行为与改造前一致）
+      · 身份够多时启用，且原先必然判歧义的查询能被正确归并
+      · 新增身份会让中心缓存失效（否则 query 与 gallery 不在同一坐标系）
+    """
+
+    DIM = 16
+
+    def _shared_component_features(self, count: int,
+                                   common: float = 0.9) -> list[np.ndarray]:
+        """第 i 个身份 = normalize(common * e0 + (1-common) * e_{i+1})。
+
+        所有身份共享 e0 这个主导方向 → 彼此余弦约 0.81，远超阈值 0.75；
+        身份特异的余量藏在 e_{i+1} 上。减掉公共分量后它们才互相正交。
+        """
+        basis = orthogonal_basis(count + 1, self.DIM)
+        common_dir = basis[0]
+        features = []
+        for index in range(count):
+            vec = common * common_dir + (1.0 - common) * basis[index + 1]
+            features.append((vec / np.linalg.norm(vec)).astype(np.float32))
+        return features
+
+    def test_centering_disabled_on_cold_start(self):
+        with temporary_store() as store:
+            for feature in self._shared_component_features(3):
+                store.register(feature)
+            metrics = store.get_metrics()
+            self.assertFalse(
+                metrics["center_enabled"],
+                "身份不足下限时应关闭中心化 —— 冷启动必须与改造前行为一致",
+            )
+            self.assertEqual(metrics["center_norm"], 0.0)
+
+    def test_centering_separates_identities_sharing_a_common_component(self):
+        with temporary_store() as store:
+            features = self._shared_component_features(8)
+            ids = [store.register(feature) for feature in features]
+            target_index = 3
+            query = features[target_index]
+
+            metrics = store.get_metrics()
+            self.assertTrue(metrics["center_enabled"], "身份足够时应启用中心化")
+            self.assertGreater(metrics["center_norm"], 0.35)
+
+            # 对照：不中心化时所有身份余弦都 ~0.99，Ratio Test 必然判歧义
+            raw_detail = match_feature_detailed(query, store.get_gallery())
+            self.assertIsNone(raw_detail.matched_id)
+            self.assertTrue(
+                raw_detail.is_ratio_blocked,
+                "未中心化时应当因歧义而被拒绝 —— 这正是线上'永远认不出'的成因",
+            )
+
+            # 中心化后应当命中正确身份。注意 query 必须用 context.prepare 变换，
+            # 与 gallery 用同一个中心 —— 这是 MatchContext 存在的意义。
+            context = store.build_match_context()
+            self.assertTrue(context.centering_enabled)
+            centered = match_feature_detailed(
+                context.prepare(query), context.gallery
+            )
+            self.assertEqual(
+                centered.matched_id, ids[target_index],
+                "减去公共分量后应能区分共享同一主导方向的各个身份",
+            )
+
+    def test_new_identity_invalidates_center_cache(self):
+        with temporary_store() as store:
+            for feature in self._shared_component_features(8):
+                store.register(feature)
+            before = store._feature_center_locked()
+            self.assertIsNotNone(before)
+
+            # 再注册一个方向差别很大的身份 → 中心必须重算
+            store.register(unit(0, 0, 0, 1, 1, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0))
+            after = store._feature_center_locked()
+            self.assertIsNotNone(after)
+            self.assertFalse(
+                np.allclose(before, after),
+                "新增身份后中心缓存必须失效，否则 query 与 gallery 不在同一坐标系",
+            )
+
+    def test_centering_survives_zero_norm_vectors(self):
+        """向量几乎就是公共分量本身时，减完会趋零 —— 不得产生 NaN。"""
+        with temporary_store() as store:
+            features = self._shared_component_features(8)
+            for feature in features:
+                store.register(feature)
+            center = store._feature_center_locked()
+            prepared = store._prepare_for_match(center.copy(), center)
+            self.assertFalse(np.isnan(prepared).any())
+            self.assertEqual(prepared.shape, center.shape)
+
+
 if __name__ == "__main__":
     unittest.main()
