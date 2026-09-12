@@ -6,20 +6,37 @@
 
 ---
 
-## 批次一 · 修特征层（阻塞项，5 项）
+## 批次一 · 修特征层（阻塞项，7 项）
 
-判定依据：实测 990 对异人特征余弦中位 0.984、99.8% 越过阈值 0.75；45 行身份只有 25 个唯一 `feature_blob`。**特征层不修，后面所有工作都是错的。**
+判定依据：实测 990 对异人特征余弦中位 0.984、99.8% 越过阈值 0.75。**特征层不修，后面所有工作都是错的。**
 
-- [ ] **1.1 换 ReID 度量学习权重** —— **S**
-  - 位置：`src/reid.py:77-131`（`ReIDExtractorOSNet`）
-  - 动作：`build_model(name="osnet_x0_25", num_classes=1000, pretrained=True)` 改为显式加载 ReID 权重（torchreid 支持 `model_path=`），用 `osnet_x0_25_msmt17.pth`（约 3MB）；`feature_space` 字符串改为 `osnet-x0.25-msmt17:512`
-  - 连带：`IdentityStore._restore()`（`src/identity_store.py:148`）按 `feature_space` 全等过滤 → 旧身份会被静默跳过。**必须在启动日志里显式打"跳过 N 个旧特征空间身份"**，否则运维会误判为数据丢失
-  - 验收：启动后 `/api/metrics/reid` 的 `gallery_size` 归零且不报错；日志有跳过计数；`feature_space` 端到端一致
+> ⚠️ **2026-09-12 实施中的重大修正**：开工后实测发现，根因**不止是权重**。
+> 库内那批塌缩特征不是模型吐出来的原始特征（本机实测原始特征均值范数 0.796 / 余弦 p50 0.629，
+> 并未塌缩），而是被 `update_appearance()` 的 EMA 滑动平均**加工后**的结果。
+> 因此 1.1（换权重）是**必要但不充分**的，真正的主因是新增的 **1.6（聚合方式）**。
+> 详见 1.4 与 1.6 两条。
 
-- [ ] **1.2 收拢散落 5 处的匹配阈值** —— **S**
-  - 现状：`0.75` 散落在 `reid.py:171`、`reid.py:208`、`reid_validator.py:31`、`identity_store.py:371`、`pipeline.py:138` 与 `:238`（共 6 处调用点，改一处无效）
-  - 动作：新建 `src/reid_config.py`，定义 `REID_MATCH_THRESHOLD` / `REID_RATIO_TEST`，支持 `LAB_MONITOR_REID_THRESHOLD` / `LAB_MONITOR_REID_RATIO` 环境变量覆盖（沿用 `main.py:_env_positive` 的"非法即回落 + 打 warning"口径）；全部调用点改为引用；启动时打印生效值
-  - 验收：`grep -rn "0\.75\|0\.85" src/` 只在 `reid_config.py` 命中；启动日志可见生效阈值
+- [x] **1.1 换 ReID 度量学习权重** —— **S**（2026-09-12 完成）
+  - 已做：新增 `src/reid_config.py` 作为权重注册表（数据集 → 文件名 → `feature_space` → 分类头维度 → drive id）；
+    `ReIDExtractorOSNet` 改为从本地 `.pth` 显式加载（`pretrained=False` + `load_state_dict`），
+    并用**分类头维度**校验数据集一致性（751=market1501 / 1041=msmt17 / 702=dukemtmc / 1000=imagenet）
+    —— 这是唯一能证明"这份权重训在哪个数据集上"的证据，参数量与张量数三项太接近、区分不了。
+  - 已做：新增 `scripts/fetch_reid_weights.py`（走 Clash 代理下载 torchreid 官方权重，
+    幂等 + 校验），`market1501`（Rank-1 91.2）与 `msmt17`（61.4 域内）两份已就位。
+    默认 `LAB_MONITOR_REID_WEIGHTS=msmt17`，可切 market1501；最终选谁由 1.3 的标注集实测决定。
+  - 已做：降级链改为**显式**：ReID 权重 → ImageNet OSNet（打 ERROR）→ ResNet50（打 ERROR），
+    不再静默；`LAB_MONITOR_ALLOW_IMAGENET_FALLBACK=0` 可切严格模式。
+  - ⚠️ **但本项单独不足以修复**：本机实测三种权重的原始特征质量差异很小
+    （见 `scripts/compare_reid_weights.py`），库内塌缩的主因是聚合方式，见 1.6。
+
+- [x] **1.2 收拢散落 6 处的匹配阈值** —— **S**（2026-09-12 完成）
+  - `src/reid_config.py` 提供 `REID_MATCH_THRESHOLD` / `REID_RATIO_TEST`，
+    支持 `LAB_MONITOR_REID_THRESHOLD` / `LAB_MONITOR_REID_RATIO` 覆盖（取值须在 (0,1) 开区间，
+    非法只回落默认值并打 warning）。
+  - 6 个调用点全部改为引用：`reid.py:171/208`、`reid_validator.py:31`、
+    `identity_store.py:371`、`pipeline.py:138/238`；`demo.py` 与两个诊断脚本也一并对齐。
+  - 验收已达成：`grep -rn "0\.75\|0\.85" src/` 只剩 `reid_config.py` 的常量定义与注释
+    （另有 `identity_store.py` 的 `base_alpha=0.85`，是滑动平均系数，与阈值无关）。
 
 - [ ] **1.3 建人工标注对 + 阈值标定（本批的验收基线）** —— **M**
   - 新建 `config/labeled/pairs.json`：正样本对（同人跨相机）、负样本对（异人）。可半自动挑候选：同一 global_id 跨相机的两帧 = 候选正；不同 global_id 同相机同时刻 = 候选负
@@ -27,12 +44,45 @@
   - 新建 `scripts/tune_reid_threshold.py`（扫 threshold × ratio，输出 P/R/F1 与 ROC，落 `outputs/reports/reid_threshold_sweep.csv`）
   - 验收：报告给出推荐工作点，且满足 **p95(异人余弦) < 选定阈值 < p5(同人余弦)**；这一步不做，任何"识别准确率"都无法证伪
 
-- [ ] **1.4 排查 `feature_blob` 重复写入** —— **M**
-  - 现状：45 行身份仅 25 个唯一 md5，7 组重复共 27 个身份，最严重一组 7 个身份共享同一份特征。已排除 `register()`/`register_if_new()`（锁内独立 uuid + `feature_bank` copy）与 `save_identity` 的 SQL 列序
-  - 排查方向：`identity_store.py:490-505` 的**锁外写库分支**，以及 `_persist_full()` 兜底路径（`:507`）是否用了过期引用
-  - 加护栏：`register_if_new()` 返回前，若新身份主特征与 gallery 中任一主特征 cosine ≥ 0.999 → 打 `ERROR` 日志并附两个 gid（不静默通过）
-  - 新建 `tests/test_identity_blob_unique.py`：并发注册 N 个互异特征，断言 `feature_blob` md5 唯一数 == N
-  - 验收：单测通过；重跑语料后 `scripts/diagnose_reid_degeneracy.py` 的唯一 md5 数 == 身份数
+- [x] **1.4 澄清 `feature_blob` 重复写入的性质 + 加护栏** —— **M**（2026-09-12 完成）
+  - **结论修正**：原判 "写库缺陷" 不成立。加查后的证据：27 个重复身份分属 7 组，
+    每组的 `total_appearances` 完全相同（230 / 236）、`last_camera` 全是 `rnd_19`、
+    创建时刻彼此相差约 33 分钟、特征**字节完全相同**。这是**同一段循环素材被反复
+    注册**留下的指纹，不是同一份数组被写进多行。已排除的路径：`register()` 在生产
+    路径中从不被调用（仅 demo 与测试用）、`register_if_new()` 锁内生成独立 uuid、
+    `save_identity` SQL 列序、`_persist_full()` 兜底。
+  - 已完成：`register_if_new()` 的**特征塌缩护栏** —— 查询与已有身份相似度 ≥ 0.999
+    却被判歧义时打 `ERROR`（60s 节流）并累加 `collapse_warnings`，该计数外露到
+    `/api/metrics/reid` 与 `/api/system/metrics`。此前这个失败模式完全不可观测。
+  - 已完成：`tests/test_reid_identity_integrity.py`（9 例）覆盖并发注册 blob 唯一性、
+    按身份去重语义、feature_bank 救回漂移主特征、护栏触发与指标同构。
+  - 遗留：精确的创建时点需当次运行日志才能定论，不在本批范围内。
+
+- [ ] **1.6 修特征聚合方式（EMA 抹平身份特异残差）** —— **L** ｜**新增，是本批最关键的一项**
+  - 证据：`scripts/diagnose_ema_collapse.py` —— 用**同一人**的时间连续样本跑真实更新式，
+    跨身份余弦 p50 随更新次数 0→5→20→50→200 变化为 **0.496 → 0.653 → 0.733 → 0.728 → 0.734**，
+    越过阈值 0.75 的异人对比例从 **21.4% → 46.4%**（饱和）。若把不同人混进同一身份
+    （匹配失败后的实际情形），p50 直接冲到 **0.95+**，与库内实测的 0.984 吻合。
+  - 机理：`update_appearance()` 的 `feature = alpha*feature + (1-alpha)*feat` + 重新归一化
+    是个带持续再注入的递归低通滤波 —— 公共分量每轮被新样本补回，**身份特异残差**
+    每轮只保留 `alpha` 倍且无来源补充，按 `alpha^k` 指数衰减（alpha=0.85 时 0.85^50 ≈ 3e-4）。
+  - 已做的一半：`match_feature_detailed()` 改为**按身份去重**后再做阈值/Ratio 判定，
+    主匹配路径（`pipeline`）改用 `get_match_gallery()` 展开 `feature_bank`
+    （bank 存的是原始特征且带多样性约束，天然不受 EMA 塌缩影响）。
+  - 待做：决定主特征本身的取舍 —— 候选方案（需在 1.3 的标注集上比）：
+    ① 主特征改为**有界窗口均值**（如最近 20 个原始特征，`deque(maxlen=20)`）替代无界 EMA；
+    ② 调低 `base_alpha`（0.85 → 0.5）缩短记忆；
+    ③ 干脆把 `feature_bank` 当唯一匹配依据，主特征只用于展示。
+  - 验收：库内任意两身份的余弦 p95 < 匹配阈值；`collapse_warnings` 长时间保持 0。
+
+- [ ] **1.7 顺带修掉的既有缺陷（本批发现）** —— **S**（已完成）
+  - `Database.close()` 原先只关**当前线程**的连接，22 个 pipeline 线程各自的连接会存活到
+    进程退出 → Windows 上库文件被占用（临时目录删不掉、备份后无法 rename，实测触发
+    `PermissionError: [WinError 32]`）。现改为登记全部线程连接并统一回收，
+    连接以 `check_same_thread=False` 建立（每条连接仍只被创建它的线程使用）。
+  - `tests/test_stream_manager_frontend.mjs` 的轮转周期断言停留在 `12000ms`，
+    而 `1a5b17b` 已把模块常量改成 `6000ms` —— 该用例自那次提交起**一直失败**却没人发现。
+    已改为镜像常量 `EXPECTED_ROTATE_MS` / `EXPECTED_FILL_MS` 并注明需与模块同步。
 
 - [ ] **1.5 全量重跑语料验证** —— **S**（约 30 分钟机时）
   - 动作：清空/备份 `outputs/lab_monitor.db` → 跑 `main.py` → 等 22 路走完一轮（67576 帧 ÷ 38 帧/s ≈ 30 分钟）
@@ -170,9 +220,13 @@
 
 | 批次 | 项数 | 已完成 | 阻塞关系 |
 |---|---|---|---|
-| 一 · 修特征层 | 5 | 0 | **阻塞批次三 / 四 / 五** |
+| 一 · 修特征层 | 7 | 4（1.1 / 1.2 / 1.4 / 1.7） | **阻塞批次三 / 四 / 五**；剩 1.3 标定、1.5 重跑、**1.6 聚合方式（最关键）** |
 | 二 · 数据基础 | 6 | 0 | 2.1~2.3 阻塞批次四 |
 | 三 · 能力一 身份识别 | 6 | 0 | 依赖批次一 |
 | 四 · 能力二 视频检索 | 6 | 0 | 依赖批次一 + 2.1~2.3 |
 | 五 · 能力一 路径 B | 3 | 0 | 依赖批次三 |
 | 并行清理 | 8 | 0 | 无 |
+
+**下一步建议顺序**：1.6（改聚合方式）→ 1.3（标注集标定，选权重 + 定阈值）→ 1.5（全量重跑验证）。
+1.6 排在最前是因为它是唯一能真正解除塌缩的一项：不改聚合方式，换任何权重、扫任何阈值，
+测出来的都是"在一个已经失去判别力的特征空间里找最优切点"。
