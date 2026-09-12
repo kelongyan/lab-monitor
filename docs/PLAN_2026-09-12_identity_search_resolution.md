@@ -17,7 +17,7 @@
 | ReID 权重来源 | 缓存里只有 `osnet_x0_25_imagenet.pth`，`src/reid.py:93-98` 用 `pretrained=True` 加载它 | 用的是 **ImageNet 分类权重**，非 ReID 度量学习权重 |
 | 视频容器元数据 | ffprobe 与 OpenCV 一致报出 11948~71617 秒时长，`nb_frames` 缺失 | **元数据不可信**，检索定位不能依赖它 |
 
-**一句话**：身份识别这条链路的"特征层"目前是失效的，直接叠加功能只会得到一串看似成功、实则互相串号的身份。所以实施顺序必须是 **先修特征 → 再降分辨率提速 → 再建身份 → 最后做检索**。
+**一句话**：身份识别这条链路的"特征层"目前是失效的，直接叠加功能只会得到一串看似成功、实则互相串号的身份。所以实施顺序必须是 **先修特征 → 再建身份 → 最后做检索**（降分辨率的优先级实测后被下调，见 §2「预期收益要说实话」）。
 
 ---
 
@@ -61,7 +61,7 @@ md5 完全相同只可能来自"同一个数组被写进多行"，不是特征�
 
 ### 0.3 视频资产索引（能力 2 的数据基础）
 
-容器元数据不可信 → 自建索引表，`frames_real` / `duration_real` 由实解码取得（`scripts/probe_media_frames.py` 已备）：
+容器元数据不可信 → 自建索引表，`frames_real` / `duration_real` 由实解码取得（`scripts/probe_media_frames.py` **已跑完**，22 路结果见 §2「现状实测」，并应直接落库而不是重新跑一遍）：
 
 ```sql
 CREATE TABLE video_assets (
@@ -76,6 +76,7 @@ CREATE TABLE video_assets (
   frames_real     INTEGER,         -- ffprobe -count_frames 实测
   duration_real   REAL,            -- frames_real / real_fps
   loop_detected   INTEGER DEFAULT 0,
+  low_value       INTEGER DEFAULT 0,  -- 内容过短（如 rnd_05 仅 1.3s），统计时排除
   ingest_ts       REAL
 );
 CREATE UNIQUE INDEX idx_assets_cam_path ON video_assets(camera_id, rel_path);
@@ -113,6 +114,37 @@ CREATE INDEX idx_appearances_gid_cam_ts
 | 声明帧率 | 25.00 fps（`rnd_05` 报 351.56，属损坏读数） |
 | 总体积 | **983 MB** |
 | 单路体积区间 | 4.6 MB（rnd_05）~ 174.3 MB（reg_05） |
+| **实解码总帧数** | **67,576 帧** |
+| **实解码总时长** | **约 2,700 秒 = 45 分钟**（22 路合计） |
+| 单路真实时长区间 | 1.3 秒（rnd_05）~ 480 秒（reg_05，8 分钟） |
+| 元数据虚高倍数 | 容器报 599,232 秒 vs 实解 2,700 秒 → **虚高 222 倍** |
+
+**单路真实时长**（实解码，`scripts/probe_media_frames.py`）：
+
+| 时长档 | 路数 | 相机 |
+|---|---|---|
+| ≥ 180s | 4 | reg_05 480s、reg_08 358s、reg_01 239s、reg_02 240s |
+| 100~180s | 5 | reg_06 118s、reg_10 118s、rnd_06 178s、rnd_10 180s、rnd_12 178s、rnd_21 120s |
+| 30~100s | 12 | rnd_16 69s、rnd_18 60s、rnd_07 58s、rnd_11 58s、rnd_17 38s、rnd_08 38s、rnd_19 39s、rnd_02 35s、rnd_01 33s、rnd_22 29s、rnd_04 20s |
+| < 10s | 1 | **rnd_05 仅 1.3 秒 / 460 帧**（且 fps 元数据报 351.56） |
+
+### ⚠️ 由此暴露的一个关键事实：语料被循环播放了约 300 倍
+
+- 22 路素材**真实总时长只有 45 分钟、67,576 帧**
+- 而库里已有 **227,124 条 `identity_appearances`**，平均每帧产出 **3.4 条**轨迹行
+- 素材自 7 月 31 日采集，服务累计循环播放约 9 天
+
+**这对能力二的影响是决定性的**：检索返回的"出现段"绝大多数是**同一段像素的重复播放**。所以 `video_assets` 除了 `duration_real`，检索接口还必须输出**循环倍数**，前端要默认折叠并明确标注"该片段在素材中只出现过 1 次，被循环记录了 N 次"。否则用户会得到"这个人在 rnd_01 出现了 3 万次"的荒谬结论——这正是 `collapse_loops` 已经在解决的问题，检索接口必须复用它。
+
+### 另一个好消息：全量重跑语料只要半小时
+
+45 分钟素材 = 67,576 帧。按当前实测吞吐 **38 帧/s**（22 路单进程）计算：
+
+```
+67576 帧 ÷ 38 帧/s ≈ 1,778 秒 ≈ 30 分钟
+```
+
+也就是说**改一版代码、全量重跑 22 路语料并重新生成身份库，只要约半小时**。这让能力一/二的迭代验证完全可行——之前担心的"重跑一次要几小时甚至一天"不成立。这也是能力三降分辨率最大的间接价值所在。
 
 ### 目标分辨率：960×540
 
@@ -140,6 +172,8 @@ video_assets 索引行（含 sha1_8，供幂等跳过）
 ### 步骤
 
 1. **`scripts/transcode_lowres.py`**：读 `sources.json` → 逐路 ffmpeg → 落 `videos_low/` → 实测帧数 → 写索引。参数 `--scale 960:540` / `--crf 28` / `--only reg_01` / `--dry-run`；已有输出且 `sha1_8` 一致则跳过（幂等）。逐个打印进度（单路 1440p HEVC 转码耗时可达分钟级）。
+   - 全量转码预计 **10~20 分钟**（源共 983 MB，最长的 reg_05 为 480 秒 1440p）。
+   - **`rnd_05` 单独处理**：真实内容只有 1.3 秒 / 460 帧，且 fps 元数据报 351.56（损坏读数）。在索引里标记 `low_value = 1`，**不删除**（采集点位不能随意摘除），但 A/B 实验与检索结果里默认排除它，否则统计口径会被这 460 帧污染。
 2. **A/B 实验**（先做，再全量）：抽 3 路 —— `reg_01`（1080p 常规）、`rnd_21`（1440p 随机）、`rnd_16`（含唯一 ROI 围栏）。原片与低分片各跑 300 秒，比三件事：**检测人数召回**、**身份注册数**、**每路实际 fps**。写 `outputs/reports/resolution_ab.csv`。
 3. **定档**：若小目标召回下降 > 5%，退到 `1280x720`；若下降 ≤ 2% 且 fps 提升明显，可再试 `854x480`。
 4. **全量转码 + 切源**：`sources.json` 改指 `videos_low/`，原 `sources.json` 备份为 `config/sources_high.json`（保留可回退）。
@@ -154,7 +188,18 @@ video_assets 索引行（含 sha1_8，供幂等跳过）
 
 ### 预期收益要说实话
 
-当前瓶颈是**单进程 GIL**，不是解码（实测 22 路吞吐 38 帧/s，GPU 仅用 35~40%）。所以降分辨率带来的**吞吐提升有限，预期 +10~20%**。真正的收益是：**让"22 路全量重跑一次语料"从不现实变得可行** —— 而能力 1/2 的验证必须反复重跑语料。
+实测数据出来后，这个能力的价值需要**下调**，理由如下：
+
+1. **吞吐提升有限**：瓶颈是**单进程 GIL**，不是解码（22 路实测 38 帧/s，GPU 只用 35~40%）。降分辨率预期只带来 **+10~20%**。
+2. **"全量重跑语料"本来就是可行的**：实解码显示 22 路素材**总共只有 45 分钟 / 67,576 帧**，按 38 帧/s 算**约 30 分钟就能重跑一遍**。所以"降分辨率才能重跑语料"这个论证**不成立**——它不需要降分辨率也只要半小时。
+3. **API 层面无收益**：MJPEG 输出走的是 `FrameHub`（已是 480×270 / q50），与源分辨率无关。
+
+**所以这个能力真正的价值只剩两条**：
+
+- **工程整洁与分发**：983 MB → 约 130 MB，语料可随项目归档/分发，不必依赖 `videos/`（当前 `.gitignore` 排除）。
+- **为将来接入 RTSP 实时流做铺垫**：实时流无法离线转码，只能靠运行时的 `process_max_width` 缩放，这条路径无论本次做不做都必须建。
+
+**建议降级优先级**：能力三从"建议第一个动手"改为**与批次二合并、且可延后**。真正该先做的是批次一（修 ReID 权重 + 排查重复写入）——那才是决定"身份识别"能否成立的一步。
 
 ---
 
@@ -283,9 +328,11 @@ ALTER TABLE identities ADD COLUMN name_confidence REAL;
       "assets": [
         {
           "asset_id": 12, "camera_id": "rnd_16",
-          "file": "videos_low/rnd_16.mp4", "duration_real": 98.4,
+          "file": "videos_low/rnd_16.mp4", "duration_real": 68.7,
           "hit_count": 37, "first_ts": 41.2, "last_ts": 68.9,
           "best_score": 0.87, "position_known": true,
+          "loop": {"detected": true, "method": "period", "loop_factor": 288,
+                   "unique_segments": 1, "raw_segments": 288},
           "thumb_url": "/screenshots/xxx.jpg"
         }
       ]
@@ -294,6 +341,8 @@ ALTER TABLE identities ADD COLUMN name_confidence REAL;
   "total_assets": 3, "truncated": false
 }
 ```
+
+`loop` 字段直接复用 `/trajectory` 的 `loop` 结构（`detected` / `method` / `raw_segments`），只增补 `loop_factor` 与 `unique_segments`。**前端必须默认展示折叠后的结果**，并在 UI 上写明原始倍数。
 
 ### 处理流程
 
@@ -312,11 +361,12 @@ split_gap_s 切停留段（复用 /trajectory 已有分段逻辑）
 可选：为每段抽 1 帧存缩略图（seek 解码，复用 FrameHub.get_frame）
 ```
 
-### 三个必须写进代码注释的设计决定
+### 四个必须写进代码注释的设计决定
 
 1. **双时间轴不能混用**：`timestamp`（墙钟）用于跨相机排序；`video_ts`（视频内秒数）用于回放定位。循环播放会把墙钟时间拉成几天，拿墙钟去视频里 seek 必然定位到错位置。
 2. **循环折叠复用而非重写**：`GET /api/identities/{gid}/trajectory` 已验证过的折叠逻辑（差分判据 `seq[i]==seq[i-period]`、覆盖校验、bbox 20px 指纹降级）要抽成公共函数 `collapse_loop_segments()` 放到 `src/trajectory.py`，让两个接口共用。**不要在检索接口里再写一遍**——`server.py` 里那段逻辑有 19 个测试保护，重写必然倒退。
 3. **检索阈值独立于实时阈值**：离线检索返回 Top-K 排序，可以放宽阈值；实时匹配是二值判定，必须保守。两者共用同一个常量是设计错误。
+4. **必须返回循环倍数 `loop_factor`，不能只返回命中段数**：语料真实总时长仅 45 分钟，却已累计 227,124 条 appearance，同一段像素平均被循环记录了数百次。若不折叠、不标注倍数，用户看到的"出现 3 万次"是纯粹的度量假象。**检索接口的默认输出必须是折叠后的结果**，`raw_segments` 与 `loop_factor` 作为解释字段附带返回。
 
 ### API
 
@@ -357,7 +407,7 @@ split_gap_s 切停留段（复用 /trajectory 已有分段逻辑）
 | 批次 | 内容 | 交付物 |
 |---|---|---|
 | 一 | 0.1 换 ReID 权重 + 0.2 排查重复写入 | 阈值标定报告 + 全绿测试 |
-| 二 | 能力 3 转码 + 0.3 资产索引 | `videos_low/` + `video_assets` + A/B 报告 |
+| 二 | 0.3 视频资产索引（**能力 3 转码并入本批，可延后**） | `video_assets` 表 + 真实时长基线 + A/B 报告 |
 | 三 | 能力 1 路径 A（人工命名） + L1 修复验证 | `personnel` 表 + 绑定 API + 前端命名入口 |
 | 四 | 能力 2（`global_id` 查询 → 以图搜人） | `/api/search/*` + 前端视频清单 |
 | 五 | 能力 1 路径 B（底库 1:N 自动命名） | 注册照上传 + 自动命名 |
@@ -373,7 +423,7 @@ A→B→C 行程时间串联超时预警。**当前阻塞原因**：缺少「哪
 | 脚本 | 用途 |
 |---|---|
 | `scripts/probe_media_ffprobe.py` | ffprobe 取分辨率/编码/声明帧率，暴露容器元数据不可信 |
-| `scripts/probe_media_frames.py` | `-count_frames` 实解码，得到可用于设计的真实时长基线 |
+| `scripts/probe_media_frames.py` | `-count_frames` 实解码，得到可用于设计的真实时长基线（**已执行**：22 路合计 67,576 帧 / 约 45 分钟，耗时 10.5 分钟） |
 | `scripts/probe_reid_separability.py` | 组内/组间余弦分布 + 阈值代价统计 |
 | `scripts/diagnose_reid_degeneracy.py` | 区分「特征退化」与「持久化重复」，按 blob md5 分组 |
 
