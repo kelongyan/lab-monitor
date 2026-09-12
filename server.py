@@ -63,6 +63,8 @@ _pipelines = None
 _shutdown_callback = None
 _floorplan = None
 _mjpeg_sleep = 0.033  # 兜底值；实际由 main.py 经 init_server(mjpeg_fps=...) 覆盖
+_detector = None       # 以图搜人用（worklist 4.4），由 init_server 注入
+_reid_extractor = None
 
 # F9a：MJPEG 增量推送 —— 帧序号未变化时不重复发字节，但最长 5 秒必须心跳重发一次，
 # 否则中间代理/浏览器可能把长时间静默的连接判定为假死。
@@ -297,8 +299,8 @@ async def guard_request(request: Request, call_next):
     return await call_next(request)
 
 
-def init_server(frame_hub, broadcaster, identity_store, calibrator=None, pipelines=None, topology=None, mjpeg_fps: float = 30.0, shutdown_callback=None, host: str | None = None, port: int | None = None, floorplan=None):
-    global _frame_hub, _broadcaster, _identity_store, _calibrator, _pipelines, _topology, _mjpeg_sleep, _shutdown_callback, _floorplan
+def init_server(frame_hub, broadcaster, identity_store, calibrator=None, pipelines=None, topology=None, mjpeg_fps: float = 30.0, shutdown_callback=None, host: str | None = None, port: int | None = None, floorplan=None, detector=None, reid_extractor=None):
+    global _frame_hub, _broadcaster, _identity_store, _calibrator, _pipelines, _topology, _mjpeg_sleep, _shutdown_callback, _floorplan, _detector, _reid_extractor
     _frame_hub = frame_hub
     _broadcaster = broadcaster
     _identity_store = identity_store
@@ -307,6 +309,8 @@ def init_server(frame_hub, broadcaster, identity_store, calibrator=None, pipelin
     _topology = topology
     _mjpeg_sleep = 1.0 / max(1.0, mjpeg_fps)
     _shutdown_callback = shutdown_callback
+    _detector = detector
+    _reid_extractor = reid_extractor
     # 平面图未显式注入时惰性构造（见 _get_floorplan），单元测试直接 TestClient(app) 也能用
     _floorplan = floorplan
     # host/port 已知时立即生成 Host 白名单；未传则由 run_server/start_server_thread 生成
@@ -787,6 +791,16 @@ async def get_floorplan():
 
 _APPROARANCE_QUERY_LIMIT = 20000
 
+# 循环折叠与分段的唯一实现在 src/trajectory.py（检索接口共用）。
+# 旧名保留为别名：tests/test_trajectory.py 通过 `from server import
+# _collapse_loop_period, _collapse_by_fingerprint` 引用，改名会打断 19 个用例。
+from src.trajectory import (  # noqa: E402
+    build_segments as _build_trajectory_segments,
+    collapse_by_fingerprint as _collapse_by_fingerprint,
+    collapse_loop_segments as _collapse_loop_segments,
+    detect_loop_period as _collapse_loop_period,
+)
+
 
 def _collapse_loop_period(seq: list[str]) -> int | None:
     """检测相机序列的最小重复周期（严格周期，快速路径）。
@@ -896,70 +910,23 @@ async def get_identity_trajectory(
                 last_t = row["time"]
         rows = kept
 
-    # 分段：连续同相机合并；间隔超过 split_gap_s 视为重新进入视野，拆开
-    segments: list[dict] = []
-    for row in rows:
-        cam, ts = row["camera"], row["time"]
-        if (segments and segments[-1]["camera"] == cam
-                and ts - segments[-1]["exit"] <= split_gap_s):
-            seg = segments[-1]
-            seg["exit"] = ts
-            seg["frames"] += 1
-            seg["bbox_end"] = row["bbox"]
-        else:
-            segments.append({
-                "camera": cam,
-                "enter": ts,
-                "exit": ts,
-                "frames": 1,
-                "bbox_start": row["bbox"],
-                "bbox_end": row["bbox"],
-            })
+    # 分段与循环折叠的唯一实现都在 src/trajectory.py（与检索接口共用，勿复制）。
+    # 这里只负责注入平面图坐标（那是 trajectory 模块不该知道的事）。
+    segments = _build_trajectory_segments(rows, split_gap_s)
     for seg in segments:
-        seg["duration_s"] = round(seg["exit"] - seg["enter"], 2)
         xy = fp.point(seg["camera"]) if fp else None
         seg["map_xy"] = xy
         meta = fp.meta(seg["camera"]) if fp else None
         seg["desc"] = (meta or {}).get("desc") or ""
 
-    # 折叠循环播放：把循环素材反复播出的同一条轨迹压回一轮。
-    # 素材只有几十秒时，不折叠会得到「这个人在两点之间来回跑了 545 次」的假象。
-    loop_info = {"detected": False, "method": None, "period_segments": 0,
-                 "loops": 1, "raw_segments": len(segments)}
-    if collapse_loops and len(segments) >= 4:
-        raw = len(segments)
-        period = _collapse_loop_period([s["camera"] for s in segments])
+    # 折叠循环播放：素材只有几十秒时，不折叠会得到
+    # 「这个人在两点之间来回跑了 545 次」的假象；loop 字段要透给前端展示。
+    if collapse_loops:
+        segments, rows, loop_info = _collapse_loop_segments(segments, rows)
+    else:
+        loop_info = {"detected": False, "method": None, "period_segments": 0,
+                     "loops": 1, "raw_segments": len(segments)}
 
-        # 覆盖校验：硬截断到第一轮会丢掉「只在后续轮次出现的相机」。
-        # 实测 9cd02946 的序列是 rnd_08→rnd_08→reg_08→…，检测到周期 2 后
-        # 截断成 [rnd_08, rnd_08]，把只在第 3 段出现的 reg_08 整个丢了。
-        # 宁可少折叠也不能丢轨迹，覆盖不全就降级到指纹法。
-        if period and raw // period >= 2:
-            cams_first = {s["camera"] for s in segments[:period]}
-            cams_all = {s["camera"] for s in segments}
-            if not cams_all <= cams_first:
-                period = None
-
-        if period and raw // period >= 2:
-            # 严格周期且覆盖完整：截断到第一轮，时间线连续，播放动画不会瞬移
-            loop_info = {"detected": True, "method": "period",
-                         "period_segments": period, "loops": raw // period,
-                         "raw_segments": raw}
-            cut_at = segments[period]["enter"]
-            segments = segments[:period]
-            rows = [r for r in rows if r["time"] < cut_at]
-        else:
-            keep = _collapse_by_fingerprint(segments)
-            if len(keep) < raw:
-                # 非严格周期（或覆盖不全）：按画面位置指纹去重，只保留独特停留段的点
-                windows = [(segments[i]["enter"], segments[i]["exit"]) for i in keep]
-                segments = [segments[i] for i in keep]
-                rows = [r for r in rows
-                        if any(a <= r["time"] <= b for a, b in windows)]
-                loop_info = {"detected": True, "method": "fingerprint",
-                             "period_segments": len(segments),
-                             "loops": round(raw / max(1, len(segments)), 1),
-                             "raw_segments": raw}
 
     # 路径点降采样（等距抽样，保证首尾都在）
     returned = len(rows)
@@ -994,6 +961,138 @@ async def get_identity_trajectory(
         "loop": loop_info,
         "floorplan": fp.payload(camera_ids=_known_camera_ids() or None) if fp else _empty_floorplan_payload(),
     }
+    return JSONResponse(payload)
+
+
+def _known_camera_set() -> set[str]:
+    """当前仍在配置里的相机集合。
+
+    库里有 rnd_03 的 6447 条孤儿轨迹（历史配置残留），不过滤的话检索会返回
+    一个已下线的相机，前端点进去就是 404。
+
+    相机来源有两个，取并集：
+      1. 运行中的 pipelines / frame_hub（生产环境的主来源）；
+      2. video_assets 索引里出现过的相机（单测未注入 pipelines 时仍能过滤；
+         而 rnd_03 没有资产行 —— 它本就不在 sources.json 里，所以照样被滤掉）。
+    """
+    ids = set(_known_camera_ids())
+    if _identity_store is not None and _identity_store.database is not None:
+        try:
+            for asset in _identity_store.database.list_video_assets():
+                if asset.get("camera_id"):
+                    ids.add(asset["camera_id"])
+        except Exception:
+            logger.debug("读取资产相机列表失败", exc_info=True)
+    return ids
+
+
+@app.get("/api/search/person")
+async def search_person(
+    global_id: str = Query(..., description="要检索的身份 ID"),
+    start: float | None = Query(default=None, description="起始 Unix 秒，缺省不限"),
+    end: float | None = Query(default=None, description="结束 Unix 秒，缺省不限"),
+    camera: str | None = Query(default=None, description="只看某一路相机"),
+    split_gap_s: float = Query(default=30.0, ge=0.0, le=7200.0,
+                               description="同相机内时间间隔超过该值则拆成新停留段"),
+    collapse_loops: bool = Query(default=True,
+                                 description="折叠循环播放产生的重复轨迹（素材仅数十秒时必开）"),
+):
+    """人员视频检索（worklist 4.2）：某身份出现过的全部视频片段清单。
+
+    返回的每个 asset 都带 video_first_ts / video_last_ts（源视频内秒数），
+    前端可直接用它定位回放；position_known=False 表示老数据缺视频内坐标，
+    此时只能显示相机 + 墙钟时间。
+
+    loop.loop_factor 必须展示 —— 语料真实总时长只有 45 分钟却已累计 22 万条
+    appearance，不标注倍数会得到"出现 3 万次"的度量假象。
+    """
+    from src.search import aggregate_identity_assets
+
+    if _identity_store is None:
+        return JSONResponse({"error": "Identity store unavailable"}, status_code=503)
+    if _identity_store.get(global_id) is None:
+        return JSONResponse({"error": "Identity not found"}, status_code=404)
+
+    def _run() -> dict:
+        return aggregate_identity_assets(
+            _identity_store.database, global_id, start=start, end=end, camera=camera,
+            split_gap_s=split_gap_s, collapse=collapse_loops,
+            known_cameras=_known_camera_set() or None,
+        )
+
+    try:
+        payload = await run_in_threadpool(_run)
+    except Exception:
+        logger.exception("人员检索失败: %s", global_id)
+        return JSONResponse({"error": "Search failed"}, status_code=500)
+    return JSONResponse(payload)
+
+
+@app.post("/api/search/by-image")
+async def search_by_image(request: Request, top_k: int = Query(default=5, ge=1, le=20)):
+    """以图搜人（worklist 4.4）：上传一张图，返回 Top-K 身份及其出现过的视频。
+
+    上传图里有多人时取**面积最大**的人体框（纯启发式），
+    并在响应里带 person_count 让前端提示用户框选。
+    缩略图暂未实现（需要按 video_ts seek 解码源视频），响应里用 /stream/{cam} 代替。
+    """
+    import cv2
+    import numpy as np
+    from src.search import aggregate_identity_assets, best_crop, rank_identities_by_feature
+
+    if _reid_extractor is None or _identity_store is None:
+        return JSONResponse({"error": "ReID unavailable"}, status_code=503)
+
+    content_type = request.headers.get("content-type", "")
+    image_bytes: bytes | None = None
+    if "multipart/form-data" in content_type:
+        form = await request.form()
+        upload = form.get("image") or form.get("file")
+        if upload is None:
+            return JSONResponse({"error": "缺少 image 字段"}, status_code=400)
+        image_bytes = await upload.read()
+    else:
+        image_bytes = await request.body()
+    if not image_bytes:
+        return JSONResponse({"error": "请求体为空"}, status_code=400)
+
+    image_array = np.frombuffer(image_bytes, dtype=np.uint8)
+    image = cv2.imdecode(image_array, cv2.IMREAD_COLOR)
+    if image is None:
+        return JSONResponse({"error": "无法解析图片"}, status_code=400)
+
+    def _run() -> dict:
+        detections = _detector.detect(image) if _detector is not None else []
+        box = best_crop(detections)
+        if box is None:
+            return {"error": "图中未检测到人员", "person_count": 0}
+        feature = _reid_extractor.extract(image, box)
+        if feature is None:
+            return {"error": "特征提取失败（裁剪区域过小？）", "person_count": len(detections)}
+        ranked = rank_identities_by_feature(_identity_store, feature, top_k=top_k)
+        matches = []
+        for item in ranked["matches"]:
+            gid = item["global_id"]
+            detail = _identity_store.get(gid)
+            entry = {**item, "name": getattr(detail, "person_name", None) or None}
+            if item["score"] >= ranked["threshold"] * 0.85:
+                found = aggregate_identity_assets(
+                    _identity_store.database, gid, collapse=True,
+                    known_cameras=_known_camera_set() or None,
+                )
+                entry["assets"] = found["assets"]
+                entry["asset_count"] = found["asset_count"]
+            matches.append(entry)
+        return {"person_count": len(detections), "galleries_compared": ranked["galleries_compared"],
+                "threshold": ranked["threshold"], "matches": matches}
+
+    try:
+        payload = await run_in_threadpool(_run)
+    except Exception:
+        logger.exception("以图搜人失败")
+        return JSONResponse({"error": "Search failed"}, status_code=500)
+    if "error" in payload:
+        return JSONResponse(payload, status_code=422)
     return JSONResponse(payload)
 
 

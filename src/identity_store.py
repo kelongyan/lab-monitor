@@ -854,6 +854,11 @@ class IdentityStore:
         with self._lock:
             return list(self._records.keys())
 
+    @property
+    def database(self):
+        """本身份库背后正在使用的数据库（检索接口必须用它，而不是全局单例）。"""
+        return self._database
+
     def video_asset_for(self, camera_id: str) -> dict | None:
         """读取该相机的视频资产行（含实测帧数/时长/编码）。无数据库时返回 None。"""
         if self._database is None:

@@ -391,6 +391,8 @@ def main(
             mjpeg_fps=perf["mjpeg_fps"],
             shutdown_callback=request_shutdown,
             floorplan=floorplan,
+            detector=detector,            # 以图搜人用（worklist 4.4）
+            reid_extractor=reid_extractor,
         )
         try:
             web_server.start_server_thread(host=web_host, port=web_port)

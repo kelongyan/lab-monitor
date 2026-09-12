@@ -235,10 +235,84 @@ export async function showTrajectoryModal(global_id) {
       <div class="timeline">
         ${nodesHtml}
       </div>
+
+      <div style="margin-top: 14px; border-top: 1px solid var(--border-color); padding-top: 10px;">
+        <button class="action-btn" id="btn-search-videos" style="width: 100%;">
+          🔎 检索该人出现过的全部视频
+        </button>
+        <div id="video-search-result" style="margin-top: 10px;"></div>
+      </div>
     `;
+    const searchBtn = document.getElementById('btn-search-videos');
+    if (searchBtn) {
+      searchBtn.addEventListener('click', () => searchPersonVideos(global_id, searchBtn));
+    }
   } catch (e) {
     if (!request.isCurrent()) return;
     body.innerHTML = `<div class="empty-state">获取轨迹失败: ${e.message}</div>`;
+  }
+}
+
+/**
+ * 人员视频检索（worklist 4.5 前端）：调 GET /api/search/person，
+ * 把命中片段按视频文件聚合展示，并标注循环倍数与回放定位。
+ *
+ * 两个必须透传给用户的字段（都来自实测教训）：
+ *  - loop.loops：语料是循环播放的，不标注倍数会得到"出现 3 万次"的假象；
+ *  - position_known：老轨迹没有视频内坐标，只能显示相机 + 墙钟时间。
+ */
+async function searchPersonVideos(global_id, button) {
+  const box = document.getElementById('video-search-result');
+  if (!box) return;
+  button.disabled = true;
+  box.innerHTML = `<div class="empty-state">检索中...</div>`;
+  try {
+    const res = await fetchJson(
+      `/api/search/person?global_id=${encodeURIComponent(global_id)}`,
+    );
+    const assets = res.assets || [];
+    if (assets.length === 0) {
+      box.innerHTML = `<div class="empty-state">未在任何视频中出现</div>`;
+      return;
+    }
+    const rows = assets.map(a => {
+      const loopText = a.loop_factor && a.loop_factor > 1
+        ? `循环 ×${a.loop_factor}`
+        : '仅 1 次';
+      const position = a.position_known && a.video_first_ts != null
+        ? `视频 ${a.video_first_ts}s ~ ${a.video_last_ts}s`
+        : '无视频内坐标（老数据）';
+      const stream = a.camera_id
+        ? `<a href="/stream/${encodeURIComponent(a.camera_id)}" target="_blank" rel="noopener">实时画面</a>`
+        : '';
+      return `
+        <tr>
+          <td>${escapeHtml(String(a.camera_id ?? '').toUpperCase())}</td>
+          <td style="font-size: 11px;">${escapeHtml(String(a.file ?? ''))}</td>
+          <td>${a.duration_real != null ? Number(a.duration_real).toFixed(1) + 's' : '--'}</td>
+          <td>${a.hit_count} 帧（${loopText}）</td>
+          <td style="font-size: 11px;">${position}</td>
+          <td>${stream}</td>
+        </tr>`;
+    }).join('');
+    box.innerHTML = `
+      <div style="font-size: 12px; font-weight: 700; margin-bottom: 6px;">
+        命中 ${assets.length} 个视频文件（已按循环折叠）
+      </div>
+      <table style="width: 100%; font-size: 11px; border-collapse: collapse;">
+        <thead>
+          <tr style="color: var(--text-muted); text-align: left;">
+            <th style="padding: 3px 4px;">相机</th><th style="padding: 3px 4px;">文件</th>
+            <th style="padding: 3px 4px;">时长</th><th style="padding: 3px 4px;">命中</th>
+            <th style="padding: 3px 4px;">视频内位置</th><th style="padding: 3px 4px;"></th>
+          </tr>
+        </thead>
+        <tbody>${rows}</tbody>
+      </table>`;
+  } catch (e) {
+    box.innerHTML = `<div class="empty-state">检索失败: ${e.message}</div>`;
+  } finally {
+    button.disabled = false;
   }
 }
 

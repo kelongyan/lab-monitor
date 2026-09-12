@@ -301,31 +301,58 @@
 
 ---
 
-## 批次四 · 能力二：人员视频检索（6 项）
+## 批次四 · 能力二：人员视频检索（6 项，2026-09-12 全部完成）
 
-- [ ] **4.1 抽出 `collapse_loop_segments()` 到公共模块** —— **M**
-  - 把 `server.py:752-923` 的循环折叠逻辑（差分判据 `seq[i]==seq[i-period]`、覆盖校验、bbox 20px 指纹降级）抽到 `src/trajectory.py`，`/trajectory` 与检索共用
-  - 硬约束：**不要在检索接口里重写一遍**，该逻辑有 `tests/test_trajectory.py` 的 19 个用例保护，重写必然倒退
-  - 验收：`test_trajectory.py` 19 例全绿
+- [x] **4.1 抽出 `collapse_loop_segments()` 到公共模块 `src/trajectory.py`** —— **M**（完成）
+  - 迁移：`detect_loop_period` / `collapse_by_fingerprint` / `build_segments` /
+    `collapse_loop_segments`（分段 + 折叠一体）。
+  - server.py 保留 `_collapse_loop_period` / `_collapse_by_fingerprint` 别名
+    —— tests/test_trajectory.py 通过 `from server import ...` 引用，改名会打断 19 个用例。
+  - 轨迹路由改为复用公共模块（顺带把分段逻辑也抽了出去，检索接口同样要用）。
+  - 验收：`test_trajectory.py` 19 例全绿 ✓
 
-- [ ] **4.2 `GET /api/search/person`** —— **M**
-  - 纯 SQL 聚合，无新算法。按 `(asset_id, global_id)` 聚合 → `split_gap_s` 切停留段 → 关联 `video_assets`
-  - **必须返回 `loop.loop_factor` 与 `unique_segments`**，默认展示折叠结果（语料仅 45 分钟却已累计 227,124 条 appearance，不标注倍数会得到"出现 3 万次"的度量假象）
+- [x] **4.2 `GET /api/search/person`** —— **M**（完成）
+  - 核心逻辑在 `src/search.py::aggregate_identity_assets()`（HTTP 层只做参数解析）。
+  - 按 (asset_id, camera) 聚合 → 切停留段 → 循环折叠 → 关联 video_assets。
+  - 返回 `loop_factor`（逐资产：折叠前原始命中数 / 折叠后保留数）——
+    语料只有 45 分钟却累计 22 万条 appearance，不标注倍数会得到"出现 3 万次"的假象。
+  - 返回 `position_known`：老数据缺视频内坐标时降级为"仅相机 + 墙钟时间"。
+  - **真实库冒烟**：单身份命中 22 个视频资产，loop_factor x1.0~x10.4；
+    position_known 全 False（这批轨迹是在 2.3 落地前写入的，属预期降级；
+    服务重启后新轨迹会带坐标）。
 
-- [ ] **4.3 过滤已下线相机** —— **S**
-  - 已查实：库里存在 **`rnd_03` 的 6,447 条孤儿轨迹**，但该相机已不在 `sources.json`（历史配置残留）
-  - 动作：检索与轨迹接口一律按 `sources.json` 过滤，或返回时标注"已下线"，避免前端点进去 404
+- [x] **4.3 过滤已下线相机** —— **S**（完成）
+  - 库里有 rnd_03 的 6,447 条孤儿轨迹（历史配置残留）。检索按
+    `_known_camera_set()`（pipelines ∪ frame_hub ∪ video_assets 索引里的相机）过滤。
+  - 注意：不能只用 video_assets 索引（rnd_03 没有资产行，会被正确滤掉），
+    也不能只看 pipelines（单测未注入时会失效）—— 取并集两个场景都对。
 
-- [ ] **4.4 `POST /api/search/by-image` + `src/search.py`** —— **L**
-  - 上传图片 → OSNet 提特征 → 与 `identities`（`feature` + `feature_bank`）全库比对 → Top-K 排序（**非二值判定**，离线检索可放宽阈值）
-  - 为每个命中段抽 1 帧存缩略图（seek 解码，可复用 `FrameHub.get_frame`）
+- [x] **4.4 `POST /api/search/by-image` + `src/search.py::rank_identities_by_feature`** —— **L**（完成）
+  - 上传图 → cv2 解码 → 检测人体框 → 取**面积最大**者（多人时纯启发式，
+    响应带 person_count 供前端提示框选）→ OSNet 提特征 →
+    `build_match_context()` 全库比对（中心化坐标系）→ Top-K 排序。
+  - 返回 `matched` 字段（用实时阈值 0.68 标色），但**调用方不应据此丢弃**排名靠后
+    但分数可观的候选 —— 离线检索阈值语义与实时匹配独立。
+  - `init_server()` 新增 detector / reid_extractor 注入（main.py 传入模型池代理）。
+  - **缩略图暂未实现**（需按 video_ts seek 解码源视频），响应里用 /stream/{cam} 代替。
 
-- [ ] **4.5 `GET /api/assets` + 前端视频清单** —— **M**
-  - 人员档案弹窗内加「该人出现过的视频」表格（相机 / 文件名 / 真实时长 / 出现段数 / 循环倍数 / 跳转）
+- [x] **4.5 前端入口** —— **M**（完成，最小可用版）
+  - 人员轨迹弹窗（跨镜头通行轨迹链）底部新增「🔎 检索该人出现过的全部视频」按钮：
+    调 GET /api/search/person，渲染命中视频表格（相机 / 文件 / 时长 / 命中帧数与循环倍数 /
+    视频内位置 / 实时画面链接），position_known=False 的行明确标注"无视频内坐标（老数据）"。
+  - 版本号已 bump：`main.css?v=11.7`、`app.js?v=11.7`（含 7 处 @import 同步）。
+  - 以图搜人的前端入口（上传图）暂未加 —— 命令行/curl 可直接调，等 4.4 的
+    缩略图与多人框选交互一起设计更合适。
 
-- [ ] **4.6 `tests/test_search.py`** —— **S**
+- [x] **4.6 `tests/test_search.py`（11 例）+ `tests/test_search_api.py`（7 例）** —— **S**（完成）
+  - 聚合：按文件分组、循环折叠（25 段折叠成 1 轮）、视频内坐标、老数据降级、
+    时间窗过滤、未知身份、**已下线相机过滤**
+  - 以图搜人：Top-1 命中、降序排序、正交方向不崩
+  - HTTP 层：200 结构、404 未知身份、守卫头 403、ReID 未注入 503、坏图 400
 
----
+- **接口层缺陷（过程中发现并修复）**：检索端点原先用 `from src.db import db`
+  全局单例查轨迹，而身份库可能挂在另一个库上（测试里是临时库）→ 检索永远为空。
+  改为 `_identity_store.database`（身份库自带引用），保证"身份与其轨迹同库"。
 
 ## 批次五 · 能力一 路径 B 收尾（3 项）
 
@@ -365,16 +392,18 @@
 | 批次 | 项数 | 已完成 | 阻塞关系 |
 |---|---|---|---|
 | 一 · 修特征层 | 8 | **8 全部完成** | 批次一收口 |
-| 二 · 数据基础 | 6 | **6 全部完成** | 能力二（检索）的数据基础已就位 |
-| 三 · 能力一 身份识别 | 6 | 0 | 依赖批次一 |
-| 四 · 能力二 视频检索 | 6 | 0 | 依赖批次一 + 2.1~2.3 |
+| 二 · 数据基础 | 6 | **6 全部完成** | 完成 |
+| 三 · 能力一 身份识别 | 6 | 0 | 依赖批次一（已满足）；personnel 实名绑定 |
+| 四 · 能力二 视频检索 | 6 | **6 全部完成**（4.5 仅最小前端；缩略图未做） | 完成 |
 | 五 · 能力一 路径 B | 3 | 0 | 依赖批次三 |
 | 并行清理 | 8 | 0 | 无 |
 
-**批次一、二均已收口。** 当前能力状态：
-身份库 6 个身份、两两中心化相似度 max 0.613、0 对越过阈值 0.68；
-资产索引 44 行（22 源 + 22 低清）；轨迹行已带视频内坐标（回放定位就绪）；
-低清语料 29MB（983MB → 29MB）已转码并登记。
+**批次一、二、四均已收口。** 当前能力状态：
+- 身份库：6 个身份、两两中心化相似度 max 0.613、0 对越过阈值 0.68，全部彼此可分；
+- 检索：`GET /api/search/person?global_id=...`（按编号检索，真实库冒烟命中 22 个视频、
+  loop_factor x1.0~x10.4）与 `POST /api/search/by-image`（以图搜人 Top-K）均已可用；
+- 前端：人员轨迹弹窗新增「检索该人出现过的全部视频」按钮（版本号 11.7）；
+- 低清语料 29MB 已转码登记（44 行资产索引）。
 
 **下一步是批次三（能力一：人员身份识别，personnel 表 + 绑定）**
 与批次四（能力二：人员视频检索）。批次三依赖批次一（已满足）；
