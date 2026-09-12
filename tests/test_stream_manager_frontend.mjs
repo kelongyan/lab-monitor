@@ -13,6 +13,14 @@ const docListeners = {};
 let rotateCb = null;
 let rotateMs = 0;
 
+// 与 static/js/modules/stream_manager.js 的私有常量保持一致：
+//   FILL_INTERVAL_MS(=3000, 仍有卡片一帧未出时的快速填充周期)
+//   ROTATE_INTERVAL_MS(=6000, 常规轮转周期，1a5b17b 由 12s 调到 6s)
+// 该模块不导出这两个常量，只能在这里镜像一份；改动模块时请同步改这里，
+// 否则本用例会像 1a5b17b 之后那样静默失败。
+const EXPECTED_FILL_MS = 3000;
+const EXPECTED_ROTATE_MS = 6000;
+
 class FakeIntersectionObserver {
   constructor(callback) {
     this.callback = callback;
@@ -129,7 +137,7 @@ check('可见卡片超上限时只建 MAX_CONCURRENT_STREAMS 路', () => {
 });
 
 check('仍有卡片一帧未出时用更短的填充周期', () => {
-  assert.equal(rotateMs, 3000);
+  assert.equal(rotateMs, EXPECTED_FILL_MS);
 });
 
 // 3. 向下滚动：正在推流的那几路离开视口 → 断流并冻结最后一帧，后面的可见卡片接管连接
@@ -154,10 +162,10 @@ check('最近进入视口的卡片优先建流', () => {
 check('全部可见卡片都出过画面后回到常规轮转周期', () => {
   // 可见卡片数超过并发上限时要轮几轮才能让每一路都出过一帧；
   // 只要还有「一帧未出」的卡片，模块就该维持更短的填充周期。
-  for (let i = 0; i < 20 && rotateMs === 3000 && typeof rotateCb === 'function'; i++) {
+  for (let i = 0; i < 20 && rotateMs === EXPECTED_FILL_MS && typeof rotateCb === 'function'; i++) {
     rotateCb();
   }
-  assert.equal(rotateMs, 12000);
+  assert.equal(rotateMs, EXPECTED_ROTATE_MS);
 });
 
 // 5. 轮转：手动触发轮转回调，被挤下去的可见卡片应拿到连接
