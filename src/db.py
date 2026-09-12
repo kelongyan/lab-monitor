@@ -24,25 +24,58 @@ class Database:
         self.db_path = db_path
         self.db_path.parent.mkdir(parents=True, exist_ok=True)
         self._local = threading.local()   # 每个线程独立的连接槽
+        # 全部已建立的线程连接（close() 时统一回收）。
+        # 只关"当前线程的连接"是不够的：本进程有 22 个 pipeline 线程 +
+        # alert-ticker + uvicorn 线程，每个线程都会各自建一条连接；主线程调一次
+        # close() 只关掉自己那条，其余连接会一直存活到进程退出。
+        # 后果不是数据错误，而是 Windows 上库文件被占用：临时目录删不掉、
+        # 备份/归档脚本 copy 后无法 rename。实测在测试夹具里就会触发
+        # PermissionError: [WinError 32]。
+        self._connections: list[sqlite3.Connection] = []
+        self._connections_lock = threading.Lock()
         self._init_db()
 
     def _get_conn(self) -> sqlite3.Connection:
         """返回当前线程的持久连接，不存在则创建（一个线程只建一次连接）"""
         conn = getattr(self._local, "conn", None)
         if conn is None:
-            conn = sqlite3.connect(str(self.db_path), timeout=10.0)
+            # check_same_thread=False 是刻意的：本模块保证"一条连接只被创建它的
+            # 线程使用"（存入 thread-local），因此 SQLite 的跨线程检查并非必需；
+            # 但关停时需要由主线程统一关闭其他线程的连接，默认的
+            # check_same_thread=True 会让 close() 抛 ProgrammingError。
+            conn = sqlite3.connect(
+                str(self.db_path), timeout=10.0, check_same_thread=False
+            )
             conn.row_factory = sqlite3.Row
             # WAL 模式：写操作不阻塞并发读，适合多线程混合场景
             conn.execute("PRAGMA journal_mode=WAL")
             conn.execute("PRAGMA synchronous=NORMAL")   # 性能/安全折中
             self._local.conn = conn
+            with self._connections_lock:
+                self._connections.append(conn)
         return conn
 
     def close(self) -> None:
-        """关闭当前线程持有的 SQLite 连接。"""
-        conn = getattr(self._local, "conn", None)
-        if conn is not None:
-            conn.close()
+        """
+        关闭本实例建立过的**所有**线程连接。
+
+        只在服务停止阶段调用：它会关掉别的线程正在用的连接，运行期调用会让
+        那些线程报 "Cannot operate on a closed database"。签名保持无参是为了
+        兼容既有调用方（main.py 关停路径、测试夹具）。
+        """
+        with self._connections_lock:
+            connections = list(self._connections)
+            self._connections.clear()
+        current = getattr(self._local, "conn", None)
+        for conn in connections:
+            if conn is current:
+                continue
+            try:
+                conn.close()
+            except sqlite3.Error:
+                logger.warning("关闭线程连接失败（可能已自行关闭）", exc_info=True)
+        if current is not None:
+            current.close()
             self._local.conn = None
 
     def _init_db(self) -> None:
