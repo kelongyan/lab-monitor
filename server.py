@@ -639,6 +639,35 @@ def export_alerts_csv():
     )
 
 
+@app.get("/api/assets")
+async def get_assets():
+    """
+    视频资产索引（worklist 2.1）：列出语料范围与**实测**帧数/时长。
+    容器元数据不可信，这里的 duration_real 是 ffprobe 实解码得到的。
+    low_value=1 的资产（内容过短，如 rnd_05）检索时应默认排除。
+    """
+    from src.db import db as database
+    assets = await run_in_threadpool(database.list_video_assets)
+    return JSONResponse({
+        "count": len(assets),
+        "assets": [
+            {
+                "asset_id": a.get("asset_id"),
+                "camera_id": a.get("camera_id"),
+                "file": a.get("rel_path"),
+                "width": a.get("width"),
+                "height": a.get("height"),
+                "codec": a.get("codec"),
+                "frames_real": a.get("frames_real"),
+                "duration_real": a.get("duration_real"),
+                "low_value": bool(a.get("low_value")),
+                "measured": bool(a.get("frames_real")),
+            }
+            for a in assets
+        ],
+    })
+
+
 @app.get("/api/identities")
 async def get_identities():
     if _identity_store is None:

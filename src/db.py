@@ -126,6 +126,29 @@ class Database:
                     bbox_json TEXT NOT NULL
                 )
             """)
+            # 视频资产索引（worklist 2.1）：容器元数据不可信，真实帧数/时长必须自建索引。
+            # 背景：ffprobe 与 OpenCV 一致报出 11948~71617 秒的荒谬时长、nb_frames 缺失，
+            # 墙钟 timestamp 只能表示"第几轮播放"，无法反查源视频位置。
+            cursor.execute("""
+                CREATE TABLE IF NOT EXISTS video_assets (
+                    asset_id INTEGER PRIMARY KEY AUTOINCREMENT,
+                    camera_id TEXT NOT NULL,
+                    rel_path TEXT NOT NULL,
+                    file_name TEXT,
+                    sha1_8 TEXT,
+                    size_bytes INTEGER,
+                    width INTEGER,
+                    height INTEGER,
+                    codec TEXT,
+                    fps_declared REAL,
+                    frames_real INTEGER,
+                    duration_real REAL,
+                    loop_detected INTEGER DEFAULT 0,
+                    low_value INTEGER DEFAULT 0,
+                    ingest_ts REAL,
+                    UNIQUE(camera_id, rel_path)
+                )
+            """)
             identity_columns = {
                 row[1] for row in cursor.execute("PRAGMA table_info(identities)")
             }
@@ -143,6 +166,22 @@ class Database:
                     cursor.execute(
                         f"ALTER TABLE identities ADD COLUMN {column} {definition}"
                     )
+            # 轨迹表的视频内坐标（worklist 2.2）。三列都可能为 NULL：
+            # 老数据没有这三列的值，检索时必须降级为"仅相机 + 墙钟时间"，
+            # 绝不做无根据的回填猜测。
+            appearance_columns = {
+                row[1] for row in cursor.execute("PRAGMA table_info(identity_appearances)")
+            }
+            appearance_migrations = {
+                "asset_id": "INTEGER",
+                "video_frame": "INTEGER",
+                "video_ts": "REAL",
+            }
+            for column, definition in appearance_migrations.items():
+                if column not in appearance_columns:
+                    cursor.execute(
+                        f"ALTER TABLE identity_appearances ADD COLUMN {column} {definition}"
+                    )
             # 创建索引加速检索
             cursor.execute("CREATE INDEX IF NOT EXISTS idx_alerts_ts ON alerts(timestamp DESC)")
             cursor.execute("CREATE INDEX IF NOT EXISTS idx_alerts_gid ON alerts(global_id)")
@@ -155,6 +194,16 @@ class Database:
             cursor.execute(
                 "CREATE INDEX IF NOT EXISTS idx_identity_appearances_ts "
                 "ON identity_appearances(timestamp)"
+            )
+            # 检索接口（能力二）按「身份 + 相机 + 时间」聚合，需要专门的复合索引
+            cursor.execute(
+                "CREATE INDEX IF NOT EXISTS idx_appearances_gid_cam_ts "
+                "ON identity_appearances(global_id, camera_id, timestamp)"
+            )
+            # 视频资产按路径唯一，供 pipeline 反查 asset_id
+            cursor.execute(
+                "CREATE UNIQUE INDEX IF NOT EXISTS idx_assets_cam_path "
+                "ON video_assets(camera_id, rel_path)"
             )
             # 身份按 last_seen 做保留期清理与最近活跃排序
             cursor.execute(
@@ -369,6 +418,104 @@ class Database:
             )
             conn.commit()
 
+    # ------------------------------------------------------------------ #
+    # 视频资产索引（worklist 2.1）                                           #
+    # ------------------------------------------------------------------ #
+
+    def upsert_video_asset_stub(self, camera_id: str, rel_path: str,
+                                file_name: str | None = None,
+                                size_bytes: int | None = None) -> int | None:
+        """
+        pipeline 启动时的占位登记：只保证 (camera_id, rel_path) 有行、能拿到 asset_id。
+        用 INSERT OR IGNORE，**绝不覆盖** seeder 写入的实测元数据
+        （seeder 走 seed_video_asset()，两者职责不同）。
+        """
+        try:
+            with self._get_conn() as conn:
+                conn.execute(
+                    """
+                    INSERT OR IGNORE INTO video_assets
+                        (camera_id, rel_path, file_name, size_bytes, ingest_ts)
+                    VALUES (?, ?, ?, ?, ?)
+                    """,
+                    (camera_id, rel_path, file_name, size_bytes, time.time()),
+                )
+                conn.commit()
+                row = conn.execute(
+                    "SELECT asset_id FROM video_assets WHERE camera_id = ? AND rel_path = ?",
+                    (camera_id, rel_path),
+                ).fetchone()
+                return int(row["asset_id"]) if row else None
+        except Exception as e:
+            logger.error("登记视频资产占位失败 %s/%s: %s", camera_id, rel_path, e)
+            return None
+
+    def seed_video_asset(self, camera_id: str, rel_path: str, **fields) -> int | None:
+        """
+        seeder 的权威写入：实测帧数/时长/编码等，覆盖占位行。
+        调用方（scripts/seed_video_assets.py）负责测出这些值，本方法只负责落库。
+        """
+        allowed = {
+            "file_name", "sha1_8", "size_bytes", "width", "height", "codec",
+            "fps_declared", "frames_real", "duration_real",
+            "loop_detected", "low_value",
+        }
+        payload = {k: v for k, v in fields.items() if k in allowed and v is not None}
+        payload["ingest_ts"] = time.time()
+        columns = ["camera_id", "rel_path", *payload]
+        placeholders = ", ".join("?" for _ in columns)
+        updates = ", ".join(
+            f"{name} = excluded.{name}" for name in payload
+        )
+        try:
+            with self._get_conn() as conn:
+                conn.execute(
+                    f"""
+                    INSERT INTO video_assets ({", ".join(columns)})
+                    VALUES ({placeholders})
+                    ON CONFLICT(camera_id, rel_path) DO UPDATE SET {updates}
+                    """,
+                    [camera_id, rel_path, *payload.values()],
+                )
+                conn.commit()
+                row = conn.execute(
+                    "SELECT asset_id FROM video_assets WHERE camera_id = ? AND rel_path = ?",
+                    (camera_id, rel_path),
+                ).fetchone()
+                return int(row["asset_id"]) if row else None
+        except Exception as e:
+            logger.error("写入视频资产失败 %s/%s: %s", camera_id, rel_path, e)
+            return None
+
+    def get_video_asset(self, camera_id: str) -> dict | None:
+        """按相机取资产行（每路一个源文件）。"""
+        try:
+            with self._get_conn() as conn:
+                row = conn.execute(
+                    "SELECT * FROM video_assets WHERE camera_id = ? "
+                    "ORDER BY asset_id DESC LIMIT 1",
+                    (camera_id,),
+                ).fetchone()
+                return dict(row) if row else None
+        except Exception as e:
+            logger.error("读取视频资产失败 %s: %s", camera_id, e)
+            return None
+
+    def list_video_assets(self) -> list[dict]:
+        try:
+            with self._get_conn() as conn:
+                rows = conn.execute(
+                    "SELECT * FROM video_assets ORDER BY camera_id, asset_id"
+                ).fetchall()
+                return [dict(row) for row in rows]
+        except Exception as e:
+            logger.error("列出视频资产失败: %s", e)
+            return []
+
+    # ------------------------------------------------------------------ #
+    # 身份归并的落库部分                                                      #
+    # ------------------------------------------------------------------ #
+
     def merge_identities(self, keep_id: str, drop_id: str) -> bool:
         """
         身份归并的落库部分（由 IdentityStore.consolidate() 调用）：
@@ -464,14 +611,18 @@ class Database:
                     conn.execute(
                         """
                         INSERT INTO identity_appearances (
-                            global_id, camera_id, timestamp, bbox_json
-                        ) VALUES (?, ?, ?, ?)
+                            global_id, camera_id, timestamp, bbox_json,
+                            asset_id, video_frame, video_ts
+                        ) VALUES (?, ?, ?, ?, ?, ?, ?)
                         """,
                         (
                             global_id,
                             new_appearance.get("camera", ""),
                             float(new_appearance.get("time", last_seen)),
                             json.dumps(new_appearance.get("bbox", [])),
+                            new_appearance.get("asset_id"),
+                            new_appearance.get("video_frame"),
+                            new_appearance.get("video_ts"),
                         ),
                     )
                 conn.commit()
@@ -487,6 +638,9 @@ class Database:
         timestamp: float,
         bbox: list,
         total_appearances: int,
+        asset_id: int | None = None,
+        video_frame: int | None = None,
+        video_ts: float | None = None,
     ) -> bool:
         """
         轻量持久化路径：一次事务内插入一条 identity_appearances 增量行，
@@ -494,16 +648,24 @@ class Database:
         不重写 feature_blob / feature_bank_blob（由调用方节流后走 save_identity）。
         last_seen / last_camera 带旧值守卫，防乱序写入把新值改回旧值。
         返回 False 表示 identities 里没有该身份行，调用方需退回整行写入。
+
+        asset_id / video_frame / video_ts 是"视频内坐标"（worklist 2.2/2.3）：
+        素材循环播放，墙钟 timestamp 无法反查源视频位置；检索回放必须靠这三列。
+        可为 NULL（老数据与缺失资产索引时），检索侧据此降级。
         """
         try:
             with self._get_conn() as conn:
                 conn.execute(
                     """
                     INSERT INTO identity_appearances (
-                        global_id, camera_id, timestamp, bbox_json
-                    ) VALUES (?, ?, ?, ?)
+                        global_id, camera_id, timestamp, bbox_json,
+                        asset_id, video_frame, video_ts
+                    ) VALUES (?, ?, ?, ?, ?, ?, ?)
                     """,
-                    (global_id, camera_id, float(timestamp), json.dumps(list(bbox))),
+                    (
+                        global_id, camera_id, float(timestamp), json.dumps(list(bbox)),
+                        asset_id, video_frame, video_ts,
+                    ),
                 )
                 cursor = conn.execute(
                     """
@@ -564,7 +726,7 @@ class Database:
                 })
                 recent_rows = conn.execute(
                     """
-                    SELECT camera_id, timestamp, bbox_json
+                    SELECT camera_id, timestamp, bbox_json, asset_id, video_frame, video_ts
                     FROM identity_appearances
                     WHERE global_id = ?
                     ORDER BY timestamp DESC, id DESC
@@ -577,6 +739,9 @@ class Database:
                         {
                             "camera": appearance["camera_id"],
                             "time": appearance["timestamp"],
+                            "asset_id": appearance["asset_id"],
+                            "video_frame": appearance["video_frame"],
+                            "video_ts": appearance["video_ts"],
                             "bbox": json.loads(appearance["bbox_json"] or "[]"),
                         }
                         for appearance in reversed(recent_rows)
@@ -605,7 +770,7 @@ class Database:
             ).fetchone()[0]
             rows = conn.execute(
                 """
-                SELECT camera_id, timestamp, bbox_json
+                SELECT camera_id, timestamp, bbox_json, asset_id, video_frame, video_ts
                 FROM identity_appearances
                 WHERE global_id = ?
                 ORDER BY timestamp, id
@@ -623,6 +788,9 @@ class Database:
                 "camera": row["camera_id"],
                 "time": row["timestamp"],
                 "bbox": bbox,
+                "asset_id": row["asset_id"],
+                "video_frame": row["video_frame"],
+                "video_ts": row["video_ts"],
             })
         return int(total), appearances
 
@@ -658,7 +826,7 @@ class Database:
             ).fetchone()[0]
             rows = conn.execute(
                 """
-                SELECT camera_id, timestamp, bbox_json
+                SELECT camera_id, timestamp, bbox_json, asset_id, video_frame, video_ts
                 FROM identity_appearances
                 WHERE global_id = ?
                   AND (? IS NULL OR timestamp >= ?)
@@ -679,6 +847,9 @@ class Database:
                 "camera": row["camera_id"],
                 "time": row["timestamp"],
                 "bbox": bbox,
+                "asset_id": row["asset_id"],
+                "video_frame": row["video_frame"],
+                "video_ts": row["video_ts"],
             })
         return int(total), appearances
 

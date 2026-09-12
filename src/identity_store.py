@@ -761,11 +761,17 @@ class IdentityStore:
         bbox: list[float],
         quality_score: float = 1.0,   # [0,1]，由 pipeline 传入，基于 bbox 面积+置信度
         base_alpha: float = 0.85,     # 基础衰减系数（质量满分时使用）
+        asset_id: int | None = None,
+        video_frame: int | None = None,
+        video_ts: float | None = None,
     ) -> None:
         """
         记录出现事件，并用质量加权的滑动平均更新特征向量（P1-3）。
         同时动态维护多姿态特征向量库 (Feature Bank, max_size=5)。
         持久化只走增量路径：整行（含特征 BLOB）按 _FEATURE_FLUSH_* 节流写入。
+
+        asset_id / video_frame / video_ts 是"视频内坐标"（worklist 2.3）：
+        素材循环播放，墙钟 timestamp 无法反查源视频位置，检索回放必须靠这三列。
         """
         quality = min(1.0, max(0.0, quality_score))
         self.metrics.record_quality(quality)
@@ -805,6 +811,9 @@ class IdentityStore:
                 "camera": camera_id,
                 "time": rec.last_seen,
                 "bbox": list(bbox),
+                "asset_id": asset_id,
+                "video_frame": video_frame,
+                "video_ts": video_ts,
             })
             rec.total_appearances += 1
             new_appearance = dict(rec.appearances[-1])
@@ -823,6 +832,9 @@ class IdentityStore:
             timestamp=new_appearance["time"],
             bbox=new_appearance["bbox"],
             total_appearances=total_appearances,
+            asset_id=new_appearance.get("asset_id"),
+            video_frame=new_appearance.get("video_frame"),
+            video_ts=new_appearance.get("video_ts"),
         )
         if not recorded:
             # identities 行缺失（例如被保留期清理掉）：退回整行写入，避免特征永久丢失
@@ -841,6 +853,22 @@ class IdentityStore:
     def all_ids(self) -> list[str]:
         with self._lock:
             return list(self._records.keys())
+
+    def video_asset_for(self, camera_id: str) -> dict | None:
+        """读取该相机的视频资产行（含实测帧数/时长/编码）。无数据库时返回 None。"""
+        if self._database is None:
+            return None
+        return self._database.get_video_asset(camera_id)
+
+    def register_video_asset_stub(self, camera_id: str, rel_path: str,
+                                  file_name: str | None = None,
+                                  size_bytes: int | None = None) -> int | None:
+        """占位登记视频资产（INSERT OR IGNORE，不覆盖 seeder 的实测元数据）。"""
+        if self._database is None:
+            return None
+        return self._database.upsert_video_asset_stub(
+            camera_id, rel_path, file_name, size_bytes
+        )
 
     def get_metrics(self) -> dict:
         with self._lock:

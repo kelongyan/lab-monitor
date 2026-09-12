@@ -246,12 +246,14 @@ def main() -> int:
             "cameras": list(cameras),
         })
 
+        database.close()
+
         if args.keep_db:
+            # 必须在 database.close() 之后复制：库是 WAL 模式，close 才会 checkpoint，
+            # 否则拷出去的文件缺最近的事务（实测拷出来是空库）
             target = Path(args.keep_db)
             target.write_bytes(db_path.read_bytes())
             print(f"评测库已另存: {target}")
-
-        database.close()
 
     print("\n" + "=" * 66)
     print("验收指标")

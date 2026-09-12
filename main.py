@@ -242,6 +242,9 @@ def main(
     perf["frame_rate_cap"] = _env_positive("LAB_MONITOR_FRAME_RATE_CAP", perf["frame_rate_cap"], float)
     perf["mjpeg_fps"]      = _env_positive("LAB_MONITOR_MJPEG_FPS", perf["mjpeg_fps"], float)
     perf["reid_every_n"]   = _env_positive("LAB_MONITOR_REID_EVERY_N", perf["reid_every_n"], int)
+    # 运行时缩放上限（worklist 2.4）：本地素材已转码时不触发；RTSP 在线流靠它兜底。
+    # 要关闭就设一个大于所有源宽度的值（如 4096），_env_positive 不接受 0。
+    process_max_width = _env_positive("LAB_MONITOR_PROCESS_MAX_WIDTH", 960, int)
     logger.info(
         "⚙️ 性能模式: %s (取帧上限 %.0ffps / YOLO每%d帧 / ReID每%d帧 / MJPEG %.0ffps / JPEG q%d)",
         "GPU" if device == "cuda" else "CPU",
@@ -355,6 +358,7 @@ def main(
             detect_every_n = perf["detect_every_n"],
             reid_every_n   = perf["reid_every_n"],
             frame_rate_cap = perf["frame_rate_cap"],
+            process_max_width=process_max_width,
         )
         pipelines.append(p)
         p.start()

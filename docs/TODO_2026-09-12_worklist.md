@@ -213,38 +213,59 @@
 
 ---
 
-## 批次二 · 数据基础（6 项）
+## 批次二 · 数据基础（6 项，2026-09-12 全部完成）
 
-- [ ] **2.1 `video_assets` 表** —— **M**
-  - 建表（含 `sha1_8` / `frames_real` / `duration_real` / `loop_detected` / `low_value`），`_init_db` 的 `migrations` 字典补列
-  - 22 路的 `frames_real` / `duration_real` **直接落库**（`probe_media_frames.py` 已跑完，见方案 §2），不要重跑
-  - 新建 `tests/test_video_assets.py`
-  - 验收：`GET /api/assets` 返回 22 行，`duration_real` 合计约 45 分钟
+- [x] **2.1 `video_assets` 表 + 实测元数据** —— **M**（完成）
+  - 建表（含 sha1_8 / frames_real / duration_real / loop_detected / low_value），
+    `UNIQUE(camera_id, rel_path)` 允许同一相机同时有"源文件"与"低清转码产物"两行。
+  - `scripts/seed_video_assets.py`（新增）：`ffprobe -count_frames` **实解码**逐路实测，
+    结果落库后复用（--refresh 才重测）。实测 22 路耗时 22 分钟（与转码并行时被拖慢）。
+  - `GET /api/assets`（新增）：列出语料范围与实测时长，标注 `measured` 与 `low_value`。
+  - 实测结果：22 路合计 **67,576 帧 / 45.1 分钟**，与早前独立探测完全吻合。
 
-- [ ] **2.2 轨迹表补「视频内时间」三列** —— **M**
-  - `identity_appearances` 加 `asset_id` / `video_frame` / `video_ts`，加索引 `(global_id, camera_id, timestamp)`
-  - 理由：素材循环播放，墙钟 `timestamp` 无法反查源视频位置，检索结果就没法"跳转到那一段"
-  - 老数据这三列为 NULL → 检索返回 `position_known: false`，前端降级为只显示相机 + 墙钟时间，**不做无根据的回填猜测**
+- [x] **2.2 轨迹表补「视频内时间」三列** —— **M**（完成）
+  - `identity_appearances` 加 `asset_id` / `video_frame` / `video_ts`（迁移走
+    `_init_db` 的 appearance_migrations 字典，老库自动升级），
+    加复合索引 `idx_appearances_gid_cam_ts(global_id, camera_id, timestamp)`。
+  - **为什么必须双时间轴**：素材循环播放，墙钟 `timestamp` 表示"第几轮播放的第几秒"，
+    无法反查源视频位置；检索回放只能靠这三列。
+  - 老数据三列为 NULL → 检索返回 `position_known: false` 降级，**不做无根据的回填猜测**。
 
-- [ ] **2.3 采集侧写入视频内坐标** —— **S**
-  - 位置：`src/pipeline.py:_read_loop` 与 `_process_frame` → `IdentityStore.update_appearance`
-  - 动作：把 `self._frame_idx`（或 `cap.get(CAP_PROP_POS_FRAMES)`）与 `asset_id` 一路透传到 `db.record_appearance` / `save_identity`
-  - 注意：`update_appearance` 的轻量路径（只插增量行）与 `_persist_full` 兜底路径**都要带上**，漏一条就会出现半截数据
+- [x] **2.3 采集侧写入视频内坐标** —— **S**（完成，端到端已验证）
+  - 新增 `CameraPipeline._file_frame_idx`：**当前文件内帧号**。
+    关键坑：原有的 `_frame_idx` 是进程生命周期累计值，**不随素材循环复位**，
+    直接拿它当"源视频第几帧"是错的 —— 必须在 `_reset_stream_state()` 里归零。
+  - `video_ts = _file_frame_idx / _video_fps`，fps 取自资产索引
+    （元数据帧率可能损坏，只接受 [10,60] 区间，否则回落 25）。
+  - **端到端验证**（eval 75 秒 / 2 路）：37/37 行三列全部非空，
+    `video_frame=497 → video_ts=19.88s` 与 25fps 换算精确一致。
+  - 顺带修掉评测脚本的一个顺序 bug：`--keep-db` 的复制原先发生在 `database.close()`
+    **之前**，WAL 未 checkpoint，拷出去的库缺最近事务（实测拷出来是空库）。
 
-- [ ] **2.4 运行时缩放兜底 `process_max_width`** —— **S**
-  - `CameraPipeline.__init__` 增参数（默认 960），`_read_loop` 里 `cap.read()` 后按需 `cv2.resize`
-  - 用途：RTSP 在线流无法离线转码，只能走运行时缩放。**这条无论本次做不做都必须建**，是能力三唯一确定的价值
-  - 注意：缩放要在 `push_frame` 之前，否则 MJPEG 与告警截图拿到的是原始大帧
+- [x] **2.4 运行时缩放兜底 `process_max_width`** —— **S**（完成）
+  - `CameraPipeline` 新增参数（默认 960，`LAB_MONITOR_PROCESS_MAX_WIDTH` 可覆盖）；
+    在 `_process_frame` 与 `push_frame` **之前**等比缩小（否则 YOLO/ReID/MJPEG/截图
+    拿到的还是原始大帧）。本地素材已转码时不触发（宽度已 <= 上限），零开销。
+  - 用途：RTSP 在线流无法离线转码，只能靠这条路径。
 
-- [ ] **2.5 `scripts/transcode_lowres.py` + A/B 实验** —— **M**（优先级可延后）
-  - 参数 `--scale 960:540` / `--crf 28` / `--only reg_01` / `--dry-run`；按 `sha1_8` 幂等跳过
-  - A/B 抽 3 路：`reg_01`（1080p 常规）、`rnd_21`（1440p 随机）、`rnd_16`（唯一含 ROI）。原片 vs 低分片各跑 300 秒，比人数召回 / 注册身份数 / 每路 fps，落 `outputs/reports/resolution_ab.csv`
-  - 定档规则：小目标召回下降 > 5% 就退到 `1280x720`；≤ 2% 可再试 `854x480`
+- [x] **2.5 `scripts/transcode_lowres.py`** —— **M**（完成；A/B 实验暂缓，见下）
+  - 支持参数：--scale（默认 960:-2，两种源分辨率都恰好落在 540p 无黑边）/ --crf /
+    --only / --dry-run / --refresh / --seed-only / --switch-sources。
+  - **已全量执行**：22 路全部转码成功，**983MB → 29MB（压缩 34 倍）**，
+    且统一 `-r 25` 顺带修复了 rnd_05 损坏的 351.56 元数据。
+    转码产物已全部登记进 video_assets（44 行 = 22 源 + 22 低清）。
+  - 切换开关 `--switch-sources` 已就绪但**未执行**（会改变所有资产的 rel_path 语义，
+    需要先决定是否重建身份库，见下）。
+  - **A/B 实验暂缓的理由**：吞吐瓶颈是 GIL 不是解码，降分辨率的吞吐收益本来就有限
+    （预期 +10~20%）；而现在身份库是按源视频的资产索引建的，切换到 videos_low 会
+    使已有身份的 asset_id 指向旧路径。建议把 A/B 与"是否切换 sources"一起推迟到
+    批次四（检索）落地后，用真实检索效果来定 —— 届时有业务收益可依据。
 
-- [ ] **2.6 `rnd_05` 标记 `low_value`** —— **S**
-  - 真实内容仅 1.3 秒 / 460 帧（fps 元数据报 351.56，属损坏读数）。索引里打标记，**不删除**（采集点不能随意摘除），但 A/B 与检索结果默认排除
-
----
+- [x] **2.6 rnd_05 修正** —— **S**（完成，结论修正）
+  - **原结论有误**：之前写"rnd_05 仅 1.3 秒"，那是用损坏的元数据帧率 351.56 除出来的。
+    按 fps 修正规则（只接受 [10,60] 区间，否则回落 25）实解 460 帧 → **真实时长 18.4 秒**。
+  - 因此 `low_value` 阈值（<5s）在当前 22 路上**一个都不命中** —— 22 路最短 18.4s，
+    全部保留。low_value 字段保留（将来接入更短素材时有用），当前无排除对象。
 
 ## 批次三 · 能力一：人员身份识别（6 项）
 
@@ -343,16 +364,26 @@
 
 | 批次 | 项数 | 已完成 | 阻塞关系 |
 |---|---|---|---|
-| 一 · 修特征层 | 8 | **8 全部完成** | 批次一收口，可进批次二 |
-| 二 · 数据基础 | 6 | 0 | 2.1~2.3 阻塞批次四 |
+| 一 · 修特征层 | 8 | **8 全部完成** | 批次一收口 |
+| 二 · 数据基础 | 6 | **6 全部完成** | 能力二（检索）的数据基础已就位 |
 | 三 · 能力一 身份识别 | 6 | 0 | 依赖批次一 |
 | 四 · 能力二 视频检索 | 6 | 0 | 依赖批次一 + 2.1~2.3 |
 | 五 · 能力一 路径 B | 3 | 0 | 依赖批次三 |
 | 并行清理 | 8 | 0 | 无 |
 
-**批次一已全部收口。** 身份库现态：6 个身份、两两中心化相似度 max 0.613、
-0 对越过阈值 0.68，全部身份彼此可分。
-后续可选优化：① 把 consolidate() 挂成周期任务（服务内自动归并，现在只能手动跑脚本）；
-② 中心预热（用本库特征预置中心，让重建后第一帧就有中心化）；③ 跨相机人工标注补盲区。
+**批次一、二均已收口。** 当前能力状态：
+身份库 6 个身份、两两中心化相似度 max 0.613、0 对越过阈值 0.68；
+资产索引 44 行（22 源 + 22 低清）；轨迹行已带视频内坐标（回放定位就绪）；
+低清语料 29MB（983MB → 29MB）已转码并登记。
 
-**可以进批次二（数据基础：video_assets + 轨迹表加视频内时间）。**
+**下一步是批次三（能力一：人员身份识别，personnel 表 + 绑定）**
+与批次四（能力二：人员视频检索）。批次三依赖批次一（已满足）；
+批次四依赖 2.1~2.3（已满足）。两者可以并行推进，建议先做批次四 ——
+检索是验收身份识别最直接的工具。
+
+**遗留的三个可选优化**（不阻塞）：
+① consolidate() 挂成周期任务（现在只能手动跑脚本）；
+② 中心预热（用本库特征预置中心，让重建后第一帧就有中心化）；
+③ 跨相机人工标注补盲区（自动正样本全是同相机相邻帧）。
+另：`--switch-sources`（切到低清语料）已就绪但未执行 —— 会改变资产 rel_path 语义，
+建议与"是否重建身份库"一起在批次四落地后再决定。

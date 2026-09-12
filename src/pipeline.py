@@ -99,6 +99,8 @@ class CameraPipeline(threading.Thread):
         detect_every_n: int = 1,      # YOLO 跳帧：每 N 帧推理一次（CPU=3，GPU=1）
         reid_every_n: int = 5,        # ReID 跳帧：每 N 帧提取一次特征（CPU=15，GPU=5）
         frame_rate_cap: float = 30.0, # 帧率上限（这个默认值只是兜底，实际由 main.py 传入）
+        process_max_width: int = 960, # 运行时缩放上限（worklist 2.4：RTSP 在线流无法离线转码，
+                                      # 只能靠解码后缩放；超过则等比缩小）
     ):
         super().__init__(name=f"pipeline-{camera_id}", daemon=True)
         self.camera_id = camera_id
@@ -142,6 +144,41 @@ class CameraPipeline(threading.Thread):
 
         self._reconnect_count = 0
         self._rois = self._load_rois()
+
+        # ---- 视频内坐标（worklist 2.3）----
+        # _frame_idx 是**进程生命周期**累计值，不随素材循环复位，不能当"源视频第几帧"用。
+        # 必须单独维护一个"当前文件内帧号"，在每次重开流（文件循环 / RTSP 重连）时归零。
+        self._file_frame_idx = 0
+        self._asset_id: int | None = None
+        self._video_fps = 25.0          # 把帧号换算成"视频内秒数"用的帧率
+        self._process_max_width = max(0, int(process_max_width))
+        self._register_asset()
+
+    def _register_asset(self) -> None:
+        """
+        登记本路视频资产并取回 asset_id（worklist 2.1/2.3）。
+
+        元数据（实测帧数/时长）由 scripts/seed_video_assets.py 以 ffprobe 实测写入；
+        这里只保证 (camera_id, rel_path) 有行可查 —— 若 seeder 还没跑过，
+        INSERT OR IGNORE 会先放一个占位行，之后 seeder 再补齐元数据。
+        """
+        if self.store is None or _is_rtsp(self.source):
+            return
+        try:
+            path = Path(self.source)
+            size = path.stat().st_size if path.exists() else None
+            self._asset_id = self.store.register_video_asset_stub(
+                self.camera_id, self.source, path.name, size
+            )
+            asset = self.store.video_asset_for(self.camera_id)
+            if asset and asset.get("fps_declared"):
+                fps = float(asset["fps_declared"])
+                # 元数据帧率可能损坏（rnd_05 报 351.56），只接受合理区间
+                if 10.0 <= fps <= 60.0:
+                    self._video_fps = fps
+        except Exception:
+            logger.warning("[%s] 视频资产登记失败，视频内坐标将缺失", self.camera_id,
+                           exc_info=True)
 
     def _load_rois(self) -> list[dict]:
         import json
@@ -246,6 +283,8 @@ class CameraPipeline(threading.Thread):
         self._track_to_global = {}
         self._reid_frame_counter = {}
         self._last_tracks = []
+        # 新一轮播放从第 0 帧开始 —— 视频内坐标必须跟着归零
+        self._file_frame_idx = 0
 
     def _capture_ready(self, cap) -> bool:
         """
@@ -413,7 +452,17 @@ class CameraPipeline(threading.Thread):
             if not ret:
                 break
             self._frame_idx += 1
+            self._file_frame_idx += 1
             decoded += 1
+            # 运行时缩放兜底（worklist 2.4）：必须在 _process_frame 与 push_frame 之前，
+            # 否则 YOLO / ReID / MJPEG / 告警截图拿到的还是原始大帧。
+            # 本地素材已离线转码时这一步不会触发（宽 already <= 上限），零开销。
+            if self._process_max_width and frame.shape[1] > self._process_max_width:
+                scale = self._process_max_width / frame.shape[1]
+                frame = cv2.resize(
+                    frame,
+                    (self._process_max_width, max(1, int(round(frame.shape[0] * scale)))),
+                )
             self._process_frame(frame)
             if self.frame_hub:
                 self.frame_hub.push_frame(self.camera_id, frame, status_text="ONLINE")
@@ -546,7 +595,13 @@ class CameraPipeline(threading.Thread):
                 h = bbox[3] - bbox[1]
                 area_score = min(1.0, (w * h) / (128.0 * 256.0))
                 quality = area_score * min(1.0, conf)
-                self.store.update_appearance(gid, self.camera_id, feat, bbox, quality_score=quality)
+                self.store.update_appearance(
+                    gid, self.camera_id, feat, bbox,
+                    quality_score=quality,
+                    asset_id=self._asset_id,
+                    video_frame=self._file_frame_idx,
+                    video_ts=self._file_frame_idx / self._video_fps,
+                )
                 self.alerter.mark_seen(gid)
 
         # 绘制定位框和身份/追踪 ID 标签 + ROI 校验
