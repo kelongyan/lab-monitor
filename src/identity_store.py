@@ -12,6 +12,7 @@ from collections import deque
 from dataclasses import dataclass, field
 
 from .reid import match_feature_detailed
+from .reid_config import REID_MATCH_THRESHOLD, REID_RATIO_TEST
 
 # 每个身份最多保留最近 N 条出现记录，防止长时间运行后内存耗尽
 _MAX_APPEARANCES = 200
@@ -22,6 +23,14 @@ _FEATURE_SCHEMA_VERSION = 1
 # 其余时刻只插一条 identity_appearances 增量行 + 更新三个轻量列。
 _FEATURE_FLUSH_EVERY_UPDATES = 50
 _FEATURE_FLUSH_INTERVAL_SECONDS = 30.0
+
+# 特征塌缩护栏（2026-09-12 新增）：
+# 新身份与已有身份的相似度超过这个值时，几乎不可能是两个人 —— 说明特征空间已退化到
+# 无法区分个体。此时必须告警而不是静默新建身份，否则身份表会无声膨胀。
+# 判据取 0.999 而不是更低的值：比这更低的相似度有可能是"同一个人换了衣服"，
+# 需要靠阈值标定解决，不能一概报警。
+_COLLAPSE_SIMILARITY_ALERT = 0.999
+_COLLAPSE_WARN_INTERVAL = 60.0   # 告警日志节流间隔（秒）
 logger = logging.getLogger("identity_store")
 
 
@@ -126,12 +135,16 @@ class IdentityStore:
         self._feature_dim: int | None = None
         # gid -> [距上次特征落盘的更新次数, 上次特征落盘时间]，只在持有 self._lock 时读写
         self._feature_flush_state: dict[str, list] = {}
+        # 特征塌缩护栏计数（见 _COLLAPSE_SIMILARITY_ALERT）
+        self._collapse_warnings = 0
+        self._collapse_warned_at = 0.0
         self.metrics = ReIDMetrics()
         if self._database is not None:
             self._restore()
 
     def _restore(self) -> None:
         restored = 0
+        space_mismatch = 0
         items = sorted(
             self._database.load_identities(),
             key=lambda item: item.get("last_seen", 0.0),
@@ -146,10 +159,9 @@ class IdentityStore:
                     )
                     continue
                 if item["feature_space"] != self._feature_space:
-                    logger.warning(
-                        "跳过身份 %s：特征空间 %r 与当前 %r 不一致",
-                        item["global_id"], item["feature_space"], self._feature_space,
-                    )
+                    # 逐条打 warning 会刷屏（换权重后旧身份是**全部**被跳过），
+                    # 因此改为计数 + 末尾汇总一条可读的提示。
+                    space_mismatch += 1
                     continue
                 dim = int(item["feature_dim"])
                 if dim <= 0 or len(item["feature_blob"]) != dim * 4:
@@ -196,6 +208,14 @@ class IdentityStore:
                 )
         if restored:
             logger.info("已从 SQLite 恢复 %d 个 ReID 身份", restored)
+        if space_mismatch:
+            logger.warning(
+                "跳过 %d 个身份：特征空间与当前 %r 不一致（当前库共 %d 条）。"
+                "**这是换 ReID 权重后的预期行为** —— 旧特征由别的权重产生，"
+                "与新特征不可比，必须重新注册。不是数据丢失：identity_appearances "
+                "里的轨迹仍在，可继续用于检索与统计。",
+                space_mismatch, self._feature_space, len(items),
+            )
 
     @staticmethod
     def _snapshot(rec: PersonRecord) -> PersonRecord:
@@ -314,9 +334,34 @@ class IdentityStore:
     # ------------------------------------------------------------------ #
 
     def get_gallery(self) -> list[tuple[str, np.ndarray]]:
-        """返回所有身份的 (global_id, feature) 列表，供 ReID 匹配用"""
+        """返回所有身份的 (global_id, 主特征) 列表 —— 严格一身份一行。
+
+        注意：主特征是 EMA 滑动平均，会指数抹平身份特异残差
+        （见 `scripts/diagnose_ema_collapse.py`）。**匹配请用 `get_match_gallery()`**，
+        它会把每个身份的 feature_bank 一起展开，由 `match_feature_detailed()`
+        按身份取 max，从而绕开 EMA 塌缩。本方法保留给"一身份一向量"的展示型用途。
+        """
         with self._lock:
             return [(gid, rec.feature.copy()) for gid, rec in self._records.items()]
+
+    def get_match_gallery(self) -> list[tuple[str, np.ndarray]]:
+        """
+        返回用于匹配的 (global_id, feature) 行 —— 同一身份可能多行。
+
+        每行是主特征或 feature_bank 中的一个姿态特征。`feature_bank` 存的是**原始**
+        特征且带多样性约束（与已有 bank 相似度 <0.92 才入池），因此不受 EMA 塌缩影响；
+        取 max 可显著提升同一人跨姿态/跨镜头的召回。
+
+        规模提示：行数 = 身份数 × (1 + bank 大小) ≤ 6 倍身份数。当前库只有几十个身份，
+        开销可忽略；若将来 `LAB_MONITOR_MAX_IDENTITIES` 调到万级，需要改为
+        预建特征矩阵或走 ANN 索引，否则每次匹配都要重算 6 万行。
+        """
+        with self._lock:
+            return [
+                (gid, feat.copy())
+                for gid, rec in self._records.items()
+                for feat in [rec.feature, *rec.feature_bank]
+            ]
 
     def get_full_gallery(self) -> list[tuple[str, list[np.ndarray]]]:
         """返回所有身份及其多姿态特征向量库，用于高精度多模态比对"""
@@ -368,8 +413,8 @@ class IdentityStore:
     def register_if_new(
         self,
         feature: np.ndarray,
-        threshold: float = 0.75,
-        ratio: float = 0.85,
+        threshold: float = REID_MATCH_THRESHOLD,
+        ratio: float = REID_RATIO_TEST,
     ) -> IdentityResolution:
         """
         原子性向量化查重+注册：
@@ -385,14 +430,17 @@ class IdentityStore:
             if self._feature_dim is not None and feat_copy.size != self._feature_dim:
                 return IdentityResolution(global_id=None, status="invalid")
             if self._records:
-                gallery = []
-                for global_id, record in self._records.items():
-                    candidates = [record.feature, *record.feature_bank]
-                    best_feature = max(
-                        candidates,
-                        key=lambda candidate: float(candidate @ feat_copy),
-                    )
-                    gallery.append((global_id, best_feature))
+                # 展开每个身份的 [主特征, *feature_bank]，交给 match_feature_detailed
+                # 按身份去重（取 max）后再做阈值/Ratio 判定。
+                # 这里的去重是**语义要求**而不是优化：不去重时同一身份会同时占据
+                # best 与 second，Ratio Test 必然判"歧义"→ 调用方新建身份 →
+                # 身份表无限膨胀。库内现存的 45 个身份里有 27 个分属 7 组、
+                # 每组特征字节完全相同，就是这么长出来的。
+                gallery = [
+                    (global_id, feat)
+                    for global_id, record in self._records.items()
+                    for feat in [record.feature, *record.feature_bank]
+                ]
                 detail = match_feature_detailed(
                     feat_copy,
                     gallery,
@@ -406,6 +454,35 @@ class IdentityStore:
                         best_similarity=detail.best_sim,
                         second_similarity=detail.second_sim,
                     )
+
+                # 护栏必须放在 ambiguous 分支**之前**：塌缩的典型表现正是
+                # "与已有身份几乎完全一致，却因 Ratio Test 判歧义而拒绝归并"，
+                # 若放在 ambiguous 的 return 之后，这条护栏永远执行不到。
+                #
+                # 后果不是"错认"，而是"永远认不出"：本 track 拿不到 global_id，
+                # 调用方（pipeline.py:527）只打一行 debug 就继续，攒满的 8 帧
+                # ReID 缓冲被白白丢弃，下一帧从头再攒 —— 人员反复进出、身份表
+                # 却不再增长，而库里 27 个身份分属 7 组、特征字节完全相同，
+                # 就是这个状态留下的痕迹。
+                #
+                # 判据取 0.999 而不是更低：更低的相似度可能是"同一个人换了衣服"，
+                # 属于阈值标定问题，不能一概报警。日志做 60 秒节流，避免每帧刷屏。
+                if detail.best_sim >= _COLLAPSE_SIMILARITY_ALERT:
+                    self._collapse_warnings += 1
+                    now = time.time()
+                    if now - self._collapse_warned_at >= _COLLAPSE_WARN_INTERVAL:
+                        self._collapse_warned_at = now
+                        logger.error(
+                            "ReID 特征塌缩疑似：查询与已有身份相似度 %.4f（≥%.3f）"
+                            "却被判为歧义，无法归并。累计 %d 次。"
+                            "根因见 scripts/diagnose_ema_collapse.py（主特征的 EMA "
+                            "滑动平均抹平身份特异残差）。修复方向见 "
+                            "docs/TODO_2026-09-12_worklist.md 项 1.6。"
+                            "在该问题解决前，身份识别结果不应采信。",
+                            detail.best_sim, _COLLAPSE_SIMILARITY_ALERT,
+                            self._collapse_warnings,
+                        )
+
                 if detail.is_ratio_blocked:
                     return IdentityResolution(
                         global_id=None,
@@ -521,4 +598,9 @@ class IdentityStore:
     def get_metrics(self) -> dict:
         with self._lock:
             g_size = len(self._records)
-        return self.metrics.get_summary(gallery_size=g_size)
+            collapse = self._collapse_warnings
+        summary = self.metrics.get_summary(gallery_size=g_size)
+        # 塌缩告警次数外露到 /api/metrics/reid 与 /api/system/metrics：
+        # 这个失败模式此前完全不可观测（只能靠人肉发现"身份数在慢慢变多"）。
+        summary["collapse_warnings"] = collapse
+        return summary

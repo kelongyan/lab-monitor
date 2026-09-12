@@ -135,7 +135,9 @@ class CameraPipeline(threading.Thread):
         self._validator = ReIDValidator(
             buffer_size=8,
             confirm_frames=3,
-            threshold=0.75,
+            # 匹配阈值刻意不在调用点写死：默认值来自 src/reid_config.py
+            # （可用 LAB_MONITOR_REID_THRESHOLD / _RATIO 覆盖），保证只有一处真相。
+            # 历史上这里与另外 5 处各自硬编码 0.75，导致"调阈值"在工程上不可执行。
         )
 
         self._reconnect_count = 0
@@ -235,7 +237,9 @@ class CameraPipeline(threading.Thread):
         self._validator = ReIDValidator(
             buffer_size=8,
             confirm_frames=3,
-            threshold=0.75,
+            # 匹配阈值刻意不在调用点写死：默认值来自 src/reid_config.py
+            # （可用 LAB_MONITOR_REID_THRESHOLD / _RATIO 覆盖），保证只有一处真相。
+            # 历史上这里与另外 5 处各自硬编码 0.75，导致"调阈值"在工程上不可执行。
         )
         self._prev_track_ids = set()
         self._absent_streak = {}
@@ -492,7 +496,9 @@ class CameraPipeline(threading.Thread):
             gid = self._track_to_global.get(tid)
             if gid is None:
                 # 用多帧平均特征做确认匹配
-                gallery = self.store.get_gallery()
+                # 用展开后的 gallery（主特征 + feature_bank）：bank 存的是原始特征，
+                # 不受主特征 EMA 滑动平均的塌缩影响，同人跨姿态召回明显更好。
+                gallery = self.store.get_match_gallery()
                 confirmed_gid = self._validator.get_confirmed_match(tid, gallery, metrics=self.store.metrics)
 
                 if confirmed_gid:

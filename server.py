@@ -86,6 +86,22 @@ _roi_file_lock = asyncio.Lock()
 # CSV 导出行数上限（P2-13：避免全表读进内存拼字符串导致 OOM）
 _ALERT_EXPORT_MAX_ROWS = 50000
 
+# IdentityStore 未注入时的空指标。字段必须与 IdentityStore.get_metrics() 的返回**同构**，
+# 否则前端在"服务刚起、store 还没就绪"的窗口里会读到缺字段的 payload 而报错。
+# collapse_warnings 是 ReID 特征塌缩护栏的计数（见 src/identity_store.py）。
+_EMPTY_REID_METRICS: dict = {
+    "gallery_size": 0,
+    "total_searches": 0,
+    "successful_matches": 0,
+    "ratio_blocked_count": 0,
+    "match_rate": 0.0,
+    "avg_top1_similarity": 0.0,
+    "avg_ratio_margin": 0.0,
+    "avg_latency_ms": 0.0,
+    "avg_feature_quality": 0.0,
+    "collapse_warnings": 0,
+}
+
 
 def _read_json_file(path: Path) -> dict:
     return json.loads(path.read_text(encoding="utf-8"))
@@ -467,17 +483,7 @@ async def get_status():
 @app.get("/api/metrics/reid")
 async def get_reid_metrics():
     if _identity_store is None:
-        return JSONResponse({
-            "gallery_size": 0,
-            "total_searches": 0,
-            "successful_matches": 0,
-            "ratio_blocked_count": 0,
-            "match_rate": 0.0,
-            "avg_top1_similarity": 0.0,
-            "avg_ratio_margin": 0.0,
-            "avg_latency_ms": 0.0,
-            "avg_feature_quality": 0.0,
-        })
+        return JSONResponse(_EMPTY_REID_METRICS)
     return JSONResponse(_identity_store.get_metrics())
 
 
@@ -992,17 +998,7 @@ def _identities_payload() -> dict:
 
 def _reid_metrics_payload() -> dict:
     if _identity_store is None:
-        return {
-            "gallery_size": 0,
-            "total_searches": 0,
-            "successful_matches": 0,
-            "ratio_blocked_count": 0,
-            "match_rate": 0.0,
-            "avg_top1_similarity": 0.0,
-            "avg_ratio_margin": 0.0,
-            "avg_latency_ms": 0.0,
-            "avg_feature_quality": 0.0,
-        }
+        return dict(_EMPTY_REID_METRICS)
     return _identity_store.get_metrics()
 
 

@@ -19,8 +19,12 @@ import numpy as np
 sys.stdout = io.TextIOWrapper(sys.stdout.buffer, encoding="utf-8")
 
 ROOT = Path(__file__).resolve().parent.parent
-THRESHOLD = 0.75
-RATIO = 0.85
+if str(ROOT) not in sys.path:
+    sys.path.insert(0, str(ROOT))
+
+# 判据阈值直接读线上配置，不写死 —— 否则诊断结论会与线上行为脱节
+from src.reid_config import REID_MATCH_THRESHOLD as THRESHOLD  # noqa: E402
+from src.reid_config import REID_RATIO_TEST as RATIO  # noqa: E402
 
 
 def load() -> list[dict]:

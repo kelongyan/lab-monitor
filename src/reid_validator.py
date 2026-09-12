@@ -10,6 +10,7 @@ import numpy as np
 from collections import defaultdict, deque
 
 from .reid import match_feature, match_feature_detailed
+from .reid_config import REID_MATCH_THRESHOLD
 
 logger = logging.getLogger("reid_validator")
 
@@ -28,7 +29,7 @@ class ReIDValidator:
         self,
         buffer_size: int = 8,      # 特征缓冲帧数
         confirm_frames: int = 3,   # 连续匹配同一 ID 多少帧才确认
-        threshold: float = 0.75,   # 余弦相似度阈值
+        threshold: float = REID_MATCH_THRESHOLD,   # 余弦相似度阈值（见 src/reid_config.py）
     ):
         self._buffer_size = buffer_size
         self._confirm_frames = confirm_frames

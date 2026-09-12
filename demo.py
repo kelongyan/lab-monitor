@@ -149,7 +149,8 @@ def run_mock_pipeline() -> None:
     # 3. cam_02 出现相似特征 → 应命中匹配
     feat2 = similar_feat(noise=0.05)
     gallery = store.get_gallery()
-    matched = match_feature(feat2, gallery, threshold=0.75)
+    # 阈值用 src/reid_config.py 的当前值，不写死 —— demo 应该复现线上判据
+    matched = match_feature(feat2, gallery)
     if matched:
         store.update_appearance(matched, "cam_02", feat2, [80, 60, 140, 180])
         resolved = alerter.resolve(matched, "cam_02")
