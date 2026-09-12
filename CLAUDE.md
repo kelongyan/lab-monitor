@@ -59,8 +59,8 @@ http://localhost:8000
 | `LAB_MONITOR_RETENTION_DAYS` | `30` | 告警/截图保留天数（仅在启动时执行一次清理） |
 | `LAB_MONITOR_RTSP_OPEN_TIMEOUT_MS` / `_READ_TIMEOUT_MS` | `10000` | RTSP 连接/读取超时 |
 | `LAB_MONITOR_FRAME_RATE_CAP` | GPU `10` / CPU `15` | 取帧上限 fps，覆盖设备默认档（`main.py:_env_positive`）。非法或非正值只打 warning 并回落默认 |
-| `LAB_MONITOR_REID_EVERY_N` | GPU `5` / CPU `15` | 每个 track 每 N 个处理帧提一次 ReID 特征。**必须和实际达到的帧率一起调**，见「性能档位」下的缓冲填充算式 |
-| `LAB_MONITOR_MJPEG_FPS` | GPU `15` / CPU `15` | MJPEG 推流轮询频率 |
+| `LAB_MONITOR_REID_EVERY_N` | GPU `10` / CPU `15` | 每个 track 每 N 个处理帧提一次 ReID 特征。**必须和实际达到的帧率一起调**，见「性能档位」下的缓冲填充算式 |
+| `LAB_MONITOR_MJPEG_FPS` | GPU `30` / CPU `15` | MJPEG 推流轮询频率 |
 | `LAB_MONITOR_LEAVE_GRACE_FRAMES` | `12` | track_id 从 tracker 输出里连续缺席多少个**处理帧**才算人员离场（`src/pipeline.py:38-56`）。上限钳到 30（= `track_buffer`），设 `1` 可回退到改造前"当帧即判离场"的行为 |
 | `LAB_MONITOR_INTRUSION_COOLDOWN` | `120` | 同一（相机, 身份, 围栏）的 INTRUSION 复报间隔秒数（`src/alerter.py:27`）。**这只是复报间隔，不是驻留判定**——按"进入/离开围栏"配对的状态机尚未实现 |
 
@@ -109,10 +109,10 @@ main.py (主线程)
 | 参数 | GPU | CPU | 影响 |
 |------|-----|-----|------|
 | `detect_every_n` | 1 | 3 | YOLO 跳帧；非检测帧复用上次 tracker 输出（**不能给 ByteTracker 传空列表**，会瞬间清空所有 track） |
-| `reid_every_n` | 5 | 15 | 每个 track 每 N 帧才提一次 ReID 特征。**这个值不能单独调**：`ReIDValidator` 要攒满 `buffer_size=8` 才会 `register_if_new()`，填满耗时 = `8 × reid_every_n / 实际fps` 秒，而单相机内轨迹时长中位只有 **7.1s**（实测）。10fps+R=3 → 2.4s ✓；1.77fps+R=5 → 22.6s ✗ 永远填不满 |
+| `reid_every_n` | **10** | 15 | 每个 track 每 N 帧才提一次 ReID 特征。**这个值不能单独调**：`ReIDValidator` 要攒满 `buffer_size=8` 才会 `register_if_new()`，填满耗时 = `8 × reid_every_n / 实际fps` 秒，而单相机内轨迹时长中位只有 **7.1s**（实测）。10fps+R=3 → 2.4s ✓；1.77fps+R=5 → 22.6s ✗ 永远填不满 |
 | `frame_rate_cap` | **10** | 15 | `_read_loop` 里 sleep 补齐到该帧率。GPU 档 2026-08-25 从 30 降到 10：素材全是 25fps，抽到 10fps 时 ByteTrack 相邻帧 IoU 中位 0.87、关联失败率 0.1%，追 25fps 纯属浪费 |
-| `mjpeg_fps` | **15** | 15 | MJPEG 推流间隔，取略高于 `frame_rate_cap` 以免节拍抖动叠加延迟 |
-| `jpeg_quality` | 85 | 65 | `FrameHub` 编码质量 |
+| `mjpeg_fps` | **30** | 15 | MJPEG 推流间隔，取略高于 `frame_rate_cap` 以免节拍抖动叠加延迟 |
+| `jpeg_quality` | **50** | 65 | `FrameHub` 编码质量 |
 
 同时做了**线程钳制**：`cv2.setNumThreads(1)` + `torch.set_num_threads(2)`。22 路解码 + 池化并发推理已经能打满 CPU，OpenCV/torch 内部线程池再抢核只会加剧上下文切换。**`LAB_MONITOR_MODEL_POOL=1` 只回退池大小，不回退这两行。**
 
@@ -358,7 +358,7 @@ CameraPipeline (src/pipeline.py)
 - 无构建流程，由 FastAPI 在 `server.py:286-290` 的 `index()` 路由每次请求直接读盘托管（改 HTML 不用重启，但 `?v=` 仍决定 CSS/JS 是否走缓存）
 - 使用原生 JavaScript + WebSocket + MJPEG `<img>` 标签
 - **`modules/stream_manager.js` 管理 MJPEG 长连接**：浏览器对同域并发连接上限为 6，22 路全量建流会把连接池占满（只有约 6 路能出图，REST 轮询也会挨饿）。它用 `IntersectionObserver` 只给视口内的卡片建流、同时建流上限 4、超限时整批轮转、断流前把最后一帧冻结成占位图；焦点大屏常驻，标签页切后台全部断流。**改网格/弹窗相关代码时注意调用 `resetStreamRegistry()` / `registerStreamImage()` 的时机**，否则会出现"卡片可见但永不建流"或连接泄漏。纯 Node 用例：`node tests/test_stream_manager_frontend.mjs`
-- **改任何 CSS/JS 后必须同步 bump `static/index.html` 里的 `?v=` 版本号**（当前 `?v=11.2`）。注意 `app.js` 里的 `import './modules/*.js'` 与 `main.css` 的 `@import` 子路径**不带版本号**，改子模块后需要 `Ctrl+F5` 硬刷新才能看到效果
+- **改任何 CSS/JS 后必须同步 bump `static/index.html` 里的 `?v=` 版本号**（当前 CSS `?v=11.5` / `app.js?v=11.6`；`main.css` 的 `@import` 子路径自 11.5 起也带 `?v=11.5`，两边要一起改）。注意 `app.js` 里的 `import './modules/*.js'` **不带版本号**，改子模块后需要 `Ctrl+F5` 硬刷新才能看到效果
 - 只改前端资源时刷新浏览器即可（无需重启后端）
 
 ## 文档与审计台账
