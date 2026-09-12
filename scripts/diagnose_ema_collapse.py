@@ -58,14 +58,20 @@ if str(ROOT) not in sys.path:
 
 from src.detector import PersonDetector  # noqa: E402
 from src.reid import ReIDExtractorOSNet  # noqa: E402
-from src.reid_config import IMAGENET_WEIGHT, REID_MATCH_THRESHOLD  # noqa: E402
+from src.reid_config import (  # noqa: E402
+    IMAGENET_WEIGHT,
+    REID_MATCH_THRESHOLD,
+    REID_WEIGHTS,
+)
 
 #: 与数据库里那批特征同一特征空间，才能做对照
 CAMERAS = ["rnd_08", "rnd_19", "rnd_04", "rnd_16"]
 SAMPLE_STRIDE = 10
 MIN_BOX_HEIGHT = 60
-BASE_ALPHA = 0.85          # src/identity_store.py 的默认 base_alpha
+BASE_ALPHA = 0.85          # src/identity_store.py 原来的 base_alpha（当前实现）
 UPDATE_COUNTS = [0, 5, 20, 50, 200]
+WINDOW_SIZES = [5, 20, 50]      # 候选方案 ① 的窗口大小
+RECOVERY_STEPS = [10, 30, 60]   # 污染后观测多少次，看能否自愈
 
 
 def collect(cameras: list[str], per_cam: int) -> dict[str, list]:
@@ -106,10 +112,68 @@ def pairwise(mat: np.ndarray) -> np.ndarray:
 
 
 def ema_update(feature: np.ndarray, sample: np.ndarray, alpha: float) -> np.ndarray:
-    """复刻 src/identity_store.py:update_appearance 的更新式（含重新归一化）。"""
+    """复刻 src/identity_store.py 原更新式（EMA + 重新归一化）。"""
     updated = alpha * feature + (1.0 - alpha) * sample
     norm = np.linalg.norm(updated)
     return updated / norm if norm > 1e-8 else updated
+
+
+class WindowMeanAggregator:
+    """候选方案 ①：有界窗口均值（最近 N 个原始特征的均值 + 重新归一化）。
+
+    与 EMA 的本质差别：EMA 每轮把已有向量乘 alpha（身份特异残差按 alpha^k 衰减，
+    且无来源补充）；有界窗口只是丢弃最旧的样本，窗口内每个样本权重相同，
+    **不存在对已有估计的指数衰减**，而且被污染的样本会在 N 次观测后自动淘汰。
+    """
+
+    def __init__(self, size: int):
+        self._size = size
+        self._samples: list[np.ndarray] = []
+
+    def update(self, sample: np.ndarray) -> np.ndarray:
+        self._samples.append(sample)
+        if len(self._samples) > self._size:
+            self._samples.pop(0)
+        mean = np.mean(np.stack(self._samples), axis=0)
+        norm = np.linalg.norm(mean)
+        return mean / norm if norm > 1e-8 else mean
+
+
+def aggregate(groups: list[np.ndarray], mat: np.ndarray, updates: int,
+              aggregator_factory) -> np.ndarray:
+    """
+    对每个身份跑 updates 次观测，返回各身份的最终特征向量。
+
+    aggregator_factory 返回 None 表示用 EMA（当前实现），
+    返回 WindowMeanAggregator 表示用候选方案 ①。
+    两种策略的更新式都在本文件里独立实现，不改动 src/ 的代码。
+    """
+    centers = []
+    for g in groups:
+        aggregator = aggregator_factory()
+        feature = None
+        start = 0
+        if aggregator is None:                 # EMA 需要初始向量
+            feature = mat[g[0]].copy()
+            start = 1
+        for step in range(start, updates + 1):
+            sample = mat[g[step % len(g)]]
+            feature = (ema_update(feature, sample, BASE_ALPHA)
+                       if aggregator is None else aggregator.update(sample))
+        centers.append(feature)
+    return np.stack(centers)
+
+
+def summarize(strategy: str, updates: int, centers: np.ndarray) -> dict:
+    pairs = pairwise(centers) if len(centers) > 1 else np.array([1.0])
+    return {
+        "strategy": strategy,
+        "updates": updates,
+        "mean_vec_norm": float(np.linalg.norm(centers.mean(axis=0))),
+        "cross_p50": float(np.percentile(pairs, 50)),
+        "cross_p95": float(np.percentile(pairs, 95)),
+        "over_threshold": float((pairs >= REID_MATCH_THRESHOLD).mean()),
+    }
 
 
 def main() -> int:
@@ -118,12 +182,19 @@ def main() -> int:
     parser.add_argument("--identities", type=int, default=8, help="模拟多少个身份")
     parser.add_argument("--chunk", type=int, default=12,
                         help="同相机连续多少帧算『同一个人』")
+    parser.add_argument("--weights", default="imagenet",
+                        choices=["imagenet", *REID_WEIGHTS],
+                        help="用哪份权重提特征；换权重后本脚本的结论可能完全不同")
+    parser.add_argument("--center", action="store_true",
+                        help="去掉公共分量：先减去全体特征均值再重新归一化")
     args = parser.parse_args()
 
     import torch
     device = "cuda" if torch.cuda.is_available() else "cpu"
-    print(f"设备 {device}；使用 ImageNet 权重（与库内特征同空间，便于对照）")
-    print(f"基 alpha = {BASE_ALPHA}（src/identity_store.py 默认值）\n")
+    weight = (IMAGENET_WEIGHT if args.weights == "imagenet"
+              else REID_WEIGHTS[args.weights])
+    print(f"设备 {device}；权重 {weight.key}（{weight.benchmark}）")
+    print(f"基 alpha = {BASE_ALPHA}（src/identity_store.py 原来的默认值）\n")
 
     print("第 1 步：采集真实人体 crop")
     crops_by_cam = collect(CAMERAS, args.per_cam)
@@ -134,7 +205,7 @@ def main() -> int:
     print(f"  合计 {len(flat)} 个 crop")
 
     print("\n第 2 步：提取原始特征")
-    model = ReIDExtractorOSNet(device=device, weight=IMAGENET_WEIGHT)
+    model = ReIDExtractorOSNet(device=device, weight=weight)
     feats = []
     for cam, crop in flat:
         feat = model.extract(crop, [0, 0, crop.shape[1], crop.shape[0]])
@@ -147,6 +218,21 @@ def main() -> int:
     print(f"  原始特征：均值向量范数 {np.linalg.norm(mat.mean(axis=0)):.4f}"
           f" | 两两余弦 mean {raw_pairs.mean():.4f} / p50 {np.percentile(raw_pairs, 50):.4f}"
           f" / p95 {np.percentile(raw_pairs, 95):.4f}")
+
+    if args.center:
+        # 去掉公共分量：所有特征都和一个全局方向高度共线（均值范数 ~0.80），
+        # 这个分量对区分身份毫无贡献，却会在任何"求平均"的操作里相干叠加、
+        # 把身份特异的余量挤掉。减均值后重新归一化再做全部统计。
+        # 生产侧的可行做法：维护一个全体已观测特征的滑动均值作为中心向量。
+        mean_vec = mat.mean(axis=0)
+        centered = mat - mean_vec
+        norms = np.linalg.norm(centered, axis=1, keepdims=True)
+        mat = np.divide(centered, np.maximum(norms, 1e-8))
+        centered_pairs = pairwise(mat)
+        print(f"  去公共分量后：均值向量范数 {np.linalg.norm(mat.mean(axis=0)):.4f}"
+              f" | 两两余弦 mean {centered_pairs.mean():.4f} / "
+              f"p50 {np.percentile(centered_pairs, 50):.4f} / "
+              f"p95 {np.percentile(centered_pairs, 95):.4f}")
 
     # 第 3 步：构造"身份"。这里的关键是**必须用同一人的样本**，否则实验会自证、
     # 毫无信息量：如果拿随机 crop 凑一个身份（等于把不同人混在一起），
@@ -180,30 +266,69 @@ def main() -> int:
           f"{np.linalg.norm(raw_centers.mean(axis=0)):.4f} | "
           f"跨身份余弦 p50 {np.percentile(raw_cross, 50):.4f}")
 
-    print(f"\n{'更新次数':>8s} {'均值范数':>10s} {'跨身份mean':>11s} {'跨身份p50':>11s} "
-          f"{'跨身份max':>11s} {'≥阈值比例':>10s}")
-    print("-" * 70)
+    print(f"\n第 4 步：聚合方式对比（每个身份反复观测自己的样本）")
+    header = (f"{'策略':>18s} {'观测次数':>8s} {'均值范数':>10s} "
+              f"{'跨身份p50':>11s} {'跨身份p95':>11s} {'≥阈值比例':>10s}")
+    print(header)
+    print("-" * len(header))
+    rows = []
     for updates in UPDATE_COUNTS:
-        centers = []
-        for g in groups:
-            feature = mat[g[0]].copy()
-            for step in range(1, updates + 1):
-                # 循环吸收**本身份自己的**样本 —— 模拟同一人反复被观测
-                feature = ema_update(feature, mat[g[step % len(g)]], BASE_ALPHA)
-            centers.append(feature)
-        cmat = np.stack(centers)
-        cpairs = pairwise(cmat) if len(cmat) > 1 else np.array([1.0])
-        print(f"{updates:>8d} {np.linalg.norm(cmat.mean(axis=0)):10.4f} "
-              f"{cpairs.mean():11.4f} {np.percentile(cpairs, 50):11.4f} "
-              f"{cpairs.max():11.4f} "
-              f"{(cpairs >= REID_MATCH_THRESHOLD).mean() * 100:9.1f}%")
+        centers = aggregate(groups, mat, updates, lambda: None)
+        rows.append(summarize("EMA(a=0.85)", updates, centers))
+        if args.center:
+            # 顺序对照：聚合之后再减去各身份中心的公共方向。
+            # 这对应"最小改动"的实现方式（不动 update_appearance，只在匹配时减中心），
+            # 所以必须验证它是否同样有效 —— 聚合会把身份余量压小，
+            # 有可能压到"减完中心什么都不剩"。
+            recentered = centers - centers.mean(axis=0)
+            recentered /= np.maximum(np.linalg.norm(recentered, axis=1, keepdims=True), 1e-8)
+            rows.append(summarize("EMA→去中心", updates, recentered))
+    for size in WINDOW_SIZES:
+        for updates in UPDATE_COUNTS:
+            if updates == 0:
+                continue
+            centers = aggregate(groups, mat, updates,
+                                lambda s=size: WindowMeanAggregator(s))
+            rows.append(summarize(f"窗口均值(N={size})", updates, centers))
+    for row in rows:
+        print(f"{row['strategy']:>18s} {row['updates']:>8d} "
+              f"{row['mean_vec_norm']:10.4f} {row['cross_p50']:11.4f} "
+              f"{row['cross_p95']:11.4f} {row['over_threshold'] * 100:9.1f}%")
+
+    # 第 5 步：污染恢复能力 —— 身份误吞了另一个人的样本之后，多久能恢复。
+    # 这直接对应"匹配偶发失败后的自愈能力"：EMA 的污染几乎永久保留，
+    # 有界窗口会在 N 次观测后把污染样本淘汰掉。
+    print(f"\n第 5 步：污染恢复（先混入 5 个『别人的』样本，之后只观测自己的）")
+    print(header)
+    print("-" * len(header))
+    strategies = [("EMA(a=0.85)", None)]
+    strategies += [(f"窗口均值(N={size})", size) for size in WINDOW_SIZES]
+    for name, size in strategies:
+        for recovery in RECOVERY_STEPS:
+            centers = []
+            for index, g in enumerate(groups):
+                stranger = groups[(index + 1) % len(groups)]   # 下一个身份的样本当"别人"
+                aggregator = None if size is None else WindowMeanAggregator(size)
+                feature = mat[g[0]].copy()
+                for step in range(5):                          # 污染
+                    sample = mat[stranger[step % len(stranger)]]
+                    feature = (ema_update(feature, sample, BASE_ALPHA)
+                               if aggregator is None else aggregator.update(sample))
+                for step in range(recovery):                   # 只观测自己
+                    sample = mat[g[step % len(g)]]
+                    feature = (ema_update(feature, sample, BASE_ALPHA)
+                               if aggregator is None else aggregator.update(sample))
+                centers.append(feature)
+            stats = summarize("", recovery, np.stack(centers))
+            print(f"{name:>18s} {recovery:>8d} {stats['mean_vec_norm']:10.4f} "
+                  f"{stats['cross_p50']:11.4f} {stats['cross_p95']:11.4f} "
+                  f"{stats['over_threshold'] * 100:9.1f}%")
 
     print("\n判读：")
-    print("  · 若「跨身份 p50」随更新次数显著上升 → EMA 即使在同一人样本上也会塌缩，")
-    print("    特征聚合方式本身是根因，仅换权重不够。")
-    print("  · 若「跨身份 p50」基本不升 → EMA 在同一人样本上是安全的，")
-    print("    那么库内塌缩的真凶是「匹配失败 → 身份混入多人 → 平均抹平残差」这个")
-    print("    反馈环，修复重点应放在防止误归并（阈值标定 + 重复写入缺陷）。")
+    print("  · 跨身份 p50 随观测次数上升 = 该聚合方式在制造塌缩；")
+    print("    p50 稳定不升 = 该方式对同一人收敛但不会互相靠拢。")
+    print("  · 第 5 步看的是自愈能力：误吞别人的样本后，跨身份 p50 能否回落。")
+    print("    EMA 的污染基本不可逆；有界窗口在 N 次观测后淘汰污染样本。")
     return 0
 
 

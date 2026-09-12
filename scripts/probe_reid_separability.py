@@ -7,6 +7,7 @@
 输出为一组可直接写进方案文档的量化结论。只读，不写任何文件。
 """
 
+import argparse
 import io
 import json
 import sqlite3
@@ -49,11 +50,34 @@ def load() -> list[dict]:
 
 
 def main() -> None:
+    parser = argparse.ArgumentParser(description="实测库内 ReID 特征的判别力")
+    parser.add_argument("--center", action="store_true",
+                        help="先减去全体特征均值（公共分量）再统计 —— 验证中心化修复")
+    args = parser.parse_args()
+
     records = load()
     print(f"载入身份 {len(records)} 个，特征维度 {records[0]['main'].size if records else 0}")
     if len(records) < 2:
         print("样本不足，无法统计组间分布")
         return
+
+    if args.center:
+        # 复刻 src/identity_store.py 的中心化：减去全体特征（主特征 + feature_bank）
+        # 的均值再归一化。这里是**离线**复算，不影响任何文件。
+        all_vectors = np.stack([v for r in records for v in [r["main"], *r["bank"]]])
+        center = all_vectors.mean(axis=0)
+        print(f"公共分量中心范数 = {np.linalg.norm(center):.4f}"
+              f"（随机方向的期望约 {1 / np.sqrt(len(all_vectors)):.3f}）")
+
+        def recenter(vector: np.ndarray) -> np.ndarray:
+            diff = vector - center
+            norm = np.linalg.norm(diff)
+            return diff / norm if norm > 1e-8 else vector
+
+        for rec in records:
+            rec["main"] = recenter(rec["main"])
+            rec["bank"] = [recenter(vec) for vec in rec["bank"]]
+        print("已对主特征与 feature_bank 全部减去公共分量并重新归一化\n")
 
     intra = []
     bank_sizes = []
