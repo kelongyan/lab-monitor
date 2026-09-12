@@ -267,39 +267,61 @@
   - 因此 `low_value` 阈值（<5s）在当前 22 路上**一个都不命中** —— 22 路最短 18.4s，
     全部保留。low_value 字段保留（将来接入更短素材时有用），当前无排除对象。
 
-## 批次三 · 能力一：人员身份识别（6 项）
+## 批次三 · 能力一：人员身份识别（6 项，2026-09-12 全部完成）
 
-前置认知：当前 `global_id = uuid4()[:8]` 是**随机编号，不含实名信息**。"识别出具体是谁"必须靠 L2 实名层。
+- [x] **3.1 `personnel` / `personnel_photos` 表 + `identities` 补列** —— **M**（完成）
+  - `personnel(person_id, name, employee_no, department, note, created_at, updated_at)`
+  - `personnel_photos(photo_id, person_id, feature_dim, feature_blob, quality, source_path, created_at)`
+  - `identities` 加 `person_id` / `name_confidence`（迁移字典自动升级）+ 索引。
+  - `Database` 新增 CRUD：upsert/get/list/delete_personnel、save/list/delete_personnel_photos、
+    set_identity_person / clear_identity_person / identities_for_person。
+  - **绑定持久化语义**：`save_identity` 的 upsert 用
+    `person_id = COALESCE(identities.person_id, excluded.person_id)` —— 保留已有绑定，
+    未绑定的例行重存**不会**清掉实名（解绑必须走显式 API）。
 
-- [ ] **3.1 `personnel` / `personnel_photos` 表 + `identities` 补列** —— **M**
-  - 新表 `personnel(person_id, name, employee_no, department, note, created_at, updated_at)`
-  - 新表 `personnel_photos(photo_id, person_id, feature_dim, feature_blob, quality, source_path, created_at)`
-  - `identities` 加 `person_id` / `name_confidence`
+- [x] **3.2 `IdentityStore.bind_person()` / `unbind_person()` / `person_label()`** —— **S**（完成）
+  - PersonRecord 增加 `person_id` / `name_confidence`，随 `_persist_payload` 落库、
+    `_restore` 恢复（重启后绑定不丢 —— 3.6 验收项已测）。
+  - `set_person_names(map)`：person_id→姓名 的映射由 PersonnelGallery 注入，
+    IdentityStore 不自己查 personnel 表 —— 标签与检索两个语义不纠缠。
+  - `person_label(gid)` 返回"姓名 (person_id)"，供视频卡片标签与检索结果用。
+  - `bound_gid_map()`：person_id → 该人名下出现次数最多的 global_id（底库命中时复用）。
 
-- [ ] **3.2 `IdentityStore.bind_person()` + 采集侧带出实名** —— **S**
-  - 绑定后 `pipeline` 写 appearance 时一并带上 `person_id` / `name`，供前端标签与检索复用
+- [x] **3.3 `src/personnel.py::PersonnelGallery`（底库 1:N 自动命名）** —— **M**（完成）
+  - 每人 1~N 张注册照特征；`match(feature)` **复用 `match_feature_detailed()`**
+    （按身份去重 + Ratio Test，与实时匹配同一套判据 —— 底库与实时必须同一判据，
+    否则阈值标定失去意义）。
+  - 命中返回 {person_id, name, score}；空底库返回 None（对主流程零影响）。
+  - CRUD 方法写库后自动 reload，内存与库一致。
 
-- [ ] **3.3 `PersonnelGallery`（路径 B 的底库检索）** —— **M**
-  - 新建 `src/personnel.py`，**复用 `match_feature_detailed()`**，不要另写一套相似度逻辑
-  - 插入位置：`pipeline._process_frame` 中**在**现有 `get_confirmed_match()` **之前**——实名信息价值高于匿名编号，且能抑制匿名身份膨胀
-  - 阈值独立于实时匹配阈值（用 1.2 的 `reid_config`，但可配不同值）
+- [x] **3.4 API 层** —— **M**（完成）
+  - `GET/POST /api/personnel`、`GET/PATCH/DELETE /api/personnel/{pid}`
+  - `POST /api/personnel/{pid}/photos`（raw body 或 multipart；检测人体框 → 取最大者 →
+    提特征入库。multipart 需要 python-multipart，raw body 无依赖）
+  - `POST /api/identities/{gid}/bind`（支持 person_id 或直接 name，name 会自动建档案）
+  - `DELETE /api/identities/{gid}/bind`、`GET /api/personnel/{pid}/identities`
+  - `GET /api/identities/{gid}` 扩展返回 `person_id` / `person_name`
+  - **删除档案的绑定同步**：delete 端点先收集名下身份、删档后逐个
+    `_identity_store.unbind_person(gid)` —— 数据库清列不会让内存记录自动失效，
+    不同步的话运行中的服务仍把该 gid 当实名。
 
-- [ ] **3.4 API 层** —— **M**
-  - `GET/POST /api/personnel`、`PATCH/DELETE /api/personnel/{pid}`
-  - `POST /api/personnel/{pid}/photos`（multipart → 提特征入库）
-  - `POST /api/identities/{gid}/bind`（路径 A 的核心）
-  - `GET /api/personnel/{pid}/identities`
-  - 扩展 `GET /api/identities` 返回 `person_id` / `name`
-  - 全部写接口带 `X-Lab-Monitor-Request: 1`
+- [x] **3.5 pipeline 底库检索 + 前端命名入口** —— **M**（完成）
+  - `CameraPipeline(personnel=...)`：在全局身份库检索**之前**先查底库
+    （实名信息价值高于匿名编号，且能抑制匿名身份膨胀）；
+    - 命中且名下已有绑定 gid → 直接复用该身份（"认出熟人"，记 arrival / resolve）；
+    - 命中但未绑定 → 正常注册，注册成功后 `bind_person` 自动命名（路径 B 闭环）。
+  - 视频卡片标签：`ID: #c0ed5fd1` → `张三 (P0007) | #c0ed5fd1`。
+  - 人员轨迹弹窗新增实名输入框 + 「命名并绑定」按钮（调 bind 接口）。
+  - 版本号已 bump 到 11.7。
 
-- [ ] **3.5 前端命名入口** —— **M**
-  - 人员档案弹窗加姓名/工号编辑与绑定按钮；视频卡片标签由 `ID: #c0ed5fd1` 变为 `张三 (P0007)`
-  - 改完 bump `static/index.html` 的 `?v=`（当前 CSS `11.5` / `app.js` `11.6`，`main.css` 的 7 条 `@import` 要一起改）
+- [x] **3.6 `tests/test_personnel.py`（14 例）** —— **S**（完成）
+  - CRUD（name 必填、list 含身份数、更新、删除并解绑）、绑定（GET 富化、解绑、
+    404 双向、**重启后绑定恢复**）、注册照（raw body 上传、底库 1:N 命中、
+    空底库不命中、正交特征不命中）
 
-- [ ] **3.6 `tests/test_personnel.py`** —— **S**
-  - 覆盖建档案、绑定、重启后绑定关系仍能恢复
-
----
+- **接口层缺陷（过程中发现并修复）**：init_server 的 personnel 参数在第一次
+  字符串替换中没有落盘（Edit 报成功但文件未变），导致 API 全部 503。
+  用 `grep` 验证后才确认 —— **编辑后必须 grep 验证，不能只信工具的成功回执**。
 
 ## 批次四 · 能力二：人员视频检索（6 项，2026-09-12 全部完成）
 
@@ -393,7 +415,7 @@
 |---|---|---|---|
 | 一 · 修特征层 | 8 | **8 全部完成** | 批次一收口 |
 | 二 · 数据基础 | 6 | **6 全部完成** | 完成 |
-| 三 · 能力一 身份识别 | 6 | 0 | 依赖批次一（已满足）；personnel 实名绑定 |
+| 三 · 能力一 身份识别 | 6 | **6 全部完成** | 完成（底库检索 + 自动命名已接入 pipeline） |
 | 四 · 能力二 视频检索 | 6 | **6 全部完成**（4.5 仅最小前端；缩略图未做） | 完成 |
 | 五 · 能力一 路径 B | 3 | 0 | 依赖批次三 |
 | 并行清理 | 8 | 0 | 无 |

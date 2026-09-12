@@ -26,6 +26,7 @@ from src.alerter import AlertManager, AlertBroadcaster
 from src.frame_hub import FrameHub
 from src.notifier import build_notifier
 from src.calibrator import TransitCalibrator
+from src.personnel import PersonnelGallery
 from src.pipeline import CameraPipeline, redact_source
 from src.floorplan import build_floorplan
 from src.db import db
@@ -295,6 +296,10 @@ def main(
         feature_space=reid_extractor.feature_space,
         max_records=int(os.getenv("LAB_MONITOR_MAX_IDENTITIES", "10000")),
     )
+    # 人员底库（worklist 3.3，能力一路径 B）：注册照 1:N 自动命名。
+    # 档案为空时 match() 恒为 None，对主流程零影响。
+    personnel_gallery = PersonnelGallery(database=db)
+    identity_store.set_person_names(personnel_gallery.names())
     # 白名单用过滤后的 sources（磁盘不存在的源已被剔除），避免误报未知摄像头 ID
     try:
         topology = CameraTopology(TOPO_CFG, allowed_camera_ids=set(sources))
@@ -359,6 +364,7 @@ def main(
             reid_every_n   = perf["reid_every_n"],
             frame_rate_cap = perf["frame_rate_cap"],
             process_max_width=process_max_width,
+            personnel=personnel_gallery,
         )
         pipelines.append(p)
         p.start()
@@ -393,6 +399,7 @@ def main(
             floorplan=floorplan,
             detector=detector,            # 以图搜人用（worklist 4.4）
             reid_extractor=reid_extractor,
+            personnel=personnel_gallery,  # 人员档案 CRUD（worklist 3.4）
         )
         try:
             web_server.start_server_thread(host=web_host, port=web_port)

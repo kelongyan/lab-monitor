@@ -65,6 +65,7 @@ _floorplan = None
 _mjpeg_sleep = 0.033  # 兜底值；实际由 main.py 经 init_server(mjpeg_fps=...) 覆盖
 _detector = None       # 以图搜人用（worklist 4.4），由 init_server 注入
 _reid_extractor = None
+_personnel = None      # 人员档案（worklist 3.4），由 init_server 注入
 
 # F9a：MJPEG 增量推送 —— 帧序号未变化时不重复发字节，但最长 5 秒必须心跳重发一次，
 # 否则中间代理/浏览器可能把长时间静默的连接判定为假死。
@@ -299,8 +300,8 @@ async def guard_request(request: Request, call_next):
     return await call_next(request)
 
 
-def init_server(frame_hub, broadcaster, identity_store, calibrator=None, pipelines=None, topology=None, mjpeg_fps: float = 30.0, shutdown_callback=None, host: str | None = None, port: int | None = None, floorplan=None, detector=None, reid_extractor=None):
-    global _frame_hub, _broadcaster, _identity_store, _calibrator, _pipelines, _topology, _mjpeg_sleep, _shutdown_callback, _floorplan, _detector, _reid_extractor
+def init_server(frame_hub, broadcaster, identity_store, calibrator=None, pipelines=None, topology=None, mjpeg_fps: float = 30.0, shutdown_callback=None, host: str | None = None, port: int | None = None, floorplan=None, detector=None, reid_extractor=None, personnel=None):
+    global _frame_hub, _broadcaster, _identity_store, _calibrator, _pipelines, _topology, _mjpeg_sleep, _shutdown_callback, _floorplan, _detector, _reid_extractor, _personnel
     _frame_hub = frame_hub
     _broadcaster = broadcaster
     _identity_store = identity_store
@@ -311,6 +312,7 @@ def init_server(frame_hub, broadcaster, identity_store, calibrator=None, pipelin
     _shutdown_callback = shutdown_callback
     _detector = detector
     _reid_extractor = reid_extractor
+    _personnel = personnel
     # 平面图未显式注入时惰性构造（见 _get_floorplan），单元测试直接 TestClient(app) 也能用
     _floorplan = floorplan
     # host/port 已知时立即生成 Host 白名单；未传则由 run_server/start_server_thread 生成
@@ -732,11 +734,19 @@ async def get_identity_detail(
             trajectory[-1]["end_timestamp"] = ts
             trajectory[-1]["end_time_str"] = time_str
 
+    # 实名信息（worklist 3.4）：personnel 已注入时反查姓名，未注入时只回 person_id
+    person_name = None
+    if _personnel is not None and rec.person_id:
+        person = _personnel.get(rec.person_id)
+        person_name = (person or {}).get("name")
+
     return JSONResponse({
         "global_id": rec.global_id,
         "last_camera": rec.last_camera,
         "last_seen": rec.last_seen,
         "total_appearances": total_appearances,
+        "person_id": rec.person_id,
+        "person_name": person_name,
         "limit": limit,
         "offset": offset,
         "trajectory": trajectory
@@ -1094,6 +1104,200 @@ async def search_by_image(request: Request, top_k: int = Query(default=5, ge=1, 
     if "error" in payload:
         return JSONResponse(payload, status_code=422)
     return JSONResponse(payload)
+
+
+def _require_person(person_id: str) -> dict | None:
+    if _personnel is None:
+        return None
+    return _personnel.get(person_id)
+
+
+@app.get("/api/personnel")
+async def list_personnel():
+    """人员档案列表（含名下身份数）。未注入底库时返回空列表。"""
+    if _personnel is None:
+        return JSONResponse({"personnel": [], "count": 0})
+    people = await run_in_threadpool(_personnel._database.list_personnel)
+    return JSONResponse({"personnel": people, "count": len(people)})
+
+
+@app.post("/api/personnel")
+async def create_personnel(request: Request):
+    """创建人员档案。name 必填；person_id 缺省自动生成。"""
+    if _personnel is None:
+        return JSONResponse({"error": "Personnel unavailable"}, status_code=503)
+    try:
+        body = await request.json()
+    except Exception:
+        return JSONResponse({"error": "请求体必须是 JSON"}, status_code=400)
+    name = (body.get("name") or "").strip()
+    if not name:
+        return JSONResponse({"error": "name 必填"}, status_code=400)
+    try:
+        person_id = _personnel.create(
+            name=name,
+            employee_no=(body.get("employee_no") or None),
+            department=(body.get("department") or None),
+            note=(body.get("note") or None),
+            person_id=(body.get("person_id") or None),
+        )
+    except Exception as e:
+        logger.exception("创建人员档案失败")
+        return JSONResponse({"error": str(e)}, status_code=500)
+    _identity_store.set_person_names(_personnel.names())
+    return JSONResponse({"person_id": person_id, "name": name})
+
+
+@app.get("/api/personnel/{person_id}")
+async def get_personnel(person_id: str):
+    person = _require_person(person_id)
+    if person is None:
+        return JSONResponse({"error": "Person not found"}, status_code=404)
+    photos = _personnel.photos_of(person_id)
+    identities = (_identity_store.database.identities_for_person(person_id)
+                  if _identity_store and _identity_store.database else [])
+    return JSONResponse({**person, "photo_count": photos,
+                         "identities": identities})
+
+
+@app.patch("/api/personnel/{person_id}")
+async def update_personnel(person_id: str, request: Request):
+    if _personnel is None:
+        return JSONResponse({"error": "Personnel unavailable"}, status_code=503)
+    if _personnel.get(person_id) is None:
+        return JSONResponse({"error": "Person not found"}, status_code=404)
+    try:
+        body = await request.json()
+    except Exception:
+        return JSONResponse({"error": "请求体必须是 JSON"}, status_code=400)
+    person = _personnel.get(person_id)
+    _personnel.update(person_id,
+                      name=body.get("name") or person["name"],
+                      employee_no=body.get("employee_no"),
+                      department=body.get("department"),
+                      note=body.get("note"))
+    _identity_store.set_person_names(_personnel.names())
+    return JSONResponse({"person_id": person_id})
+
+
+@app.delete("/api/personnel/{person_id}")
+async def delete_personnel(person_id: str):
+    if _personnel is None:
+        return JSONResponse({"error": "Personnel unavailable"}, status_code=503)
+    # 先收集名下身份：删除后 identities.person_id 已被清空，就查不到了
+    bound = (_identity_store.database.identities_for_person(person_id)
+             if _identity_store.database else [])
+    ok = _personnel.delete(person_id)
+    if not ok:
+        return JSONResponse({"error": "Person not found"}, status_code=404)
+    # 内存中的 IdentityStore 记录必须同步解绑 —— 它不会因 DB 清列而自动失效
+    for item in bound:
+        _identity_store.unbind_person(item["global_id"])
+    _identity_store.set_person_names(_personnel.names())
+    return JSONResponse({"deleted": person_id, "unbind_count": len(bound)})
+
+
+@app.post("/api/personnel/{person_id}/photos")
+async def add_personnel_photo(person_id: str, request: Request):
+    """上传注册照：检测人体框 -> 提特征 -> 入底库（路径 B 的数据来源）。"""
+    if _personnel is None or _reid_extractor is None:
+        return JSONResponse({"error": "Personnel unavailable"}, status_code=503)
+    if _personnel.get(person_id) is None:
+        return JSONResponse({"error": "Person not found"}, status_code=404)
+
+    content_type = request.headers.get("content-type", "")
+    if "multipart/form-data" in content_type:
+        form = await request.form()
+        upload = form.get("image") or form.get("file")
+        image_bytes = await upload.read() if upload else b""
+    else:
+        image_bytes = await request.body()
+    if not image_bytes:
+        return JSONResponse({"error": "请求体为空"}, status_code=400)
+
+    import cv2
+    import numpy as np
+    image = cv2.imdecode(np.frombuffer(image_bytes, dtype=np.uint8), cv2.IMREAD_COLOR)
+    if image is None:
+        return JSONResponse({"error": "无法解析图片"}, status_code=400)
+
+    detections = _detector.detect(image) if _detector is not None else []
+    box = None
+    if detections:
+        box = max(detections, key=lambda b: (b[2] - b[0]) * (b[3] - b[1]))[:4]
+    if box is None:
+        return JSONResponse({"error": "图中未检测到人员"}, status_code=422)
+
+    feature = _reid_extractor.extract(image, box)
+    if feature is None:
+        return JSONResponse({"error": "特征提取失败"}, status_code=422)
+    photo_id = _personnel.add_photo(person_id, feature, quality=1.0)
+    if photo_id is None:
+        return JSONResponse({"error": "注册照入库失败"}, status_code=500)
+    _identity_store.set_person_names(_personnel.names())
+    return JSONResponse({"photo_id": photo_id,
+                         "photo_count": _personnel.photos_of(person_id)})
+
+
+@app.get("/api/personnel/{person_id}/identities")
+async def personnel_identities(person_id: str):
+    """某实名名下的全部匿名身份。"""
+    if _personnel is None or _personnel.get(person_id) is None:
+        return JSONResponse({"error": "Person not found"}, status_code=404)
+    identities = (_identity_store.database.identities_for_person(person_id)
+                  if _identity_store and _identity_store.database else [])
+    return JSONResponse({"person_id": person_id, "identities": identities,
+                         "count": len(identities)})
+
+
+@app.post("/api/identities/{global_id}/bind")
+async def bind_identity(global_id: str, request: Request):
+    """实名绑定（worklist 3.2，路径 A 的核心）：把匿名身份绑到 person_id 或直接命名。"""
+    if _identity_store is None:
+        return JSONResponse({"error": "Identity store unavailable"}, status_code=503)
+    if _identity_store.get(global_id) is None:
+        return JSONResponse({"error": "Identity not found"}, status_code=404)
+    try:
+        body = await request.json()
+    except Exception:
+        return JSONResponse({"error": "请求体必须是 JSON"}, status_code=400)
+
+    person_id = body.get("person_id")
+    name = (body.get("name") or "").strip()
+    if not person_id and not name:
+        return JSONResponse({"error": "person_id 或 name 至少提供一个"}, status_code=400)
+
+    if not person_id:
+        if _personnel is None:
+            return JSONResponse({"error": "Personnel unavailable"}, status_code=503)
+        person_id = _personnel.create(name=name)
+    elif _personnel is not None and _personnel.get(person_id) is None:
+        return JSONResponse({"error": "Person not found"}, status_code=404)
+
+    confidence = float(body.get("confidence") or 1.0)
+    if not _identity_store.bind_person(global_id, person_id, confidence):
+        return JSONResponse({"error": "Identity not found"}, status_code=404)
+    if _personnel is not None:
+        _identity_store.set_person_names(_personnel.names())
+    person = _personnel.get(person_id) if _personnel else None
+    return JSONResponse({"global_id": global_id, "person_id": person_id,
+                         "name": (person or {}).get("name"),
+                         "confidence": confidence})
+
+
+@app.delete("/api/identities/{global_id}/bind")
+async def unbind_identity(global_id: str):
+    if _identity_store is None:
+        return JSONResponse({"error": "Identity store unavailable"}, status_code=503)
+    if _identity_store.get(global_id) is None:
+        return JSONResponse({"error": "Identity not found"}, status_code=404)
+    _identity_store.unbind_person(global_id)
+    return JSONResponse({"global_id": global_id, "person_id": None})
+
+
+@app.get("/api/personnel/{person_id}/identities")
+async def personnel_identities_get(person_id: str):
+    return await personnel_identities(person_id)
 
 
 @app.get("/api/stats")

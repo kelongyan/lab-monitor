@@ -149,6 +149,31 @@ class Database:
                     UNIQUE(camera_id, rel_path)
                 )
             """)
+            # 人员档案（worklist 3.1，能力一）：
+            # global_id 是随机编号，"具体是谁"必须落成实名。personnel 与 identities
+            # 是 1:N（一个人可能被拆成多个匿名身份，归并由 1.8 的 consolidate 负责）。
+            cursor.execute("""
+                CREATE TABLE IF NOT EXISTS personnel (
+                    person_id TEXT PRIMARY KEY,
+                    name TEXT NOT NULL,
+                    employee_no TEXT,
+                    department TEXT,
+                    note TEXT,
+                    created_at REAL,
+                    updated_at REAL
+                )
+            """)
+            cursor.execute("""
+                CREATE TABLE IF NOT EXISTS personnel_photos (
+                    photo_id INTEGER PRIMARY KEY AUTOINCREMENT,
+                    person_id TEXT NOT NULL,
+                    feature_dim INTEGER,
+                    feature_blob BLOB,
+                    quality REAL,
+                    source_path TEXT,
+                    created_at REAL
+                )
+            """)
             identity_columns = {
                 row[1] for row in cursor.execute("PRAGMA table_info(identities)")
             }
@@ -160,6 +185,8 @@ class Database:
                 "appearances_json": "TEXT",
                 "feature_space": "TEXT",
                 "feature_schema_version": "INTEGER DEFAULT 1",
+                "person_id": "TEXT",
+                "name_confidence": "REAL",
             }
             for column, definition in migrations.items():
                 if column not in identity_columns:
@@ -204,6 +231,15 @@ class Database:
             cursor.execute(
                 "CREATE UNIQUE INDEX IF NOT EXISTS idx_assets_cam_path "
                 "ON video_assets(camera_id, rel_path)"
+            )
+            # 人员档案与注册照
+            cursor.execute(
+                "CREATE INDEX IF NOT EXISTS idx_personnel_photos_pid "
+                "ON personnel_photos(person_id)"
+            )
+            cursor.execute(
+                "CREATE INDEX IF NOT EXISTS idx_identities_person "
+                "ON identities(person_id)"
             )
             # 身份按 last_seen 做保留期清理与最近活跃排序
             cursor.execute(
@@ -513,6 +549,169 @@ class Database:
             return []
 
     # ------------------------------------------------------------------ #
+    # 人员档案（worklist 3.1，能力一）                                        #
+    # ------------------------------------------------------------------ #
+
+    def upsert_personnel(self, person_id: str, name: str, employee_no: str | None = None,
+                         department: str | None = None, note: str | None = None) -> bool:
+        now = time.time()
+        try:
+            with self._get_conn() as conn:
+                conn.execute(
+                    """
+                    INSERT INTO personnel
+                        (person_id, name, employee_no, department, note,
+                         created_at, updated_at)
+                    VALUES (?, ?, ?, ?, ?, ?, ?)
+                    ON CONFLICT(person_id) DO UPDATE SET
+                        name = excluded.name,
+                        employee_no = excluded.employee_no,
+                        department = excluded.department,
+                        note = excluded.note,
+                        updated_at = excluded.updated_at
+                    """,
+                    (person_id, name, employee_no, department, note, now, now),
+                )
+                conn.commit()
+            return True
+        except Exception as e:
+            logger.error("写入人员档案失败 %s: %s", person_id, e)
+            return False
+
+    def get_personnel(self, person_id: str) -> dict | None:
+        try:
+            with self._get_conn() as conn:
+                row = conn.execute(
+                    "SELECT * FROM personnel WHERE person_id = ?", (person_id,)
+                ).fetchone()
+                return dict(row) if row else None
+        except Exception as e:
+            logger.error("读取人员档案失败 %s: %s", person_id, e)
+            return None
+
+    def list_personnel(self) -> list[dict]:
+        try:
+            with self._get_conn() as conn:
+                rows = conn.execute(
+                    """
+                    SELECT p.*, COUNT(i.global_id) AS identity_count
+                    FROM personnel p
+                    LEFT JOIN identities i ON i.person_id = p.person_id
+                    GROUP BY p.person_id
+                    ORDER BY p.created_at
+                    """
+                ).fetchall()
+                return [dict(row) for row in rows]
+        except Exception as e:
+            logger.error("列出人员档案失败: %s", e)
+            return []
+
+    def delete_personnel(self, person_id: str) -> bool:
+        """删除档案并解除其名下身份的绑定（身份本身保留，回到匿名状态）。"""
+        try:
+            with self._get_conn() as conn:
+                conn.execute(
+                    "UPDATE identities SET person_id = NULL, name_confidence = NULL "
+                    "WHERE person_id = ?",
+                    (person_id,),
+                )
+                conn.execute("DELETE FROM personnel_photos WHERE person_id = ?",
+                             (person_id,))
+                conn.execute("DELETE FROM personnel WHERE person_id = ?", (person_id,))
+                conn.commit()
+            return True
+        except Exception as e:
+            logger.error("删除人员档案失败 %s: %s", person_id, e)
+            return False
+
+    def save_personnel_photo(self, person_id: str, feature_dim: int, feature_blob: bytes,
+                             quality: float, source_path: str | None = None) -> int | None:
+        try:
+            with self._get_conn() as conn:
+                cursor = conn.execute(
+                    """
+                    INSERT INTO personnel_photos
+                        (person_id, feature_dim, feature_blob, quality,
+                         source_path, created_at)
+                    VALUES (?, ?, ?, ?, ?, ?)
+                    """,
+                    (person_id, feature_dim, feature_blob, quality,
+                     source_path, time.time()),
+                )
+                conn.commit()
+                return int(cursor.lastrowid) if cursor.lastrowid else None
+        except Exception as e:
+            logger.error("写入人员注册照失败 %s: %s", person_id, e)
+            return None
+
+    def list_personnel_photos(self, person_id: str) -> list[dict]:
+        try:
+            with self._get_conn() as conn:
+                rows = conn.execute(
+                    "SELECT * FROM personnel_photos WHERE person_id = ? "
+                    "ORDER BY photo_id",
+                    (person_id,),
+                ).fetchall()
+                return [dict(row) for row in rows]
+        except Exception as e:
+            logger.error("列出人员注册照失败 %s: %s", person_id, e)
+            return []
+
+    def delete_personnel_photos(self, person_id: str) -> bool:
+        try:
+            with self._get_conn() as conn:
+                conn.execute("DELETE FROM personnel_photos WHERE person_id = ?",
+                             (person_id,))
+                conn.commit()
+            return True
+        except Exception as e:
+            logger.error("删除人员注册照失败 %s: %s", person_id, e)
+            return False
+
+    def set_identity_person(self, global_id: str, person_id: str,
+                            confidence: float = 1.0) -> bool:
+        try:
+            with self._get_conn() as conn:
+                cursor = conn.execute(
+                    "UPDATE identities SET person_id = ?, name_confidence = ? "
+                    "WHERE global_id = ?",
+                    (person_id, float(confidence), global_id),
+                )
+                conn.commit()
+                return cursor.rowcount > 0
+        except Exception as e:
+            logger.error("绑定身份失败 %s -> %s: %s", global_id, person_id, e)
+            return False
+
+    def clear_identity_person(self, global_id: str) -> bool:
+        try:
+            with self._get_conn() as conn:
+                cursor = conn.execute(
+                    "UPDATE identities SET person_id = NULL, name_confidence = NULL "
+                    "WHERE global_id = ?",
+                    (global_id,),
+                )
+                conn.commit()
+                return cursor.rowcount > 0
+        except Exception as e:
+            logger.error("解绑身份失败 %s: %s", global_id, e)
+            return False
+
+    def identities_for_person(self, person_id: str) -> list[dict]:
+        try:
+            with self._get_conn() as conn:
+                rows = conn.execute(
+                    "SELECT global_id, last_camera, last_seen, total_appearances, "
+                    "name_confidence FROM identities WHERE person_id = ? "
+                    "ORDER BY last_seen DESC",
+                    (person_id,),
+                ).fetchall()
+                return [dict(row) for row in rows]
+        except Exception as e:
+            logger.error("列出人员名下身份失败 %s: %s", person_id, e)
+            return []
+
+    # ------------------------------------------------------------------ #
     # 身份归并的落库部分                                                      #
     # ------------------------------------------------------------------ #
 
@@ -554,6 +753,8 @@ class Database:
         first_seen: float | None = None,
         new_appearance: dict | None = None,
         schema_version: int = 1,
+        person_id: str | None = None,
+        name_confidence: float | None = None,
     ) -> bool:
         """
         整行落盘（含特征列）。轨迹只以增量行写入 identity_appearances，
@@ -571,8 +772,9 @@ class Database:
                         global_id, first_seen, last_seen, last_camera,
                         total_appearances, feature_dim, feature_blob,
                         feature_bank_count, feature_bank_blob,
-                        feature_space, feature_schema_version
-                    ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                        feature_space, feature_schema_version,
+                        person_id, name_confidence
+                    ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
                     ON CONFLICT(global_id) DO UPDATE SET
                         first_seen = MIN(
                             COALESCE(NULLIF(identities.first_seen, 0), excluded.first_seen),
@@ -591,7 +793,10 @@ class Database:
                         feature_bank_count = excluded.feature_bank_count,
                         feature_bank_blob = excluded.feature_bank_blob,
                         feature_space = excluded.feature_space,
-                        feature_schema_version = excluded.feature_schema_version
+                        feature_schema_version = excluded.feature_schema_version,
+                        person_id = COALESCE(identities.person_id, excluded.person_id),
+                        name_confidence = COALESCE(identities.name_confidence,
+                                                   excluded.name_confidence)
                     """,
                     (
                         global_id,
@@ -605,6 +810,8 @@ class Database:
                         feature_bank_blob,
                         feature_space,
                         schema_version,
+                        person_id,
+                        name_confidence,
                     ),
                 )
                 if new_appearance is not None:
@@ -698,7 +905,8 @@ class Database:
                     """
                     SELECT global_id, last_seen, last_camera, total_appearances, feature_dim,
                            feature_blob, feature_bank_count, feature_bank_blob,
-                           appearances_json, feature_space, feature_schema_version
+                           appearances_json, feature_space, feature_schema_version,
+                           person_id, name_confidence
                     FROM identities
                     WHERE feature_dim > 0 AND feature_blob IS NOT NULL
                     ORDER BY created_at, global_id
@@ -723,6 +931,8 @@ class Database:
                     "total_appearances": int(row["total_appearances"] or 0),
                     "feature_space": row["feature_space"] or "",
                     "schema_version": row["feature_schema_version"] or 1,
+                    "person_id": row["person_id"],
+                    "name_confidence": row["name_confidence"],
                 })
                 recent_rows = conn.execute(
                     """

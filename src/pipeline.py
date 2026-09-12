@@ -101,6 +101,7 @@ class CameraPipeline(threading.Thread):
         frame_rate_cap: float = 30.0, # 帧率上限（这个默认值只是兜底，实际由 main.py 传入）
         process_max_width: int = 960, # 运行时缩放上限（worklist 2.4：RTSP 在线流无法离线转码，
                                       # 只能靠解码后缩放；超过则等比缩小）
+        personnel=None,               # PersonnelGallery（worklist 3.3）：底库 1:N 自动命名
     ):
         super().__init__(name=f"pipeline-{camera_id}", daemon=True)
         self.camera_id = camera_id
@@ -152,6 +153,7 @@ class CameraPipeline(threading.Thread):
         self._asset_id: int | None = None
         self._video_fps = 25.0          # 把帧号换算成"视频内秒数"用的帧率
         self._process_max_width = max(0, int(process_max_width))
+        self.personnel = personnel
         self._register_asset()
 
     def _register_asset(self) -> None:
@@ -545,12 +547,32 @@ class CameraPipeline(threading.Thread):
             gid = self._track_to_global.get(tid)
             if gid is None:
                 # 用多帧平均特征做确认匹配
-                # 匹配上下文把「已中心化的 gallery」与「所用中心」原子打包返回：
-                # 主特征是 EMA 滑动平均、且所有特征共享一个巨大的公共分量
-                # （均值范数 ~0.8），不减掉它跨身份余弦会虚高到 0.5~0.7、
-                # 越阈比例 21~46%（实测见 scripts/diagnose_ema_collapse.py）。
-                # query 必须用**同一个**中心处理，所以只能从 context 里取。
+                # 匹配上下文把「已中心化的 gallery」与「所用中心」原子打包的原因见 build_match_context 的文档。
                 context = self.store.build_match_context()
+
+                # 底库 1:N 检索（worklist 3.3，能力一路径 B）：**实名优先于匿名编号**。
+                # 命中且该人名下已有绑定的 global_id → 直接复用那个身份（这就是
+                # "认出熟人"）；命中但未绑定 → 先走正常注册，注册成功后自动命名。
+                # 放在全局身份库检索之前的原因见 src/personnel.py 模块注释。
+                personnel_hit = None
+                known_gid = None
+                if self.personnel is not None:
+                    avg_feat = self._validator.get_avg_feature(tid)
+                    if avg_feat is not None:
+                        personnel_hit = self.personnel.match(avg_feat)
+                        if personnel_hit is not None:
+                            known_gid = self.personnel.bound_gid(
+                                personnel_hit["person_id"], self.store)
+                            if known_gid:
+                                gid = known_gid
+                                self._track_to_global[tid] = gid
+                                self._record_arrival(gid)
+                                self.alerter.resolve(gid, self.camera_id)
+                                logger.info(
+                                    "[%s] ✓ 底库命中已知人员: %s (%s, 相似度 %.3f)",
+                                    self.camera_id, personnel_hit["name"],
+                                    personnel_hit["person_id"], personnel_hit["score"])
+
                 confirmed_gid = self._validator.get_confirmed_match(
                     tid, context.gallery, metrics=self.store.metrics,
                     prepare=context.prepare,
@@ -575,6 +597,16 @@ class CameraPipeline(threading.Thread):
                                 self._validator.confirm(tid, gid)
                                 if resolution.is_new:
                                     logger.info("[%s] 注册新身份（多帧平均）: %s", self.camera_id, gid)
+                                    # 底库已命中但名下没有身份 → 自动命名（路径 B 的闭环）
+                                    if personnel_hit is not None and not known_gid:
+                                        self.store.bind_person(
+                                            gid, personnel_hit["person_id"],
+                                            personnel_hit["score"])
+                                        logger.info(
+                                            "[%s] 自动命名: %s -> %s (相似度 %.3f)",
+                                            self.camera_id, gid,
+                                            personnel_hit["person_id"],
+                                            personnel_hit["score"])
                                 else:
                                     self._record_arrival(gid)
                                     self.alerter.resolve(gid, self.camera_id)
@@ -647,7 +679,10 @@ class CameraPipeline(threading.Thread):
             elif gid:
                 color = (248, 189, 56)     # BGR 天蓝/金色
                 text_color = (255, 255, 255)
-                label_text = f"ID: #{gid}"
+                # 已绑实名的身份显示"姓名 (person_id)"，否则显示匿名编号
+                person_label = self.store.person_label(gid) if self.store else None
+                label_text = (f"{person_label} | #{gid}" if person_label
+                              else f"ID: #{gid}")
             else:
                 color = (129, 185, 16)     # BGR 翡翠绿
                 text_color = (255, 255, 255)

@@ -126,6 +126,10 @@ class PersonRecord:
     total_appearances: int = 0
     last_camera: str = ""
     last_seen: float = 0.0
+    # 实名绑定（worklist 3.2，能力一）：global_id 是随机编号，"具体是谁"靠这两列。
+    # person_id 指向 personnel 表；name_confidence 是绑定时（或底库自动命名时）的相似度。
+    person_id: str | None = None
+    name_confidence: float | None = None
 
 
 @dataclass(frozen=True)
@@ -189,6 +193,8 @@ class IdentityStore:
         self._center_cache_key = -1
         self._center_uses_centering = False
         self._gallery_version = 0
+        # 实名映射（person_id -> 姓名），由 PersonnelGallery 注入（worklist 3.2）
+        self._person_names: dict[str, str] = {}
         self.metrics = ReIDMetrics()
         if self._database is not None:
             self._restore()
@@ -249,6 +255,11 @@ class IdentityStore:
                     total_appearances=int(item["total_appearances"]),
                     last_camera=item["last_camera"],
                     last_seen=float(item["last_seen"]),
+                    person_id=item.get("person_id"),
+                    name_confidence=(
+                        float(item["name_confidence"])
+                        if item.get("name_confidence") is not None else None
+                    ),
                 )
                 self._feature_dim = dim
                 restored += 1
@@ -282,6 +293,8 @@ class IdentityStore:
             total_appearances=rec.total_appearances,
             last_camera=rec.last_camera,
             last_seen=rec.last_seen,
+            person_id=rec.person_id,
+            name_confidence=rec.name_confidence,
         )
 
     # ------------------------------------------------------------------ #
@@ -418,6 +431,8 @@ class IdentityStore:
             "last_camera": rec.last_camera,
             "last_seen": rec.last_seen,
             "first_seen": first_seen,
+            "person_id": rec.person_id,
+            "name_confidence": rec.name_confidence,
         }
 
     def _write_identity_row(self, payload: dict, new_appearance: dict | None = None) -> None:
@@ -437,6 +452,8 @@ class IdentityStore:
             first_seen=payload["first_seen"],
             new_appearance=new_appearance,
             schema_version=_FEATURE_SCHEMA_VERSION,
+            person_id=payload.get("person_id"),
+            name_confidence=payload.get("name_confidence"),
         )
 
     def _should_persist_feature_locked(self, global_id: str, now: float) -> bool:
@@ -874,6 +891,75 @@ class IdentityStore:
         return self._database.upsert_video_asset_stub(
             camera_id, rel_path, file_name, size_bytes
         )
+
+    # ------------------------------------------------------------------ #
+    # 实名绑定（能力一，worklist 3.2）                                        #
+    # ------------------------------------------------------------------ #
+
+    def bind_person(self, global_id: str, person_id: str,
+                    confidence: float = 1.0) -> bool:
+        """
+        把匿名身份绑定到实名档案。幂等：重复绑定同一人不产生副作用。
+
+        只改绑定关系，不动特征 —— 特征由身份库自身维护（EMA / feature_bank），
+        实名只是"标签"，混在一起会让"改名字"变成"改特征"这种难以回滚的操作。
+        """
+        with self._lock:
+            rec = self._records.get(global_id)
+            if rec is None:
+                return False
+            rec.person_id = person_id
+            rec.name_confidence = float(confidence)
+        if self._database is not None:
+            ok = self._database.set_identity_person(global_id, person_id, confidence)
+            if not ok:
+                logger.warning("绑定落库失败（identities 行不存在？）: %s -> %s",
+                               global_id, person_id)
+            self._persist_full(global_id)
+        return True
+
+    def unbind_person(self, global_id: str) -> bool:
+        with self._lock:
+            rec = self._records.get(global_id)
+            if rec is None:
+                return False
+            rec.person_id = None
+            rec.name_confidence = None
+        if self._database is not None:
+            self._database.clear_identity_person(global_id)
+            self._persist_full(global_id)
+        return True
+
+    def set_person_names(self, mapping: dict[str, str]) -> None:
+        """
+        注入 person_id -> 姓名 的映射（由 PersonnelGallery 在 CRUD 后推送）。
+        IdentityStore 不该自己查 personnel 表 —— 那是底库（路径 B）的职责，
+        混在一起会让"标签"与"检索"两个语义纠缠。
+        """
+        with self._lock:
+            self._person_names = dict(mapping)
+
+    def person_label(self, global_id: str) -> str | None:
+        """返回"姓名 (person_id)"形式的展示标签；未绑定返回 None。"""
+        with self._lock:
+            rec = self._records.get(global_id)
+            if rec is None or not rec.person_id:
+                return None
+            pid = rec.person_id
+        name = self._person_names.get(pid) if self._person_names else None
+        return f"{name} ({pid})" if name else pid
+
+    def bound_gid_map(self) -> dict[str, str]:
+        """person_id -> global_id（取该人名下 total_appearances 最大的身份）。"""
+        result: dict[str, tuple[int, str]] = {}
+        with self._lock:
+            for rec in self._records.values():
+                if not rec.person_id:
+                    continue
+                current = result.get(rec.person_id)
+                if current is None or rec.total_appearances > current[0]:
+                    result[rec.person_id] = (rec.total_appearances, rec.global_id)
+        return {pid: gid for pid, (_count, gid) in result.items()}
 
     def get_metrics(self) -> dict:
         with self._lock:

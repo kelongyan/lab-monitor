@@ -187,6 +187,17 @@ export async function showTrajectoryModal(global_id) {
   if (!title || !body) return;
 
   title.innerHTML = `目标 <span class="id-link" style="font-size: 15px; margin: 0 4px;">#${escapeHtml(global_id)}</span> 跨镜头通行轨迹链`;
+
+  // 实名命名（worklist 3.5，路径 A）：输入姓名即创建档案并绑定
+  const bindHtml = `
+    <div style="display: flex; gap: 6px; margin-bottom: 10px;">
+      <input id="bind-name-input" class="roi-input-field" placeholder="输入姓名，把该身份绑定到实名档案"
+             style="flex: 1; font-size: 12px; padding: 5px 8px;" />
+      <button class="action-btn" id="btn-bind-name" style="font-size: 12px; padding: 5px 10px;">命名并绑定</button>
+    </div>`;
+  // 注入到 body 顶部（body.innerHTML 稍后整体重写，所以先存起来）
+  window.__bindHtml = bindHtml;
+  window.__bindGid = global_id;
   body.innerHTML = `<div class="empty-state">加载人员轨迹数据中...</div>`;
   openModal('trajectory-modal');
   const request = beginModalRequest('trajectory-modal');
@@ -231,6 +242,8 @@ export async function showTrajectoryModal(global_id) {
         </div>
       </div>
 
+      ${window.__bindHtml || ''}
+
       <div style="font-size: 12px; font-weight: 700; color: var(--text-muted);">📍 移动路线时序链:</div>
       <div class="timeline">
         ${nodesHtml}
@@ -246,6 +259,34 @@ export async function showTrajectoryModal(global_id) {
     const searchBtn = document.getElementById('btn-search-videos');
     if (searchBtn) {
       searchBtn.addEventListener('click', () => searchPersonVideos(global_id, searchBtn));
+    }
+    const bindBtn = document.getElementById('btn-bind-name');
+    const nameInput = document.getElementById('bind-name-input');
+    if (bindBtn && nameInput) {
+      bindBtn.addEventListener('click', async () => {
+        const name = (nameInput.value || '').trim();
+        if (!name) { nameInput.placeholder = '请先输入姓名'; return; }
+        bindBtn.disabled = true;
+        try {
+          const res = await fetchJson('/api/identities/' + encodeURIComponent(global_id) + '/bind', {
+            method: 'POST',
+            headers: { 'Content-Type': 'application/json', 'X-Lab-Monitor-Request': '1' },
+            body: JSON.stringify({ name }),
+          });
+          const person = await res.json();
+          if (res.status === 200) {
+            bindBtn.textContent = `已绑定: ${person.name} (${person.person_id})`;
+            bindBtn.disabled = true;
+            nameInput.disabled = true;
+          } else {
+            bindBtn.textContent = person.error || '绑定失败';
+            bindBtn.disabled = false;
+          }
+        } catch (err) {
+          bindBtn.textContent = '绑定失败: ' + err.message;
+          bindBtn.disabled = false;
+        }
+      });
     }
   } catch (e) {
     if (!request.isCurrent()) return;
