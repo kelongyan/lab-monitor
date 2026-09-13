@@ -22,6 +22,7 @@ import {
 } from './modules/roi.js';
 import { fetchJson } from './utils/api.js';
 import { unlockAlertAudio } from './utils/formatter.js';
+import { openPersonnelModal, initPersonnelPanel } from './modules/personnel.js';
 
 const stopPollingTasks = [];
 
@@ -72,6 +73,9 @@ function bindEvents() {
   // ROI 画布初始化
   initRoiCanvas();
 
+  // 人员档案库弹窗（工具条事件一次性绑定；DOM 来自 index.html）
+  initPersonnelPanel();
+
   // 网格模式切换按钮
   ['auto', '1', '2', '1n'].forEach(mode => {
     const btn = document.getElementById(`btn-grid-${mode}`);
@@ -80,21 +84,23 @@ function bindEvents() {
     }
   });
 
-  // 顶部卡片 & 按钮绑定（stat card 与 header 按钮都绑定同一个处理器）
-  ['card-stat-persons', 'card-stat-persons-btn'].forEach(id => {
-    const el = document.getElementById(id);
-    if (el) {
-      el.addEventListener('click', openIdentitySearchModal);
-      if (el.getAttribute('role') === 'button') {
-        el.addEventListener('keydown', event => {
-          if (event.key === 'Enter' || event.key === ' ') {
-            event.preventDefault();
-            openIdentitySearchModal();
-          }
-        });
+  // header「人员档案数据库」→ 实名档案库（此前它打开的是匿名 gid 网格，名不副实）
+  const btnPersonnel = document.getElementById('card-stat-persons');
+  if (btnPersonnel) {
+    btnPersonnel.addEventListener('click', openPersonnelModal);
+  }
+
+  // 统计卡「已注册 ReID 身份」→ 匿名 gid 网格（保持原行为，口径本来就是 gid）
+  const cardPersons = document.getElementById('card-stat-persons-btn');
+  if (cardPersons) {
+    cardPersons.addEventListener('click', openIdentitySearchModal);
+    cardPersons.addEventListener('keydown', event => {
+      if (event.key === 'Enter' || event.key === ' ') {
+        event.preventDefault();
+        openIdentitySearchModal();
       }
-    }
-  });
+    });
+  }
 
   const btnTopology = document.getElementById('btn-open-topology');
   if (btnTopology) {

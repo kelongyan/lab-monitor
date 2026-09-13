@@ -193,6 +193,22 @@ class Database:
                     cursor.execute(
                         f"ALTER TABLE identities ADD COLUMN {column} {definition}"
                     )
+            # 人员档案的批次五扩展：标记数据来源 + 抓拍图路径。
+            # source 是**唯一**能区分"模拟演示数据"和"真实档案"的字段，
+            # 前端据此打 SIM 徽标、--clean 据此回滚。NULL = 线上真实/人工录入；
+            # search_personnel 的 source='real' 筛选必须把 NULL 一并算进来。
+            personnel_columns = {
+                row[1] for row in cursor.execute("PRAGMA table_info(personnel)")
+            }
+            personnel_migrations = {
+                "source": "TEXT",
+                "thumb_path": "TEXT",
+            }
+            for column, definition in personnel_migrations.items():
+                if column not in personnel_columns:
+                    cursor.execute(
+                        f"ALTER TABLE personnel ADD COLUMN {column} {definition}"
+                    )
             # 轨迹表的视频内坐标（worklist 2.2）。三列都可能为 NULL：
             # 老数据没有这三列的值，检索时必须降级为"仅相机 + 墙钟时间"，
             # 绝不做无根据的回填猜测。
@@ -553,7 +569,15 @@ class Database:
     # ------------------------------------------------------------------ #
 
     def upsert_personnel(self, person_id: str, name: str, employee_no: str | None = None,
-                         department: str | None = None, note: str | None = None) -> bool:
+                         department: str | None = None, note: str | None = None,
+                         source: str | None = None) -> bool:
+        """
+        写入/更新人员档案。
+
+        source 只在**显式传入**时覆盖（COALESCE）：`/api/personnel/{pid}` 的 PATCH
+        与 PersonnelGallery.update 都不带 source，若无条件写就会把档案误标成
+        "真实数据"，SIM 徽标随之消失 —— 那是数据可信度问题，不是显示问题。
+        """
         now = time.time()
         try:
             with self._get_conn() as conn:
@@ -561,16 +585,17 @@ class Database:
                     """
                     INSERT INTO personnel
                         (person_id, name, employee_no, department, note,
-                         created_at, updated_at)
-                    VALUES (?, ?, ?, ?, ?, ?, ?)
+                         created_at, updated_at, source)
+                    VALUES (?, ?, ?, ?, ?, ?, ?, ?)
                     ON CONFLICT(person_id) DO UPDATE SET
                         name = excluded.name,
                         employee_no = excluded.employee_no,
                         department = excluded.department,
                         note = excluded.note,
-                        updated_at = excluded.updated_at
+                        updated_at = excluded.updated_at,
+                        source = COALESCE(excluded.source, personnel.source)
                     """,
-                    (person_id, name, employee_no, department, note, now, now),
+                    (person_id, name, employee_no, department, note, now, now, source),
                 )
                 conn.commit()
             return True
@@ -605,6 +630,139 @@ class Database:
         except Exception as e:
             logger.error("列出人员档案失败: %s", e)
             return []
+
+    def search_personnel(self, q: str | None = None, department: str | None = None,
+                         source: str | None = None, limit: int = 50,
+                         offset: int = 0) -> tuple[list[dict], int]:
+        """
+        人员档案检索（批次五 P0-2）：姓名 / 工号 / 部门三合一模糊匹配 + 分页。
+
+        为什么不改 list_personnel()：它被 PersonnelGallery.reload() 用来重建**全量**
+        内存底库（personnel.py:52-78），一旦带上 LIMIT，底库就会静默变成"只有前 50 人
+        能被自动命名"—— 那是一个只会漏匹配、不会报错的故障。所以另开一个方法。
+
+        返回 (rows, total)，total 是**过滤后**的总人数（前端分页要显示"共 N 人"，
+        不是库内总行数）。
+
+        聚合口径：只 JOIN identities（每人 1~3 行），不碰 identity_appearances。
+        total_appearances 已经存在 identities 上，用 SUM 即可；为 SUM 轨迹表行数
+        会让每次翻页都扫全量 appearance（当前 1718 行，跑满语料后是数十万行），不划算。
+
+        查询失败时**抛出异常**而不是返回空结果：空列表是合法的业务状态（"确实没人"），
+        吞掉数据库故障会让前端把"接口挂了"显示成"库里没人"，两者必须可区分。
+        """
+        where, params = [], []
+        needle = (q or "").strip()
+        if needle:
+            # 转义用户输入里的 LIKE 元字符，否则搜 "100%" 会退化成前缀通配
+            escaped = needle.replace("\\", "\\\\").replace("%", "\\%").replace("_", "\\_")
+            like = f"%{escaped}%"
+            where.append(
+                "(p.name LIKE ? ESCAPE '\\' OR p.employee_no LIKE ? ESCAPE '\\'"
+                " OR p.department LIKE ? ESCAPE '\\')"
+            )
+            params += [like, like, like]
+        if department:
+            where.append("p.department = ?")
+            params.append(department.strip())
+        if source:
+            wanted = source.strip()
+            if wanted == "real":
+                # source 的 NULL 语义是"人工录入 / 线上真实数据"（见上方迁移注释）。
+                # 前端"真实"筛选必须把 NULL 一起算进来，否则手工建档的人
+                # 在"真实"页签里永远消失，只有显式打 real 标的行才可见。
+                where.append("(p.source IS NULL OR p.source = ?)")
+                params.append(wanted)
+            else:
+                where.append("p.source = ?")
+                params.append(wanted)
+        clause = (" WHERE " + " AND ".join(where)) if where else ""
+        group = f"""
+            FROM personnel p
+            LEFT JOIN identities i ON i.person_id = p.person_id
+            {clause}
+            GROUP BY p.person_id
+        """
+        with self._get_conn() as conn:
+            total_row = conn.execute(
+                f"SELECT COUNT(*) AS n FROM ("
+                f"  SELECT p.person_id AS pid {group}"
+                f")",
+                params,
+            ).fetchone()
+            rows = conn.execute(
+                f"""
+                SELECT p.*,
+                       COUNT(i.global_id)               AS identity_count,
+                       COALESCE(SUM(i.total_appearances), 0) AS total_appearances,
+                       MAX(i.last_seen)                 AS last_seen,
+                       MAX(i.last_camera)               AS last_camera,
+                       (SELECT COUNT(*) FROM personnel_photos ph
+                         WHERE ph.person_id = p.person_id) AS photo_count
+                {group}
+                ORDER BY MAX(COALESCE(i.last_seen, 0)) DESC, p.created_at DESC
+                LIMIT ? OFFSET ?
+                """,
+                (*params, int(limit), int(offset)),
+            ).fetchall()
+            return [dict(row) for row in rows], int(total_row["n"] if total_row else 0)
+
+    def person_activity_stats(self, person_id: str) -> dict:
+        """某人名下所有身份的分相机活动量（详情页用）。
+
+        走 identities → identity_appearances 两级聚合，返回按命中次数降序的相机列表。
+        注意 loop_factor：素材循环播放会让同一段像素被反复记录（search.py:88-104 同源问题），
+        这里只报原始行数并显式标注 raw，不假装它是"独立出现次数"。
+
+        查询失败时抛异常而不是返回全零：详情页据此区分"接口挂了（可重试）"
+        和"这人确实没有轨迹"，全零会把故障伪装成事实。
+        """
+        with self._get_conn() as conn:
+            rows = conn.execute(
+                """
+                SELECT a.camera_id                     AS camera_id,
+                       COUNT(*)                        AS raw_rows,
+                       MIN(a.timestamp)                AS first_ts,
+                       MAX(a.timestamp)                AS last_ts,
+                       COUNT(DISTINCT a.global_id)     AS gid_count
+                FROM identity_appearances a
+                JOIN identities i ON i.global_id = a.global_id
+                WHERE i.person_id = ?
+                GROUP BY a.camera_id
+                ORDER BY raw_rows DESC
+                """,
+                (person_id,),
+            ).fetchall()
+            per_camera = [
+                {
+                    "camera_id": r["camera_id"],
+                    "raw_rows": int(r["raw_rows"] or 0),
+                    "first_ts": r["first_ts"],
+                    "last_ts": r["last_ts"],
+                    "gid_count": int(r["gid_count"] or 0),
+                }
+                for r in rows
+            ]
+        return {
+            "person_id": person_id,
+            "camera_count": len(per_camera),
+            "raw_rows": sum(c["raw_rows"] for c in per_camera),
+            "per_camera": per_camera,
+        }
+
+    def set_personnel_thumb(self, person_id: str, thumb_path: str | None) -> bool:
+        """单独回写抓拍图路径（seed 生成图片后调用，避免走 upsert 把 source 冲掉）。"""
+        try:
+            with self._get_conn() as conn:
+                cursor = conn.execute(
+                    "UPDATE personnel SET thumb_path = ?, updated_at = ? WHERE person_id = ?",
+                    (thumb_path, time.time(), person_id),
+                )
+                conn.commit()
+                return cursor.rowcount > 0
+        except Exception as e:
+            logger.error("写入人员抓拍图路径失败 %s: %s", person_id, e)
+            return False
 
     def delete_personnel(self, person_id: str) -> bool:
         """删除档案并解除其名下身份的绑定（身份本身保留，回到匿名状态）。"""
@@ -1063,6 +1221,44 @@ class Database:
             })
         return int(total), appearances
 
+    def gids_for_person(self, person_id: str) -> list[str]:
+        """
+        某档案名下全部匿名身份的 global_id（P1-1 按档案检索的入口）。
+
+        单独做一个只取 id 的方法，而不是复用 identities_for_person()：
+        后者要连 last_seen / total_appearances 一起查再排序，而检索只需要 id 列表，
+        并且检索路径每个身份还要各跑一次轨迹聚合，能省的扫描就省。
+        """
+        try:
+            with self._get_conn() as conn:
+                rows = conn.execute(
+                    "SELECT global_id FROM identities WHERE person_id = ? "
+                    "ORDER BY last_seen DESC",
+                    (person_id,),
+                ).fetchall()
+                return [row["global_id"] for row in rows]
+        except Exception as e:
+            logger.error("列出档案名下身份 ID 失败 %s: %s", person_id, e)
+            return []
+
+    def get_video_asset_by_id(self, asset_id: int) -> dict | None:
+        """
+        按 asset_id 取单个资产行（/media 出片要先定位真实文件）。
+
+        名字**必须**与 get_video_asset(camera_id) 区分开：后者按相机取"最新一行"，
+        已有 identity_store / seed_video_assets / transcode_lowres 多处调用。
+        同名覆盖会让那些调用方静默拿到错误语义（Python 后定义者胜，不报错）。
+        """
+        try:
+            with self._get_conn() as conn:
+                row = conn.execute(
+                    "SELECT * FROM video_assets WHERE asset_id = ?", (asset_id,)
+                ).fetchone()
+                return dict(row) if row else None
+        except Exception as e:
+            logger.error("读取视频资产失败 %s: %s", asset_id, e)
+            return None
+
     def get_stats(self) -> dict[str, int]:
         """获取数据库总统计数据"""
         try:
@@ -1080,5 +1276,21 @@ class Database:
             return {"db_total_alerts": 0, "db_total_identities": 0, "db_size_bytes": 0}
 
 
-# 全局单例数据库对象
-db = Database()
+def __getattr__(name: str):
+    """惰性全局单例（PEP 562）：首次访问 `src.db.db` 时才连库。
+
+    此前这里是模块级 `db = Database()`，任何 `import src.db`（哪怕只想要
+    `Database` 这个类去建临时库/跑测试）都会先打开并迁移生产库
+    `outputs/lab_monitor.db` —— seed 脚本的 `--db outputs/mock_demo.db`
+    就是这样"顺手"碰了生产库。改成惰性后：
+
+      - `from src.db import Database`   → 不连库（脚本/测试的安全路径）；
+      - `from src.db import db` / `src.db.db` → 此时才创建（main.py、
+        server.py 兜底路径的原语义不变）；
+      - 测试仍可 `src.db.db = <临时实例>` 整体替换（真实属性优先于本钩子）。
+    """
+    if name == "db":
+        global db
+        db = Database()
+        return db
+    raise AttributeError(f"module {__name__!r} has no attribute {name!r}")

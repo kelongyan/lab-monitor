@@ -66,7 +66,7 @@ http://localhost:8000
 
 ### 测试与验证
 
-**stdlib `unittest`（venv 里没装 pytest，别写 pytest 专有语法）**，`tests/` 下 13 个 Python 文件共 158 个用例；另有一个纯 Node 的前端用例（19 项，测 MJPEG 连接管理器与写请求守卫头）：
+**stdlib `unittest`（venv 里没装 pytest，别写 pytest 专有语法）**，`tests/` 下 21 个 Python 文件共 286 个用例；另有两个纯 Node 的前端用例（stream_manager 19 项 + personnel 28 项，测 MJPEG 连接管理器、写请求守卫头与人员档案面板）：
 
 ```bash
 # 全量
@@ -79,9 +79,11 @@ http://localhost:8000
 
 # 前端（Node，无依赖）：19 项断言，整体 pass/fail
 node tests/test_stream_manager_frontend.mjs
+# 人员档案库弹窗（Node DOM 桩件）：19 项断言
+node tests/test_personnel_frontend.mjs
 ```
 
-> **注意**：`src/db.py` 末尾有模块级单例 `db = Database()`，import 即连上生产库 `outputs/lab_monitor.db`——跑测试会碰生产数据，必要时先备份。
+> **注意**：`src/db.py` 尾部的全局单例已**惰性化**（PEP 562 `__getattr__`）：`from src.db import Database` 只取类、不连库（脚本/测试的安全路径）；`from src.db import db` 或属性访问 `src.db.db` 才会创建并连上生产库 `outputs/lab_monitor.db`。测试一律用临时库注入；`server.py` 统一经 `_get_database()`（store → gallery → 全局单例）取库。
 
 补充人工验证：
 1. 运行 `./.venv/Scripts/python.exe main.py` 查看控制台是否报错
@@ -159,8 +161,8 @@ CameraPipeline (src/pipeline.py)
 
 **关键参数**：
 - ReID 模型：**OSNet-x0.25**（512维），通过 `build_reid_extractor()` 工厂函数实例化（自动回退 ResNet50）
-  - **当前加载的是 ImageNet 预训练权重（非 ReID 专用权重）**：`src/reid.py:93-98` 用 `pretrained=True`，从未加载 Market-1501 等 ReID 数据集权重，`feature_space` 字符串 `osnet-x0.25-imagenet:512` 即为自证。因此跨镜头判别力有限，属已知待办项
-- 相似度阈值：`0.75`（**散落在 5 处，改一处无效**，清单见下方「调整 ReID 匹配阈值」）
+  - **当前加载的是 Market-1501 ReID 专用权重**（批次一换装，`feature_space` 形如 `osnet-x0.25-market1501:512`），权威配置在 `src/reid_config.py`
+- 相似度阈值：`REID_MATCH_THRESHOLD`（默认 **0.68**，单一来源 `src/reid_config.py`，可用环境变量 `LAB_MONITOR_REID_THRESHOLD` 覆盖；旧文档所称"0.75 散落 5 处"已单源化，勿再硬编码）
 - Ratio Test：`second_sim / best_sim > 0.85` 时拒绝歧义匹配（`src/reid.py`）
 - 多帧确认：连续 3 帧匹配同一 ID 才确认（`confirm_frames=3`）
 - 注册防重：`register_if_new()` 在锁内原子执行查重+注册，防多摄像头并发重复注册
@@ -330,12 +332,8 @@ CameraPipeline (src/pipeline.py)
 - **注意**：切换模型后特征维度可能变化（512→2048），需清空 `outputs/transit_stats.json` 重新校准
 
 ### 调整 ReID 匹配阈值
-- **`0.75` 这个阈值散落在 5 处，只改一处不生效**，需同步修改：
-  - `src/reid.py:171`、`src/reid.py:208`（`match_feature` / 相关函数默认参数）
-  - `src/reid_validator.py:31`
-  - `src/pipeline.py:110` 与 `:210`（调用处显式传参）
-  - `src/identity_store.py:371`（`register_if_new`）
-- Ratio Test 阈值：`src/reid.py` `match_feature()` 的 `ratio=0.85` 参数
+- 阈值已**单源化**到 `src/reid_config.py` 的 `REID_MATCH_THRESHOLD`（默认 0.68，2026-09 标定），所有调用点（reid / pipeline / identity_store / personnel）都从它导入；临时调整用环境变量 `LAB_MONITOR_REID_THRESHOLD`，不要在任何调用点写死数字
+- Ratio Test 阈值：`src/reid_config.py` 的 `REID_RATIO_TEST`（0.85）
 - 阈值越高 → 匹配越严格 → 更易产生新身份（适合外貌差异大的场景）
 
 ### 修改告警时间窗口
@@ -352,13 +350,13 @@ CameraPipeline (src/pipeline.py)
 
 **已模块化**（不再是单文件）：
 - `static/index.html`：316 行，只剩结构与资源引用
-- `static/css/`：8 个文件（`main.css` / `variables.css` / `layout.css` / `utilities.css` + `components/` 下 4 个）
-- `static/js/`：9 个文件，原生 **ES module**（`app.js` + `modules/` 6 个 + `utils/` 2 个）
+- `static/css/`：9 个文件（`main.css` / `variables.css` / `layout.css` / `utilities.css` + `components/` 下 5 个）
+- `static/js/`：10 个文件，原生 **ES module**（`app.js` + `modules/` 7 个 + `utils/` 2 个）
 
 - 无构建流程，由 FastAPI 在 `server.py:286-290` 的 `index()` 路由每次请求直接读盘托管（改 HTML 不用重启，但 `?v=` 仍决定 CSS/JS 是否走缓存）
 - 使用原生 JavaScript + WebSocket + MJPEG `<img>` 标签
 - **`modules/stream_manager.js` 管理 MJPEG 长连接**：浏览器对同域并发连接上限为 6，22 路全量建流会把连接池占满（只有约 6 路能出图，REST 轮询也会挨饿）。它用 `IntersectionObserver` 只给视口内的卡片建流、同时建流上限 4、超限时整批轮转、断流前把最后一帧冻结成占位图；焦点大屏常驻，标签页切后台全部断流。**改网格/弹窗相关代码时注意调用 `resetStreamRegistry()` / `registerStreamImage()` 的时机**，否则会出现"卡片可见但永不建流"或连接泄漏。纯 Node 用例：`node tests/test_stream_manager_frontend.mjs`
-- **改任何 CSS/JS 后必须同步 bump `static/index.html` 里的 `?v=` 版本号**（当前 CSS `?v=11.5` / `app.js?v=11.6`；`main.css` 的 `@import` 子路径自 11.5 起也带 `?v=11.5`，两边要一起改）。注意 `app.js` 里的 `import './modules/*.js'` **不带版本号**，改子模块后需要 `Ctrl+F5` 硬刷新才能看到效果
+- **改任何 CSS/JS 后必须同步 bump `static/index.html` 里的 `?v=` 版本号**（当前 CSS `?v=11.8` / `app.js?v=11.8`；`main.css` 的 `@import` 子路径也带 `?v=11.8`，三处要一起改）。注意 `app.js` 里的 `import './modules/*.js'` **不带版本号**，改子模块后需要 `Ctrl+F5` 硬刷新才能看到效果
 - 只改前端资源时刷新浏览器即可（无需重启后端）
 
 ## 文档与审计台账

@@ -1,0 +1,456 @@
+/* 人员档案库 Personnel Archive (批次五 P0-3) */
+
+/* 列表 / 详情两个面板互斥：详情页是整体替换，避免在弹窗里做滚动嵌套 */
+.person-pane {
+  display: none;
+  flex-direction: column;
+  gap: 12px;
+}
+.person-pane.active {
+  display: flex;
+}
+
+/* ---------------- 工具条 ---------------- */
+.person-toolbar {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: 8px;
+}
+
+.person-search-box {
+  flex: 1 1 200px;
+  min-width: 160px;
+  font-size: 12px;
+  padding: 6px 10px;
+}
+
+.person-filter-group {
+  display: flex;
+  align-items: center;
+  gap: 4px;
+  font-size: 11px;
+  color: var(--text-muted);
+}
+
+.person-source-btn {
+  font-size: 11px;
+  padding: 4px 9px;
+}
+
+.person-pager-info {
+  font-family: 'JetBrains Mono', monospace;
+  font-size: 11px;
+  color: var(--text-muted);
+  padding: 0 6px;
+  white-space: nowrap;
+}
+
+/* ---------------- 卡片网格 ---------------- */
+.person-grid {
+  display: grid;
+  grid-template-columns: repeat(auto-fill, minmax(232px, 1fr));
+  gap: 10px;
+}
+
+.person-card {
+  display: flex;
+  align-items: stretch;
+  gap: 10px;
+  padding: 10px;
+  background: var(--bg-card);
+  border: 1px solid var(--border-card);
+  border-radius: 10px;
+  cursor: pointer;
+  position: relative;
+  overflow: hidden;
+  transition: all 0.2s ease;
+}
+
+.person-card::before {
+  content: '';
+  position: absolute;
+  left: 0; top: 0; bottom: 0;
+  width: 3px;
+  background: var(--primary);
+  opacity: 0.55;
+}
+
+/* 模拟数据用琥珀色左边条 —— 扫一眼就能把演示数据从真实数据里分出来 */
+.person-card.is-sim::before {
+  background: var(--warning);
+  opacity: 0.8;
+}
+
+.person-card:hover,
+.person-card:focus-visible {
+  transform: translateY(-2px);
+  border-color: var(--primary);
+  box-shadow: 0 4px 16px rgba(0, 0, 0, 0.3);
+  outline: none;
+}
+
+.person-card.is-sim:hover,
+.person-card.is-sim:focus-visible {
+  border-color: var(--warning);
+  box-shadow: 0 4px 16px var(--warning-glow);
+}
+
+/* ---------------- 头像 ---------------- */
+.person-avatar {
+  width: 44px;
+  height: 56px;
+  flex-shrink: 0;
+  object-fit: cover;
+  border-radius: 6px;
+  border: 1px solid var(--border-card);
+  background: rgba(2, 132, 199, 0.1);
+}
+
+.person-avatar.lg {
+  width: 56px;
+  height: 72px;
+}
+
+/* 没有头像文件时的降级块：不是"图裂了"，而是看起来本来就该这样 */
+.person-avatar.fallback {
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  font-family: 'JetBrains Mono', monospace;
+  font-size: 22px;
+  font-weight: 700;
+  color: var(--primary-light);
+  background: linear-gradient(160deg, rgba(2, 132, 199, 0.22), rgba(124, 58, 237, 0.18));
+}
+
+.person-avatar.lg.fallback {
+  font-size: 28px;
+}
+
+/* ---------------- 卡片文字 ---------------- */
+.person-card-main {
+  flex: 1;
+  min-width: 0;
+  display: flex;
+  flex-direction: column;
+  gap: 2px;
+}
+
+.person-name-row {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+}
+
+.person-name {
+  font-size: 14px;
+  font-weight: 700;
+  color: var(--text-main);
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.person-name.lg {
+  font-size: 17px;
+  white-space: normal;
+}
+
+.person-empno {
+  font-family: 'JetBrains Mono', monospace;
+  font-size: 11px;
+  color: var(--primary-light);
+  letter-spacing: 0.4px;
+}
+
+.person-dept {
+  font-size: 11px;
+  color: var(--text-muted);
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.person-meta {
+  display: flex;
+  gap: 8px;
+  margin-top: 4px;
+  font-family: 'JetBrains Mono', monospace;
+  font-size: 10px;
+  color: var(--text-dim);
+}
+
+.person-card-side {
+  display: flex;
+  flex-direction: column;
+  align-items: flex-end;
+  justify-content: space-between;
+  flex-shrink: 0;
+  gap: 6px;
+}
+
+.person-when {
+  font-size: 10px;
+  color: var(--text-muted);
+  white-space: nowrap;
+}
+
+.person-cam {
+  font-family: 'JetBrains Mono', monospace;
+  font-size: 10px;
+  font-weight: 700;
+  color: var(--primary);
+  background: rgba(56, 189, 248, 0.1);
+  padding: 2px 6px;
+  border-radius: 4px;
+}
+
+/* ---------------- 徽标 ---------------- */
+/* 全站没有通用 .badge/.tag 基类（都是各写一次的硬编码类），所以这里建一个专用的 */
+.person-badge {
+  font-family: 'JetBrains Mono', monospace;
+  font-size: 9px;
+  font-weight: 700;
+  letter-spacing: 0.5px;
+  padding: 1px 5px;
+  border-radius: 4px;
+  white-space: nowrap;
+  flex-shrink: 0;
+}
+
+.person-badge.sim {
+  color: var(--warning);
+  background: rgba(245, 158, 11, 0.14);
+  border: 1px solid rgba(245, 158, 11, 0.4);
+}
+
+/* ---------------- 分页 / 空态 ---------------- */
+.person-pager {
+  display: flex;
+  align-items: center;
+  justify-content: flex-end;
+  gap: 8px;
+}
+
+.person-pager .action-btn:disabled {
+  opacity: 0.4;
+  cursor: not-allowed;
+}
+
+/* 注意：既有的 .empty-state 在 CSS 里根本没有定义（只在 light 里补了颜色），
+   所以这里自带布局，不蹭那个类。 */
+.person-empty {
+  grid-column: 1 / -1;
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  justify-content: center;
+  gap: 6px;
+  padding: 28px 12px;
+  text-align: center;
+}
+
+.person-empty-title {
+  font-size: 13px;
+  font-weight: 700;
+  color: var(--text-muted);
+}
+
+.person-empty-sub {
+  font-size: 11px;
+  color: var(--text-dim);
+  line-height: 1.6;
+}
+
+.person-empty-sub code {
+  font-family: 'JetBrains Mono', monospace;
+  font-size: 10px;
+  color: var(--primary-light);
+  background: rgba(56, 189, 248, 0.08);
+  padding: 1px 5px;
+  border-radius: 4px;
+}
+
+/* ---------------- 详情面板 ---------------- */
+.person-detail-head {
+  display: flex;
+  align-items: flex-start;
+  gap: 12px;
+}
+
+.person-detail-id {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  flex: 1;
+  min-width: 0;
+}
+
+.person-stats {
+  grid-template-columns: repeat(auto-fit, minmax(120px, 1fr));
+}
+
+.person-section-title {
+  font-size: 12px;
+  font-weight: 700;
+  color: var(--text-muted);
+  margin-top: 6px;
+  padding-top: 10px;
+  border-top: 1px solid var(--border-card);
+}
+
+.person-note {
+  font-size: 10px;
+  color: var(--text-dim);
+  line-height: 1.6;
+}
+
+.person-gid-row,
+.person-cam-row {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  padding: 7px 10px;
+  font-size: 11px;
+  background: rgba(30, 41, 59, 0.4);
+  border: 1px solid var(--border-card);
+  border-radius: 6px;
+}
+
+.person-gid-row {
+  cursor: pointer;
+  transition: all 0.2s ease;
+}
+
+.person-gid-row:hover,
+.person-gid-row:focus-visible {
+  border-color: var(--primary);
+  background: rgba(2, 132, 199, 0.1);
+  outline: none;
+}
+
+.person-gid {
+  font-family: 'JetBrains Mono', monospace;
+  font-weight: 700;
+  color: var(--primary-light);
+  flex: 1;
+}
+
+.person-gid-conf,
+.person-gid-count,
+.person-cam-span {
+  font-family: 'JetBrains Mono', monospace;
+  font-size: 10px;
+  color: var(--text-muted);
+  white-space: nowrap;
+}
+
+.person-gid-cam {
+  font-family: 'JetBrains Mono', monospace;
+  font-size: 10px;
+  font-weight: 700;
+  color: var(--purple);
+}
+
+.person-cam-row {
+  justify-content: space-between;
+}
+
+.person-danger-zone {
+  display: flex;
+  justify-content: flex-end;
+  padding-top: 8px;
+  border-top: 1px solid var(--border-card);
+}
+
+/* ---------------- 视频片段与回放（P1-1c） ---------------- */
+.person-clip {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 10px;
+  padding: 7px 10px;
+  font-size: 11px;
+  background: rgba(30, 41, 59, 0.4);
+  border: 1px solid var(--border-card);
+  border-radius: 6px;
+}
+
+.person-clip-main,
+.person-clip-side {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  min-width: 0;
+}
+
+.person-clip-cam {
+  font-family: 'JetBrains Mono', monospace;
+  font-size: 10px;
+  font-weight: 700;
+  color: var(--purple);
+  flex-shrink: 0;
+}
+
+.person-clip-time,
+.person-clip-frames {
+  font-family: 'JetBrains Mono', monospace;
+  font-size: 10px;
+  color: var(--text-muted);
+  white-space: nowrap;
+}
+
+.person-clip-note {
+  font-size: 10px;
+  color: var(--text-dim);
+}
+
+/* 循环倍数是必须显眼的度量警告：素材仅 45 分钟却累计 22 万条 appearance，
+   不标注倍数会让用户以为"这个人出现了三万次"。 */
+.person-badge.loop {
+  color: var(--warning);
+  background: rgba(245, 158, 11, 0.14);
+  border: 1px solid rgba(245, 158, 11, 0.4);
+}
+
+.person-player {
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
+  padding: 8px;
+  background: #000;
+  border: 1px solid var(--border-card);
+  border-radius: 8px;
+}
+
+.person-player[hidden] {
+  display: none;
+}
+
+.person-player video {
+  width: 100%;
+  max-height: 320px;
+  border-radius: 4px;
+  background: #000;
+}
+
+.person-player-bar {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 8px;
+  font-family: 'JetBrains Mono', monospace;
+  font-size: 10px;
+  color: #cbd5e1;
+}
+
+/* ---------------- 响应式 ---------------- */
+@media (max-width: 800px) {
+  .person-grid {
+    grid-template-columns: repeat(auto-fill, minmax(180px, 1fr));
+  }
+  .person-toolbar {
+    gap: 6px;
+  }
+}

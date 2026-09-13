@@ -170,6 +170,91 @@ def aggregate_identity_assets(
     }
 
 
+def aggregate_person_assets(
+    database,
+    global_ids: list[str],
+    *,
+    start: float | None = None,
+    end: float | None = None,
+    camera: str | None = None,
+    split_gap_s: float = 30.0,
+    collapse: bool = True,
+    known_cameras: set[str] | None = None,
+) -> dict:
+    """
+    按**实名档案**检索：把某人名下所有匿名身份的轨迹合并成一份片段清单（P1-1a）。
+
+    为什么不在 SQL 层用 `WHERE global_id IN (...)` 一次查完：那样会把多个身份的
+    相机序列首尾拼成一条长链，再交给 `collapse_loop_segments()` —— 而**每个身份
+    本来就在走同一条拓扑**（都从走廊 A 到 B 到 C），拼起来天然呈现"严格周期"，
+    `detect_loop_period()` 会把它判成循环播放，把真正不同的多次到访折成一次。
+    所以这里**先按身份各自聚合（复用已测的 aggregate_identity_assets），再合并结果**：
+    循环判定仍在单个身份的序列上做，语义与按编号检索完全一致。
+
+    代价是每人 N 次查询（N = 名下身份数，通常 1~3），可接受；
+    identities 有 person_id 索引（见 db.py 的 idx_identities_person）。
+    """
+    merged: dict[tuple, dict] = {}
+    per_identity_loop: dict[str, dict] = {}
+    totals = {"total_appearances": 0, "returned_rows": 0,
+              "dropped_offline_rows": 0, "position_known_rows": 0}
+    truncated = False
+
+    for gid in global_ids:
+        result = aggregate_identity_assets(
+            database, gid, start=start, end=end, camera=camera,
+            split_gap_s=split_gap_s, collapse=collapse,
+            known_cameras=known_cameras,
+        )
+        for key in totals:
+            totals[key] += int(result.get(key) or 0)
+        truncated = truncated or bool(result.get("truncated"))
+        per_identity_loop[gid] = result.get("loop") or {}
+
+        for asset in result.get("assets") or []:
+            key = (asset.get("asset_id"), asset.get("camera_id"))
+            entry = merged.get(key)
+            if entry is None:
+                entry = {**asset, "segments": list(asset.get("segments") or []),
+                         "global_ids": [gid]}
+                merged[key] = entry
+            else:
+                entry["segments"].extend(asset.get("segments") or [])
+                entry["hit_count"] += asset.get("hit_count") or 0
+                entry["position_known"] = entry["position_known"] or asset.get("position_known")
+                if gid not in entry["global_ids"]:
+                    entry["global_ids"].append(gid)
+                first = asset.get("video_first_ts")
+                if first is not None and (entry["video_first_ts"] is None
+                                          or first < entry["video_first_ts"]):
+                    entry["video_first_ts"] = first
+                last = asset.get("video_last_ts")
+                if last is not None and (entry["video_last_ts"] is None
+                                         or last > entry["video_last_ts"]):
+                    entry["video_last_ts"] = last
+                # 同一资产被多个身份命中时，重复倍率取最大 ——
+                # 它表示"这段像素被记录了几遍"，取最大才反映真实重复程度。
+                entry["loop_factor"] = max(entry.get("loop_factor") or 1.0,
+                                           asset.get("loop_factor") or 1.0)
+
+    for entry in merged.values():
+        entry["segments"].sort(key=lambda s: (s.get("enter") or 0))
+
+    assets = sorted(merged.values(), key=lambda item: -(item.get("video_last_ts") or 0))
+    return {
+        "scope": "person",
+        "global_ids": list(global_ids),
+        **totals,
+        "loop": {
+            "detected": any(bool(v.get("detected")) for v in per_identity_loop.values()),
+            "per_identity": per_identity_loop,
+        },
+        "assets": assets,
+        "asset_count": len(assets),
+        "truncated": truncated,
+    }
+
+
 def rank_identities_by_feature(
     store,
     feature: np.ndarray,

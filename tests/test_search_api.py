@@ -98,7 +98,144 @@ class SearchPersonApiTests(unittest.TestCase):
             self.assertNotIn("rnd_03", cameras)
 
 
-class SearchByImageApiTests(unittest.TestCase):
+class SearchPersonByIdTests(unittest.TestCase):
+    """
+    按实名档案检索（P1-1a）：/api/search/person?person_id=
+
+    用独立的 app 夹具，因为要多一个 personnel 库（身份要绑定到档案上）。
+    """
+
+    @contextmanager
+    def person_app(self):
+        with tempfile.TemporaryDirectory() as temp_dir:
+            database = Database(Path(temp_dir) / "pid.db")
+            database.seed_video_asset(
+                camera_id="rnd_08", rel_path="videos_low/rnd_08.mp4",
+                codec="h264", fps_declared=25.0, frames_real=957,
+                duration_real=38.28)
+            asset_id = database.get_video_asset("rnd_08")["asset_id"]
+            store = IdentityStore(database=database, feature_space="test:4")
+
+            gid_a = store.register(np.array([1, 0, 0, 0], dtype=np.float32))
+            gid_b = store.register(np.array([0, 1, 0, 0], dtype=np.float32))
+            database.record_appearance(gid_a, "rnd_08", 1000.0, [0, 0, 50, 100],
+                                       1, asset_id=asset_id, video_frame=100,
+                                       video_ts=4.0)
+            database.record_appearance(gid_b, "rnd_08", 1100.0, [0, 0, 50, 100],
+                                       2, asset_id=asset_id, video_frame=200,
+                                       video_ts=8.0)
+
+            from src.personnel import PersonnelGallery
+            gallery = PersonnelGallery(database=database, threshold=0.68)
+            person_id = gallery.create(name="张伟", employee_no="QLU-26-0001",
+                                       department="网络运维")
+            # 两个匿名身份都归到同一个人名下
+            for gid in (gid_a, gid_b):
+                database.save_identity(
+                    global_id=gid, feature_dim=4, feature_blob=b"\x00" * 16,
+                    feature_bank_count=0, feature_bank_blob=b"",
+                    total_appearances=0, last_camera="rnd_08", last_seen=1000.0,
+                    feature_space="test:4", first_seen=1000.0, person_id=person_id,
+                )
+
+            import server
+            from fastapi.testclient import TestClient
+            server.init_server(frame_hub=None, broadcaster=None,
+                               identity_store=store, personnel=gallery)
+            try:
+                yield TestClient(server.app), person_id, gid_a, gid_b, database
+            finally:
+                server.init_server(None, None, None)
+                database.close()
+
+    def test_person_id_merges_all_identities(self):
+        """核心语义：按档案检索要合并名下**全部**身份，不能只给第一个。"""
+        with self.person_app() as (client, person_id, _a, _b, _db):
+            res = client.get(f"/api/search/person?person_id={person_id}")
+            self.assertEqual(res.status_code, 200, res.text[:200])
+            payload = res.json()
+            self.assertEqual(payload["scope"], "person")
+            self.assertEqual(payload["person_name"], "张伟")
+            self.assertEqual(len(payload["global_ids"]), 2,
+                             "名下两个身份都要纳入")
+            self.assertEqual(payload["asset_count"], 1)
+            # 一个资产但来自两个身份
+            entry = payload["assets"][0]
+            self.assertEqual(len(entry["global_ids"]), 2)
+            self.assertAlmostEqual(entry["video_first_ts"], 4.0, places=2)
+            self.assertAlmostEqual(entry["video_last_ts"], 8.0, places=2)
+
+    def test_known_camera_lookup_runs_off_the_event_loop(self):
+        """
+        `_known_camera_set()` 会 list_video_assets()（查库），必须留在 run_in_threadpool
+        的闭包里。曾经为了复用参数把它提到协程顶层（`common = dict(..., known_cameras=...)`），
+        于是每次检索都在事件循环上同步查库 —— 功能测试全绿，只在并发下拖慢所有接口。
+
+        判据是"**调用时该线程有没有在跑事件循环**"，不能用线程名：
+        TestClient 自己就在非主线程里跑 loop，按线程名断言会恒真（等于没测）。
+        run_in_threadpool 的 worker 线程里没有 running loop，协程里必然有。
+        """
+        import asyncio
+        import server
+
+        on_loop = []
+        original = server._known_camera_set
+
+        def spy(*args, **kwargs):
+            try:
+                asyncio.get_running_loop()
+                on_loop.append(True)
+            except RuntimeError:
+                on_loop.append(False)
+            return original(*args, **kwargs)
+
+        with self.person_app() as (client, person_id, gid_a, _b, _db):
+            server._known_camera_set = spy
+            try:
+                for url in (f"/api/search/person?person_id={person_id}",
+                            f"/api/search/person?global_id={gid_a}"):
+                    res = client.get(url)
+                    self.assertEqual(res.status_code, 200, res.text[:200])
+            finally:
+                server._known_camera_set = original
+
+        self.assertTrue(on_loop, "_known_camera_set 未被调用，用例失去意义")
+        self.assertNotIn(
+            True, on_loop,
+            f"_known_camera_set 在事件循环线程上被调用（共 {len(on_loop)} 次，"
+            "其中若干次发生在 loop 上）—— 它查库，必须放回 run_in_threadpool 闭包内")
+
+
+    def test_person_id_and_global_id_are_mutually_exclusive(self):
+        """两个入口同时给 → 400，避免"到底按谁查"的歧义。"""
+        with self.person_app() as (client, person_id, gid_a, _b, _db):
+            res = client.get(
+                f"/api/search/person?person_id={person_id}&global_id={gid_a}")
+            self.assertEqual(res.status_code, 400)
+            res = client.get("/api/search/person")
+            self.assertEqual(res.status_code, 400, "两个都不给也应 400")
+
+    def test_unknown_person_id_is_404(self):
+        with self.person_app() as (client, _pid, _a, _b, _db):
+            res = client.get("/api/search/person?person_id=no-such-person")
+            self.assertEqual(res.status_code, 404)
+
+    def test_person_without_identities_returns_empty_not_404(self):
+        """
+        档案刚建好、还没绑定身份 → 返回空清单。
+        这不是错误：前端要显示"该档案暂无轨迹"，而不是弹 404 让人以为坏了。
+        """
+        with self.person_app() as (client, _pid, _a, _b, database):
+            import server
+            empty_pid = server._personnel.create(name="李四")
+            res = client.get(f"/api/search/person?person_id={empty_pid}")
+            self.assertEqual(res.status_code, 200, res.text[:200])
+            payload = res.json()
+            self.assertEqual(payload["asset_count"], 0)
+            self.assertEqual(payload["global_ids"], [])
+            self.assertEqual(payload["person_name"], "李四")
+
+
     def _jpeg(self) -> bytes:
         import cv2
         image = np.zeros((400, 300, 3), dtype=np.uint8)

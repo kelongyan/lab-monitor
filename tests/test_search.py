@@ -22,6 +22,7 @@ import numpy as np
 from src.db import Database
 from src.search import (
     aggregate_identity_assets,
+    aggregate_person_assets,
     best_crop,
     rank_identities_by_feature,
 )
@@ -140,6 +141,150 @@ class AggregateTests(SearchFixture):
             self.database, "no-such-id", known_cameras=self.KNOWN_CAMERAS)
         self.assertEqual(result["asset_count"], 0)
         self.assertEqual(result["total_appearances"], 0)
+
+
+class AggregatePersonTests(SearchFixture):
+    """
+    按实名档案检索（P1-1a）：一个人名下可能有多个匿名身份，必须合并。
+
+    这里最关键的用例是 test_merges_without_fake_loop：把两个身份各自的
+    相机序列**拼起来**会天然呈现"严格周期"（都在走同一条拓扑），
+    若在合并后再做循环折叠，就会把真实的多段到访折成一段。
+    实现上按身份分别聚合再合并，正是为了避开这一点。
+    """
+
+    def _bind(self, person_id: str, gid: str) -> None:
+        self.database.save_identity(
+            global_id=gid, feature_dim=4, feature_blob=b"\x00" * 16,
+            feature_bank_count=0, feature_bank_blob=b"", total_appearances=0,
+            last_camera="rnd_08", last_seen=1000.0, feature_space="test:4",
+            first_seen=1000.0, person_id=person_id,
+        )
+
+    def test_merges_all_identities_of_person(self):
+        """两个身份、不同相机 → 合并后两个相机都要在结果里，且标注来源 gid。"""
+        self._bind("P1", self.gid)
+        self._bind("P1", "person-b")
+        self.database.record_appearance(
+            "person-b", "rnd_01", 5000.0, [0, 0, 90, 180], 400,
+            video_frame=50, video_ts=2.0)
+
+        result = aggregate_person_assets(
+            self.database, self.database.gids_for_person("P1"),
+            known_cameras=self.KNOWN_CAMERAS)
+
+        self.assertEqual(result["scope"], "person")
+        cameras = {a["camera_id"] for a in result["assets"]}
+        self.assertEqual(cameras, {"rnd_08", "rnd_19", "rnd_01"})
+        rnd01 = next(a for a in result["assets"] if a["camera_id"] == "rnd_01")
+        self.assertEqual(rnd01["global_ids"], ["person-b"])
+        self.assertAlmostEqual(rnd01["video_first_ts"], 2.0, places=2)
+
+    def test_single_identity_matches_identity_level_result(self):
+        """只有一个身份时，结果必须与按编号检索逐字段一致（不能引入偏差）。"""
+        self._bind("P2", self.gid)
+        one = aggregate_identity_assets(self.database, self.gid,
+                                        known_cameras=self.KNOWN_CAMERAS)
+        merged = aggregate_person_assets(self.database, [self.gid],
+                                         known_cameras=self.KNOWN_CAMERAS)
+
+        self.assertEqual(merged["asset_count"], one["asset_count"])
+        self.assertEqual(merged["total_appearances"], one["total_appearances"])
+        self.assertEqual(merged["position_known_rows"], one["position_known_rows"])
+        self.assertEqual(merged["dropped_offline_rows"], one["dropped_offline_rows"])
+
+    def test_no_identities_is_empty_not_error(self):
+        """档案刚建好、还没绑定任何 gid：返回空清单，不是异常。"""
+        result = aggregate_person_assets(self.database, [],
+                                         known_cameras=self.KNOWN_CAMERAS)
+        self.assertEqual(result["asset_count"], 0)
+        self.assertEqual(result["total_appearances"], 0)
+        self.assertEqual(result["global_ids"], [])
+
+    def test_shared_asset_across_identities_is_merged_not_duplicated(self):
+        """
+        两个身份都出现在同一路相机 → 结果里该相机只应有一行，
+        但片段数要累加。否则前端会看到同一路相机重复出现好几遍。
+        """
+        self._bind("P3", self.gid)
+        self._bind("P3", "person-c")
+        self.database.record_appearance(
+            "person-c", "rnd_08", 6000.0, [0, 0, 60, 120], 500,
+            video_frame=75, video_ts=3.0)
+
+        result = aggregate_person_assets(
+            self.database, self.database.gids_for_person("P3"),
+            known_cameras=self.KNOWN_CAMERAS)
+
+        rnd08_rows = [a for a in result["assets"] if a["camera_id"] == "rnd_08"]
+        self.assertEqual(len(rnd08_rows), 1, "同一资产必须合并成一行")
+        self.assertEqual(sorted(rnd08_rows[0]["global_ids"]),
+                         sorted(["person-c", self.gid]))
+        self.assertGreaterEqual(len(rnd08_rows[0]["segments"]), 1)
+
+    def test_merges_without_fake_loop(self):
+        """
+        合并**不得**在身份之间触发循环折叠。
+
+        两个身份都按 A,B,A,B… 走同一条拓扑（夹具本身就是交替模式）。
+        若先把两名下的行拼成一条长序列再折叠，周期检测会命中、把多段到访折成一段，
+        用户就会看到"这个人只走过一趟"。按身份分别聚合则各自折叠，合并后段数相加。
+        """
+        self._bind("P4", self.gid)
+        self._bind("P4", "person-d")
+        # person-d 走同样的交替模式（k 从 100 起，时间不与夹具重叠）
+        for k in range(25):
+            cam = "rnd_08" if k % 2 == 0 else "rnd_19"
+            asset_id = self.asset_rnd08 if k % 2 == 0 else self.asset_rnd19
+            self.database.record_appearance(
+                "person-d", cam, 20000.0 + k, [0, 0, 50, 100], 600 + k,
+                asset_id=asset_id, video_frame=k * 10, video_ts=k * 10 / 25.0)
+
+        result = aggregate_person_assets(
+            self.database, self.database.gids_for_person("P4"),
+            known_cameras=self.KNOWN_CAMERAS)
+
+        # 每个身份各自折叠成 1 段/相机，合并后每个相机应是 2 段（不是 1 段）
+        for camera in ("rnd_08", "rnd_19"):
+            entry = next(a for a in result["assets"] if a["camera_id"] == camera)
+            self.assertEqual(
+                len(entry["segments"]), 2,
+                f"{camera} 应保留两个身份各自的一段，被折成 1 段说明发生了假周期折叠")
+
+    def test_offline_camera_filtered_at_person_level(self):
+        """按档案检索同样要过滤已下线相机的孤儿轨迹。"""
+        self._bind("P5", self.gid)
+        result = aggregate_person_assets(
+            self.database, self.database.gids_for_person("P5"),
+            known_cameras=self.KNOWN_CAMERAS)
+        cameras = {a["camera_id"] for a in result["assets"]}
+        self.assertNotIn("rnd_03", cameras)
+        self.assertEqual(result["dropped_offline_rows"], 1)
+
+    def test_unknown_identity_in_list_is_ignored(self):
+        """列表里混入不存在的 gid 时照常返回其余结果，不整体失败。"""
+        self._bind("P6", self.gid)
+        result = aggregate_person_assets(
+            self.database, [*self.database.gids_for_person("P6"), "ghost-id"],
+            known_cameras=self.KNOWN_CAMERAS)
+        self.assertEqual(result["asset_count"], 2)
+
+
+class GidsForPersonTests(unittest.TestCase):
+    """db.gids_for_person：按档案取身份 ID 列表。"""
+
+    def test_returns_only_bound_identities(self):
+        with temporary_database("gids.db") as database:
+            for gid, pid in (("g1", "P1"), ("g2", "P1"), ("g3", "P2"), ("g4", None)):
+                database.save_identity(
+                    global_id=gid, feature_dim=4, feature_blob=b"\x00" * 16,
+                    feature_bank_count=0, feature_bank_blob=b"", total_appearances=0,
+                    last_camera="rnd_08", last_seen=1000.0, feature_space="test:4",
+                    first_seen=1000.0, person_id=pid,
+                )
+            self.assertEqual(sorted(database.gids_for_person("P1")), ["g1", "g2"])
+            self.assertEqual(database.gids_for_person("P2"), ["g3"])
+            self.assertEqual(database.gids_for_person("nobody"), [])
 
 
 class RankByFeatureTests(unittest.TestCase):

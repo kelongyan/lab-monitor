@@ -12,11 +12,11 @@
 <!-- 模块化样式表入口 -->
 <!-- 缓存说明：
      - main.css 上的 ?v= 作用于 main.css 自身。
-     - 11.5 起，main.css 内部的 @import 也带了 ?v=11.5（见 static/css/main.css），
+     - 11.5 起，main.css 内部的 @import 也带了 ?v=（当前 12.0）（见 static/css/main.css），
        这样 bump 顶层版本能带动子 CSS 一起被浏览器重抓。
      - app.js 的 import './modules/*.js' 仍不带版本号（避免 grid.js / stream_manager.js
        的模块级状态被分裂成两份实例），改 js/modules/*.js 后需硬刷新（Ctrl+F5）。 -->
-<link rel="stylesheet" href="/static/css/main.css?v=11.7">
+<link rel="stylesheet" href="/static/css/main.css?v=12.0">
 </head>
 <body>
 
@@ -66,7 +66,7 @@
         </div>
       </div>
 
-      <div class="stat-card" style="cursor: pointer;" id="card-stat-persons-btn" role="button" tabindex="0" aria-label="打开人员档案数据库">
+      <div class="stat-card" style="cursor: pointer;" id="card-stat-persons-btn" role="button" tabindex="0" aria-label="打开 ReID 匿名身份库">
         <div class="stat-icon-wrapper" style="background: rgba(124, 58, 237, 0.12); color: var(--purple); font-size: 12px; font-weight: 700;">人员</div>
         <div class="stat-info">
           <div class="stat-value" id="stat-ids" style="color: var(--purple);">0</div>
@@ -272,6 +272,59 @@
   </div>
 </div>
 
+<!-- ================================================================== -->
+<!-- 模态框 6：人员档案库 (Personnel Archive Modal)                      -->
+<!--                                                                    -->
+<!-- 工具条与两个面板都写在 HTML 里，不在 JS 中重建：每次搜索都重画工具条 -->
+<!-- 会让输入框丢焦点（中文输入法尤其明显）。JS 只替换 #personnel-grid   -->
+<!-- 与 #personnel-detail 的内容。                                       -->
+<!--                                                                    -->
+<!-- DOM 顺序即 ESC 层级（modals.js 取 .modal-overlay.active 的最后一个）：-->
+<!-- 放在 roi-modal 之后、focus-modal-overlay 之前，焦点浮层仍可盖住它。   -->
+<!-- ================================================================== -->
+<div class="modal-overlay" id="personnel-modal" role="dialog" aria-modal="true" aria-labelledby="modal-personnel-title" aria-hidden="true">
+  <div class="modal-container" tabindex="-1">
+    <div class="modal-header">
+      <div class="modal-title">
+        <span id="modal-personnel-title">人员档案数据库</span>
+      </div>
+      <div style="display: flex; align-items: center; gap: 8px;">
+        <button class="action-btn" id="personnel-create" style="font-size: 11px; padding: 4px 10px;">+ 新建档案</button>
+        <button class="modal-close-btn" data-close-modal="personnel-modal" aria-label="关闭人员档案">✕</button>
+      </div>
+    </div>
+    <div class="modal-body" id="modal-personnel-body">
+
+      <!-- 列表面板 -->
+      <div class="person-pane active" id="personnel-list-pane">
+        <div class="person-toolbar">
+          <input type="text" id="personnel-search-input" class="roi-input-field person-search-box"
+                 placeholder="搜索姓名 / 工号 / 部门…" autocomplete="off" aria-label="搜索人员档案">
+          <select id="personnel-dept-filter" class="roi-input-field" style="width: auto; font-size: 11px; padding: 5px 8px;"
+                  aria-label="按部门筛选">
+            <option value="">全部部门</option>
+          </select>
+          <div class="person-filter-group" id="personnel-source-filter" role="group" aria-label="按数据来源筛选">
+            <span>来源</span>
+            <button class="layout-mode-btn person-source-btn active" data-source="">全部</button>
+            <button class="layout-mode-btn person-source-btn" data-source="synthetic">模拟</button>
+            <button class="layout-mode-btn person-source-btn" data-source="real">真实</button>
+          </div>
+          <button class="action-btn person-source-btn" id="personnel-reload" title="重新读取档案列表">↻</button>
+        </div>
+
+        <div class="person-grid" id="personnel-grid"></div>
+
+        <div class="person-pager" id="personnel-pager"></div>
+      </div>
+
+      <!-- 详情面板（整体替换列表，避免弹窗里出现嵌套滚动） -->
+      <div class="person-pane" id="personnel-detail"></div>
+
+    </div>
+  </div>
+</div>
+
 <!-- 居中放大焦点浮层 (Focus Lightbox Modal) -->
 <div class="modal-overlay focus-modal-overlay" id="focus-modal-overlay" role="dialog" aria-modal="true" aria-labelledby="focus-modal-title" aria-hidden="true">
   <div class="modal-container focus-modal-container" tabindex="-1">
@@ -312,6 +365,6 @@
 </div>
 
 <!-- 模块化 JavaScript 入口 -->
-<script type="module" src="/static/js/app.js?v=11.7"></script>
+<script type="module" src="/static/js/app.js?v=12.1"></script>
 </body>
 </html>

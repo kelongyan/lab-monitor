@@ -314,3 +314,73 @@ html[data-theme="light"] .tech-cam-input {
   border-color: rgba(203, 213, 225, 0.8);
   color: #0284c7;
 }
+
+/* ------------------------------------------------------------------ */
+/* 人员档案库（批次五 P0-3）                                              */
+/* ------------------------------------------------------------------ */
+
+/* .layout-mode-btn 此前一直没有 light 覆盖：底色 rgba(15,23,42,.6) 是暗/navy，
+   在白底上是一块深色，而文字 var(--text-muted)=#475569 也是深色 → 几乎读不出。
+   网格模式切换按钮早就有这个问题，人员来源筛选复用了它，所以一起补上。 */
+html[data-theme="light"] .layout-mode-btn {
+  background: #f8fafc;
+  border-color: rgba(203, 213, 225, 0.8);
+  color: #475569;
+}
+
+html[data-theme="light"] .layout-mode-btn.active,
+html[data-theme="light"] .layout-mode-btn:hover {
+  background: rgba(2, 132, 199, 0.1);
+  color: #0284c7;
+}
+
+/* 身份行 / 相机行底色是写死的深板岩，light 下会变暗块 */
+html[data-theme="light"] .person-gid-row,
+html[data-theme="light"] .person-cam-row,
+html[data-theme="light"] .person-clip {
+  background: #f8fafc;
+  border-color: rgba(203, 213, 225, 0.8);
+}
+
+/* 播放器底衬保持深色：浅底会让 video 控件与画面边界糊在一起 */
+html[data-theme="light"] .person-player {
+  background: #0f172a;
+  border-color: rgba(203, 213, 225, 0.8);
+}
+
+html[data-theme="light"] .person-gid-row:hover,
+html[data-theme="light"] .person-gid-row:focus-visible {
+  background: rgba(2, 132, 199, 0.06);
+  border-color: rgba(2, 132, 199, 0.45);
+}
+
+/* 卡片在白底上需要一层极浅的填充才分得出发卡边界 */
+html[data-theme="light"] .person-card {
+  background: #ffffff;
+  border-color: rgba(203, 213, 225, 0.8);
+  box-shadow: 0 1px 3px rgba(15, 23, 42, 0.05);
+}
+
+html[data-theme="light"] .person-card:hover,
+html[data-theme="light"] .person-card:focus-visible {
+  background: #ffffff;
+  box-shadow: 0 4px 16px rgba(15, 23, 42, 0.08);
+}
+
+/* 「模拟」徽标：深色下是琥珀字+琥珀底，浅色下底色不变、描边需加深一档 */
+html[data-theme="light"] .person-badge.sim {
+  background: rgba(217, 119, 6, 0.12);
+  border-color: rgba(217, 119, 6, 0.45);
+  color: #b45309;
+}
+
+/* 姓氏降级块：蓝紫渐变在白底上偏淡，首字改深一点才立得住 */
+html[data-theme="light"] .person-avatar.fallback {
+  background: linear-gradient(160deg, rgba(2, 132, 199, 0.12), rgba(124, 58, 237, 0.1));
+  color: #075985;
+}
+
+html[data-theme="light"] .person-empty-sub code {
+  background: rgba(2, 132, 199, 0.07);
+  color: #075985;
+}

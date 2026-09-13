@@ -21,18 +21,41 @@ import time
 import csv
 import io
 import socket
+import re
 import urllib.parse
 import urllib.request
-from pathlib import Path
+from pathlib import Path, PurePosixPath
 
 import cv2
 from fastapi import FastAPI, WebSocket, WebSocketDisconnect, Query, Request
-from fastapi.responses import HTMLResponse, StreamingResponse, JSONResponse, Response
+from fastapi.responses import (HTMLResponse, StreamingResponse, JSONResponse,
+                               Response, FileResponse)
 from fastapi.staticfiles import StaticFiles
 from starlette.concurrency import run_in_threadpool
 import uvicorn
 
 logger = logging.getLogger("server")
+
+#: /media/{cam} 出片的读盘分片。256 KB 是折中：够大以摊薄每片的 Python 开销，
+#: 够小以保证 seek 后第一帧不用等整个文件读完。
+_MEDIA_CHUNK = 256 * 1024
+#: bytes=0- / bytes=100-200 / bytes=-500 三种合法形态
+_MEDIA_RANGE_RE = re.compile(r"bytes=(\d*)-(\d*)")
+#: 相机 ID 只允许字面量，杜绝它被当作路径片段（真正的文件路径只来自 video_assets）
+_MEDIA_PATH_SAFE = re.compile(r"^[A-Za-z0-9_.-]{1,64}$")
+_MEDIA_TYPES = {
+    ".mp4": "video/mp4",
+    ".m4v": "video/mp4",
+    ".webm": "video/webm",
+    ".mkv": "video/x-matroska",
+    ".avi": "video/x-msvideo",
+    ".mov": "video/quicktime",
+}
+#: rel_path 只允许落在这些素材目录里：原片目录 + 低清转码产物目录。
+#: 兜底不能只做"不逃出项目根"—— video_assets.rel_path 若被写脏成
+#: config/sources.json、outputs/ 下的任意项目文件，仅按项目根校验照样会
+#: 把它们当视频吐出去。回放素材只有这两个来源（sources.json / transcode_lowres.py）。
+_MEDIA_ALLOWED_DIRS = ("videos", "videos_low")
 
 app = FastAPI(title="超算中心监控预警系统")
 app.mount("/static", StaticFiles(directory=Path(__file__).parent / "static"), name="static")
@@ -40,6 +63,42 @@ app.mount("/static", StaticFiles(directory=Path(__file__).parent / "static"), na
 screenshots_dir = Path(__file__).parent / "outputs" / "screenshots"
 screenshots_dir.mkdir(parents=True, exist_ok=True)
 app.mount("/screenshots", StaticFiles(directory=screenshots_dir), name="screenshots")
+
+# 人员档案头像（/personnel-crops/<person_id>.jpg）
+# 与 /screenshots 同一手法：StaticFiles 走 GET，不占 /stream 的 5 路 MJPEG 预算。
+# 目录由 scripts/seed_personnel_mock.py 产出；这里先 mkdir，否则 StaticFiles
+# 在目录缺失时会在 mount 阶段抛错、整机起不来（与 /floorplan 的教训同源）。
+#
+# 可用 LAB_MONITOR_PERSONNEL_CROPS 覆盖：给临时/演示库 seed 时，头像应留在那个库
+# 旁边，而不是写进生产 outputs/ —— 否则演示数据会在生产目录里留下无人引用的孤儿图。
+PERSONNEL_CROPS_MOUNT = "/personnel-crops"
+_personnel_crops_env = os.getenv("LAB_MONITOR_PERSONNEL_CROPS", "").strip()
+_personnel_crops = (Path(_personnel_crops_env) if _personnel_crops_env
+                    else Path(__file__).parent / "outputs" / "personnel_crops")
+try:
+    _personnel_crops.mkdir(parents=True, exist_ok=True)
+    app.mount(PERSONNEL_CROPS_MOUNT,
+              StaticFiles(directory=_personnel_crops), name="personnel-crops")
+except Exception:
+    logger.warning("人员头像目录不可用: %s", _personnel_crops)
+
+
+def personnel_thumb_url(thumb_path: str | None) -> str | None:
+    """
+    personnel.thumb_path（磁盘路径）→ 可直接给 <img src> 的 URL。
+
+    存在的意义：URL 只有一个真源。此前前端自己拼 '/' + thumb_path，而库里存的是
+    下划线的 "personnel_crops/x.jpg"、mount 却是连字符的 /personnel-crops
+    → 每个头像 404、全部退化成首字块，且不报任何错。
+
+    只取文件名（头像目录是扁平的，文件按 person_id 命名），天然杜绝
+    "../../etc/passwd" 这类路径穿越拿到目录外的文件。
+    """
+    if not thumb_path:
+        return None
+    name = PurePosixPath(str(thumb_path).replace("\\", "/")).name
+    return f"{PERSONNEL_CROPS_MOUNT}/{name}" if name else None
+
 
 # 平面图底图（/floorplan/floorplan.jpg）
 # 底图是客户设施图纸渲染产物，与 docs/*.xlsx 同级敏感，已 gitignore——
@@ -320,6 +379,24 @@ def init_server(frame_hub, broadcaster, identity_store, calibrator=None, pipelin
         _configure_allowed_hosts(host, port)
 
 
+def _get_database():
+    """全服务统一的库访问入口：优先取运行时注入的实例。
+
+    main.py 只建一个 Database 并同时传给 IdentityStore 与 PersonnelGallery，
+    生产环境三种取法本就同源；但在临时库/演示库场景（测试、seed 出的 demo 库），
+    store 持有的是临时库，而 `from src.db import db` 永远是模块级全局 ——
+    各端点各取各的，同一个 asset_id 会被拿到两个不同的库里解释
+    （检索返回临时库的 asset_id，/media 去查生产库 → 404 甚至错文件）。
+    所以查库一律走这里：store → gallery → 全局单例，逐级兜底。
+    """
+    if _identity_store is not None and getattr(_identity_store, "database", None) is not None:
+        return _identity_store.database
+    if _personnel is not None and getattr(_personnel, "_database", None) is not None:
+        return _personnel._database
+    from src.db import db  # 惰性：模块级导入不连库（见 src/db.py 尾部说明）
+    return db
+
+
 
 # ------------------------------------------------------------------ #
 # 主页：监控大屏                                                         #
@@ -536,9 +613,8 @@ async def shutdown_service(request: Request):
 async def get_system_metrics():
     """方向四：工程可观测性与运维指标接口"""
     import os, sys
-    from src.db import db
 
-    db_stats = db.get_stats()
+    db_stats = _get_database().get_stats()
     cams = _frame_hub.get_status() if _frame_hub else []
 
     # 尝试获取 Python 进程内存
@@ -568,10 +644,10 @@ async def get_alert_history(
     global_id: str | None = None,
 ):
     """从 SQLite 唯一权威数据源分页查询历史告警。"""
-    from src.db import db
+    database = _get_database()
     try:
         total, alerts = await run_in_threadpool(
-            db.query_alert_page,
+            database.query_alert_page,
             limit,
             offset,
             camera_id,
@@ -594,7 +670,8 @@ async def get_alert_history(
 @app.get("/api/alerts/export")
 def export_alerts_csv():
     import time as pytime
-    from src.db import db
+
+    database = _get_database()
 
     # P1: CSV 字段公式注入防护 —— Excel 会把 =/@/+/- 开头的值当作公式执行
     def _safe_csv(v) -> str:
@@ -603,7 +680,7 @@ def export_alerts_csv():
             s = "'" + s   # 在 Excel 中强制视为文本
         return s
 
-    total, alerts = db.query_alert_page(limit=_ALERT_EXPORT_MAX_ROWS)
+    total, alerts = database.query_alert_page(limit=_ALERT_EXPORT_MAX_ROWS)
     truncated = total > len(alerts)
     output = io.StringIO(newline="")
     writer = csv.writer(output, lineterminator="\r\n")
@@ -652,7 +729,7 @@ async def get_assets():
     容器元数据不可信，这里的 duration_real 是 ffprobe 实解码得到的。
     low_value=1 的资产（内容过短，如 rnd_05）检索时应默认排除。
     """
-    from src.db import db as database
+    database = _get_database()
     assets = await run_in_threadpool(database.list_video_assets)
     return JSONResponse({
         "count": len(assets),
@@ -672,6 +749,131 @@ async def get_assets():
             for a in assets
         ],
     })
+
+
+@app.get("/media/{camera_id}")
+async def get_media(
+    camera_id: str,
+    request: Request,
+    asset_id: int | None = Query(default=None,
+                                 description="指定资产；缺省时优先低清转码产物"),
+    download: bool = Query(default=False, description="加 Content-Disposition: attachment"),
+):
+    """
+    回放素材出片（P1-1b），支持 HTTP Range 以便前端 <video> 拖动进度条。
+
+    三个设计点：
+
+    1. **路径只从库里取，绝不从 URL 拼。** `camera_id` 仅用于查表，真实文件是
+       `video_assets.rel_path`。若拿 URL 参数拼路径，`../` 就能读到项目外文件；
+       这里额外用 `resolve()` + `is_relative_to()` 兜两层底：不许逃出项目根，
+       且必须落在 `videos/` / `videos_low/` 两个素材目录内 —— 项目根内的其他
+       文件（config/、outputs/、docs/）即使 rel_path 被写脏也拿不到。
+
+    2. **默认给低清转码产物**（`videos_low/<cam>.mp4`，全量 29 MB vs 原片 983 MB）。
+       同一相机在库里有 2 行：原片（有 size_bytes）与低清（size_bytes 为 NULL，
+       因为转码是后续批量做的、没回填）。所以 Content-Length 必须走 stat(),
+       不能读 size_bytes —— 那里是 NULL 会导致长度算错、视频卡在第一帧。
+
+    3. **视频内时间轴以低清片为准。** 原片与低清片时长不同（实测 239.12 vs 239.64），
+       而 identity_appearances.video_ts 是按**低清片**标定的。前端拿
+       video_first_ts 来 seek 时，必须配低清片才准 —— 这也是默认值选它的原因。
+
+    这是普通文件响应，不占 /stream 的 5 路 MJPEG 预算（stream_manager.js 只管 /stream/）。
+    """
+    database = _get_database()
+
+    if not _MEDIA_PATH_SAFE.match(camera_id or ""):
+        return JSONResponse({"error": "非法相机 ID"}, status_code=400)
+
+    asset = None
+    if asset_id is not None:
+        asset = await run_in_threadpool(database.get_video_asset_by_id, asset_id)
+        if asset is None:
+            return JSONResponse({"error": "Asset not found"}, status_code=404)
+        # 允许用 asset_id 直接出片（前端检索结果里带的就是 asset_id），
+        # 但两个参数都给时必须自洽，否则就是调用方拿错了资产。
+        if asset.get("camera_id") != camera_id:
+            return JSONResponse(
+                {"error": f"asset {asset_id} 属于 {asset.get('camera_id')}，不是 {camera_id}"},
+                status_code=409)
+    else:
+        candidates = [a for a in await run_in_threadpool(database.list_video_assets)
+                      if a.get("camera_id") == camera_id]
+        if not candidates:
+            return JSONResponse({"error": "Camera not found"}, status_code=404)
+        # 低清优先：转码产物路径固定为 videos_low/<cam>.mp4，体积约 1/30，
+        # 且 identity_appearances.video_ts 就是按它标定的（见 docstring 第 3 点）。
+        candidates.sort(key=lambda a: str(a.get("rel_path") or "").startswith("videos_low/"),
+                        reverse=True)
+        asset = candidates[0]
+
+    rel = str(asset.get("rel_path") or "").replace("\\", "/")
+    media_root = Path(__file__).parent.resolve()
+    target = (media_root / rel).resolve()
+    # 两层兜底：库被写脏（rel_path 含 ../ 或绝对路径）时不许逃出项目根；
+    # 项目根之内也只开放两个素材目录，其余文件一律 404。
+    allowed_roots = [(media_root / d).resolve() for d in _MEDIA_ALLOWED_DIRS]
+    if (not any(target.is_relative_to(root) for root in allowed_roots)
+            or not target.is_file()):
+        logger.warning("媒体文件缺失、越界或不在素材目录内: asset=%s rel=%s",
+                       asset.get("asset_id"), rel)
+        return JSONResponse({"error": "媒体文件不存在"}, status_code=404)
+
+    size = target.stat().st_size          # 不能用 size_bytes：低清行为 NULL
+    media_type = _MEDIA_TYPES.get(target.suffix.lower(), "application/octet-stream")
+    headers = {"Accept-Ranges": "bytes", "Cache-Control": "private, max-age=3600"}
+    if download:
+        headers["Content-Disposition"] = f'attachment; filename="{target.name}"'
+
+    range_header = request.headers.get("range")
+    if not range_header:
+        return FileResponse(target, media_type=media_type, headers=headers)
+
+    parsed = _MEDIA_RANGE_RE.match(range_header.strip())
+    # 两种非法都要放行整片（RFC 7233：无法满足/无法解析时忽略 Range）：
+    #   - 格式不匹配（如 items=0-10）
+    #   - 两端都空（`bytes=-`）—— 正则的 \d* 会匹配它，但 int('') 会抛 ValueError，
+    #     曾经真的让一个畸形 Range 把 /media 打成 500。
+    if not parsed or (parsed.group(1) == "" and parsed.group(2) == ""):
+        # 按 RFC 7233 应整体忽略 Range 而不是回 416，
+        # 否则个别播放器发个奇怪的 Range 就再也放不出片。
+        return FileResponse(target, media_type=media_type, headers=headers)
+
+    raw_start, raw_end = parsed.group(1), parsed.group(2)
+    try:
+        if raw_start == "":
+            # bytes=-N：最后 N 字节
+            length = min(int(raw_end), size)
+            start = max(0, size - length)
+            end = size - 1
+        else:
+            start = int(raw_start)
+            end = min(int(raw_end), size - 1) if raw_end else size - 1
+    except ValueError:
+        # 兜底：任何解析不出来的 Range 都退回整片，不让它变成 500。
+        # 已经处理了 bytes=- 这种两端皆空的情形，这里防的是后续再冒出别的形态。
+        logger.debug("无法解析的 Range 头，按整片返回: %r", range_header)
+        return FileResponse(target, media_type=media_type, headers=headers)
+    if start >= size or start > end:
+        return Response(status_code=416,
+                        headers={**headers, "Content-Range": f"bytes */{size}"})
+
+    def _chunks():
+        remaining = end - start + 1
+        with target.open("rb") as handle:
+            handle.seek(start)
+            while remaining > 0:
+                chunk = handle.read(min(_MEDIA_CHUNK, remaining))
+                if not chunk:
+                    break
+                remaining -= len(chunk)
+                yield chunk
+
+    headers["Content-Range"] = f"bytes {start}-{end}/{size}"
+    headers["Content-Length"] = str(end - start + 1)
+    return StreamingResponse(_chunks(), status_code=206, media_type=media_type,
+                             headers=headers)
 
 
 @app.get("/api/identities")
@@ -700,9 +902,8 @@ async def get_identity_detail(
     raw_apps = list(rec.appearances)
     total_appearances = rec.total_appearances
     try:
-        from src.db import db
         db_total, persisted_apps = await run_in_threadpool(
-            db.query_identity_appearances,
+            _get_database().query_identity_appearances,
             global_id,
             limit,
             offset,
@@ -895,7 +1096,7 @@ async def get_identity_trajectory(
     单次最多返回 max_points 个路径点；原始点数超过 20000 时 truncated=True，
     前端应提示缩小时间窗（rnd_08 这类长期停留相机单个身份可达 11 万行）。
     """
-    from src.db import db  # 延迟导入：模块级会连生产库
+    database = _get_database()
 
     if start is not None and end is not None and start > end:
         return JSONResponse({"error": "start must not be greater than end"}, status_code=400)
@@ -904,7 +1105,7 @@ async def get_identity_trajectory(
 
     try:
         total, rows = await run_in_threadpool(
-            db.query_trajectory, global_id, start, end, camera, _APPROARANCE_QUERY_LIMIT
+            database.query_trajectory, global_id, start, end, camera, _APPROARANCE_QUERY_LIMIT
         )
     except Exception:
         logger.exception("查询轨迹失败: %s", global_id)
@@ -998,7 +1199,8 @@ def _known_camera_set() -> set[str]:
 
 @app.get("/api/search/person")
 async def search_person(
-    global_id: str = Query(..., description="要检索的身份 ID"),
+    global_id: str | None = Query(default=None, description="要检索的身份 ID"),
+    person_id: str | None = Query(default=None, description="要检索的实名档案 ID（合并名下全部身份）"),
     start: float | None = Query(default=None, description="起始 Unix 秒，缺省不限"),
     end: float | None = Query(default=None, description="结束 Unix 秒，缺省不限"),
     camera: str | None = Query(default=None, description="只看某一路相机"),
@@ -1009,6 +1211,11 @@ async def search_person(
 ):
     """人员视频检索（worklist 4.2）：某身份出现过的全部视频片段清单。
 
+    两个入口二选一：
+      - `global_id=` 单个匿名身份；
+      - `person_id=` 实名档案，合并**名下全部匿名身份**（一个人可能被拆成多个 gid，
+        只看其中一个会漏掉大半轨迹）。
+
     返回的每个 asset 都带 video_first_ts / video_last_ts（源视频内秒数），
     前端可直接用它定位回放；position_known=False 表示老数据缺视频内坐标，
     此时只能显示相机 + 墙钟时间。
@@ -1016,19 +1223,47 @@ async def search_person(
     loop.loop_factor 必须展示 —— 语料真实总时长只有 45 分钟却已累计 22 万条
     appearance，不标注倍数会得到"出现 3 万次"的度量假象。
     """
-    from src.search import aggregate_identity_assets
+    from src.search import aggregate_identity_assets, aggregate_person_assets
 
     if _identity_store is None:
         return JSONResponse({"error": "Identity store unavailable"}, status_code=503)
+    if bool(global_id) == bool(person_id):
+        return JSONResponse({"error": "global_id 与 person_id 必须二选一"},
+                            status_code=400)
+
+    # known_cameras 不在这一层算：_known_camera_set() 要 list_video_assets()（查库），
+    # 在协程里直接调用会把事件循环卡住。它必须留在 run_in_threadpool 的闭包内。
+    common = dict(start=start, end=end, camera=camera, split_gap_s=split_gap_s,
+                  collapse=collapse_loops)
+
+    if person_id:
+        if _personnel is None or _personnel.get(person_id) is None:
+            return JSONResponse({"error": "Person not found"}, status_code=404)
+        gids = await run_in_threadpool(_identity_store.database.gids_for_person, person_id)
+        # 名下无身份不是错误：档案可以刚建好还没绑定任何 gid（PATCH /bind 之前）。
+        # 返回空清单，前端好显示"该档案暂无轨迹"，而不是弹 404 让人以为坏了。
+        payload_extra = {"person_id": person_id,
+                         "person_name": (_personnel.get(person_id) or {}).get("name")}
+
+        def _run_person() -> dict:
+            return {**payload_extra, **aggregate_person_assets(
+                _identity_store.database, gids,
+                known_cameras=_known_camera_set() or None, **common)}
+
+        try:
+            payload = await run_in_threadpool(_run_person)
+        except Exception:
+            logger.exception("按档案检索失败: %s", person_id)
+            return JSONResponse({"error": "Search failed"}, status_code=500)
+        return JSONResponse(payload)
+
     if _identity_store.get(global_id) is None:
         return JSONResponse({"error": "Identity not found"}, status_code=404)
 
     def _run() -> dict:
         return aggregate_identity_assets(
-            _identity_store.database, global_id, start=start, end=end, camera=camera,
-            split_gap_s=split_gap_s, collapse=collapse_loops,
-            known_cameras=_known_camera_set() or None,
-        )
+            _identity_store.database, global_id,
+            known_cameras=_known_camera_set() or None, **common)
 
     try:
         payload = await run_in_threadpool(_run)
@@ -1113,12 +1348,61 @@ def _require_person(person_id: str) -> dict | None:
 
 
 @app.get("/api/personnel")
-async def list_personnel():
-    """人员档案列表（含名下身份数）。未注入底库时返回空列表。"""
+async def list_personnel(
+    q: str = Query(default="", max_length=64),
+    department: str = Query(default="", max_length=32),
+    source: str = Query(default="", max_length=16),
+    limit: int = Query(default=50, ge=1, le=200),
+    offset: int = Query(default=0, ge=0),
+):
+    """
+    人员档案列表（含名下身份数与活动量聚合）。未注入底库时返回空列表。
+
+    q 同时匹配姓名 / 工号 / 部门（三合一，省掉前端三个输入框）。
+    默认按最近出现排序 —— 档案页第一眼要找的是"刚进来那个人"，
+    而不是最早建档的那个人。
+
+    保留 count 字段：既有前端与测试都读它，语义改为"过滤后总人数"以支撑分页。
+    """
     if _personnel is None:
-        return JSONResponse({"personnel": [], "count": 0})
-    people = await run_in_threadpool(_personnel._database.list_personnel)
-    return JSONResponse({"personnel": people, "count": len(people)})
+        return JSONResponse({"personnel": [], "count": 0,
+                             "limit": limit, "offset": offset, "departments": []})
+    database = _personnel._database
+    try:
+        rows, total = await run_in_threadpool(
+            database.search_personnel, q or None, department or None,
+            source or None, limit, offset)
+    except Exception:
+        # search_personnel 故障时抛异常（不再吞成空结果）；这里转成显式 500，
+        # 让前端能区分"接口挂了"和"库里确实没人"。
+        logger.exception("人员档案检索失败")
+        return JSONResponse({"error": "人员档案检索失败"}, status_code=500)
+    # 头像 URL 由后端解析：库里存的是磁盘路径，前端不该知道 mount 叫什么
+    # （此前它自己拼 '/' + thumb_path，拼法与管理端不一致 → 头像全 404）。
+    for row in rows:
+        row["thumb_url"] = personnel_thumb_url(row.get("thumb_path"))
+    # 部门下拉的候选值走全量（不受 q 影响）：否则用户搜"张"之后
+    # 部门列表只剩有姓张的人的部门，筛选器会越用越窄。
+    people = await run_in_threadpool(database.list_personnel)
+    departments = sorted({p["department"] for p in people if p.get("department")})
+    return JSONResponse({"personnel": rows, "count": total,
+                         "limit": limit, "offset": offset,
+                         "departments": departments})
+
+
+@app.get("/api/personnel/{person_id}/activity")
+async def personnel_activity(person_id: str):
+    """某人的分相机活动量（详情页"出现过哪里"用）。"""
+    if _personnel is None or _personnel.get(person_id) is None:
+        return JSONResponse({"error": "Person not found"}, status_code=404)
+    try:
+        stats = await run_in_threadpool(
+            _personnel._database.person_activity_stats, person_id)
+    except Exception:
+        # 同 list_personnel：库故障返回 500，不伪装成"没有活动"
+        logger.exception("人员活动量统计失败: %s", person_id)
+        return JSONResponse({"error": "活动量统计失败"}, status_code=500)
+    return JSONResponse(stats)
 
 
 @app.post("/api/personnel")
@@ -1150,13 +1434,25 @@ async def create_personnel(request: Request):
 
 @app.get("/api/personnel/{person_id}")
 async def get_personnel(person_id: str):
-    person = _require_person(person_id)
-    if person is None:
+    """
+    档案详情。
+
+    必须读**数据库行**而不是 `_personnel.get()`：底库内存字典里带着
+    `features: [np.ndarray]`（personnel.py:57-73），直接 **person 展开进 JSONResponse
+    会在 json.dumps 处抛 TypeError → 500。此前没暴露纯粹因为 personnel 表一直是空的、
+    且没有"有注册照之后再查详情"的用例。
+    另外 source / thumb_path / created_at 这些字段只存在于库里，内存字典根本没有。
+    """
+    if _personnel is None or _personnel.get(person_id) is None:
+        return JSONResponse({"error": "Person not found"}, status_code=404)
+    row = await run_in_threadpool(_personnel._database.get_personnel, person_id)
+    if row is None:
         return JSONResponse({"error": "Person not found"}, status_code=404)
     photos = _personnel.photos_of(person_id)
     identities = (_identity_store.database.identities_for_person(person_id)
                   if _identity_store and _identity_store.database else [])
-    return JSONResponse({**person, "photo_count": photos,
+    return JSONResponse({**row, "photo_count": photos,
+                         "thumb_url": personnel_thumb_url(row.get("thumb_path")),
                          "identities": identities})
 
 
@@ -1293,11 +1589,6 @@ async def unbind_identity(global_id: str):
         return JSONResponse({"error": "Identity not found"}, status_code=404)
     _identity_store.unbind_person(global_id)
     return JSONResponse({"global_id": global_id, "person_id": None})
-
-
-@app.get("/api/personnel/{person_id}/identities")
-async def personnel_identities_get(person_id: str):
-    return await personnel_identities(person_id)
 
 
 @app.get("/api/stats")

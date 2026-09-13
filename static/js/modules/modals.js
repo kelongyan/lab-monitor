@@ -268,18 +268,25 @@ export async function showTrajectoryModal(global_id) {
         if (!name) { nameInput.placeholder = '请先输入姓名'; return; }
         bindBtn.disabled = true;
         try {
-          const res = await fetchJson('/api/identities/' + encodeURIComponent(global_id) + '/bind', {
-            method: 'POST',
-            headers: { 'Content-Type': 'application/json', 'X-Lab-Monitor-Request': '1' },
-            body: JSON.stringify({ name }),
-          });
-          const person = await res.json();
-          if (res.status === 200) {
+          const person = await fetchJson(
+            '/api/identities/' + encodeURIComponent(global_id) + '/bind',
+            {
+              method: 'POST',
+              headers: { 'Content-Type': 'application/json' },
+              body: JSON.stringify({ name }),
+            },
+          );
+          // fetchJson 已经解析过响应体，返回的就是普通对象。
+          // 之前这里写 `await res.json()` 必然抛 TypeError（对象没有 .json 方法），
+          // 于是 catch 分支把按钮改成"绑定失败"—— 而后端其实已经绑定成功。
+          // 判定条件同样不能看 HTTP 状态码：fetchJson 失败时是 throw，
+          // 能走到这里就一定成功，所以只校验返回体里的 person_id。
+          if (person?.person_id) {
             bindBtn.textContent = `已绑定: ${person.name} (${person.person_id})`;
             bindBtn.disabled = true;
             nameInput.disabled = true;
           } else {
-            bindBtn.textContent = person.error || '绑定失败';
+            bindBtn.textContent = person?.error || '绑定失败';
             bindBtn.disabled = false;
           }
         } catch (err) {

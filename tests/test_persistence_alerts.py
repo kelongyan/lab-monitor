@@ -127,12 +127,18 @@ class AlertPersistenceTests(unittest.TestCase):
             database.insert_alert(make_alert(
                 "csv-1", 1.0, global_id=dangerous, last_camera="cam,one"
             ))
-            original_db = db_module.db
+            # 哨兵代替直接读 db_module.db：惰性单例下那次读取本身就会
+            # 创建生产库实例，与"测试不碰生产库"的目标矛盾。
+            absent = object()
+            original_db = vars(db_module).get("db", absent)
             db_module.db = database
             try:
                 response = server.export_alerts_csv()
             finally:
-                db_module.db = original_db
+                if original_db is absent:
+                    vars(db_module).pop("db", None)  # 恢复惰性未创建状态
+                else:
+                    db_module.db = original_db
             text = response.body.decode("utf-8-sig")
             rows = list(csv.reader(io.StringIO(text)))
             self.assertEqual(len(rows), 2)
