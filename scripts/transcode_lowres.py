@@ -126,10 +126,26 @@ def main() -> int:
                         help="不转码，只为已存在的 videos_low/*.mp4 登记资产索引")
     parser.add_argument("--switch-sources", action="store_true",
                         help="全部转完后把 sources.json 指向 videos_low/（原文件另存 sources_high.json）")
+    parser.add_argument("--allow-lowres-source", action="store_true",
+                        help="允许在 sources.json 已指向 videos_low/ 时继续（默认拒绝，见下）")
     args = parser.parse_args()
 
     sources_path = ROOT / "config" / "sources.json"
     sources = json.loads(sources_path.read_text(encoding="utf-8"))
+
+    # 护栏：切过源之后 sources.json 指向 videos_low/，此时再跑本脚本会**拿低清片当输入、
+    # 原地覆盖同一批文件**（输入输出同路径），一次误操作就把语料毁了。
+    # 原片配置在 --switch-sources 时另存为 config/sources_high.json，从那里恢复即可。
+    already_low = [cam for cam, rel in sources.items() if str(rel).startswith("videos_low/")]
+    if already_low and not args.allow_lowres_source:
+        print(f"✗ sources.json 已指向 videos_low/（{len(already_low)}/{len(sources)} 路），"
+              "拒绝继续：")
+        print("  再跑一次会把 videos_low/*.mp4 当输入、原地覆盖同一批文件。")
+        print("  要重新转码请先恢复原片配置：")
+        print("      cp config/sources_high.json config/sources.json")
+        print("  确实要拿低清片当输入（例如重建索引）请显式加 --allow-lowres-source。")
+        return 2
+
     cameras = {k: v for k, v in sources.items() if not args.only or k in args.only}
     LOW_DIR.mkdir(exist_ok=True)
     database = Database(ROOT / "outputs" / "lab_monitor.db")
@@ -202,10 +218,22 @@ def main() -> int:
             backup.write_text(json.dumps(sources, ensure_ascii=False, indent=2),
                               encoding="utf-8")
             print(f"原配置已备份: {backup}")
-        switched = {cam: f"videos_low/{cam}.mp4" for cam in sources}
+        # 只切本地素材：RTSP 地址没法离线转码，按 cam 拼成 videos_low/<cam>.mp4
+        # 会把它悄悄换成一个不存在的本地文件
+        switched, skipped = {}, []
+        for cam, rel in sources.items():
+            if str(rel).startswith("videos_low/"):
+                switched[cam] = rel
+            elif str(rel).lower().startswith(("rtsp://", "rtmp://", "http://", "https://")):
+                switched[cam] = rel
+                skipped.append(cam)
+            else:
+                switched[cam] = f"videos_low/{cam}.mp4"
         sources_path.write_text(json.dumps(switched, ensure_ascii=False, indent=2),
                                 encoding="utf-8")
         print("sources.json 已切换到 videos_low/（重启服务生效）")
+        if skipped:
+            print(f"  注意：{len(skipped)} 路网络流未切换（保持原地址）：{', '.join(skipped)}")
     return 0
 
 

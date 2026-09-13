@@ -49,3 +49,7 @@ docs/*.xlsx
 # 客户平面图渲染底图：与 docs/*.xlsx 同级敏感（设施图纸，公开仓库不入库）
 assets/floorplan/
 videos_low/
+
+# 切源时的原片配置备份（scripts/transcode_lowres.py --switch-sources 生成）。
+# 派生产物：内容与未切源时的 config/sources.json 相同，需要时脚本会自己生成。
+config/sources_high.json
