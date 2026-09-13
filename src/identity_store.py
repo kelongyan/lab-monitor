@@ -7,6 +7,7 @@ import threading
 import uuid
 import time
 import logging
+import os
 from itertools import combinations
 
 import numpy as np
@@ -15,6 +16,8 @@ from dataclasses import dataclass, field
 
 from .reid import match_feature_detailed
 from .reid_config import REID_MATCH_THRESHOLD, REID_RATIO_TEST
+
+logger = logging.getLogger("identity_store")
 
 # 每个身份最多保留最近 N 条出现记录，防止长时间运行后内存耗尽
 _MAX_APPEARANCES = 200
@@ -26,6 +29,63 @@ _FEATURE_SCHEMA_VERSION = 1
 _FEATURE_FLUSH_EVERY_UPDATES = 50
 _FEATURE_FLUSH_INTERVAL_SECONDS = 30.0
 
+
+def _env_positive_int(name: str, default: int) -> int:
+    """读一个非负整数环境变量；非法值只打 warning 并回落默认（与 main.py:_env_positive 同口径）。"""
+    raw = os.getenv(name, "").strip()
+    if not raw:
+        return default
+    try:
+        value = int(raw)
+    except ValueError:
+        logger.warning("%s=%r 不是合法整数，改用默认值 %s", name, raw, default)
+        return default
+    if value < 0:
+        logger.warning("%s=%s 必须 >= 0，改用默认值 %s", name, value, default)
+        return default
+    return value
+
+
+# 主特征的聚合策略（2026-09-13 新增，worklist 1.5 ②）
+# ---------------------------------------------------------------------------
+# 改造前主特征是**质量加权的 EMA**：α = base_alpha + (1-base_alpha)·(1-q)，
+# 新观测的权重是 (1-α)。问题在于这个权重随质量**塌陷**：
+#
+#     q=1.00 → 权重 0.150（等效记忆 ~7 次观测）
+#     q=0.50 → 权重 0.075（~13 次）
+#     q=0.20 → 权重 0.030（~33 次）
+#     q=0.05 → 权重 0.008（~133 次）
+#     q→0    → 权重 →0（**完全不更新，主特征冻结**）
+#
+# 本语料实测 `avg_feature_quality` 只有 **0.12~0.28**（走廊素材里人是小目标，
+# 质量分 = min(1, bbox面积/128×256) × conf）→ 单次观测权重仅 3%~6%，
+# 主特征被最早的观测主导（实测 30 次观测后最初的仍占 25%~40% 权重）。
+# 机制上这会让"同一个人重新入镜时新鲜特征与陈旧主特征差到阈值之外"。
+#
+# 改为**有界窗口内质量加权平均**：窗口长度固定，主特征追踪最近 N 次观测，
+# 不会因为质量低而冻结；窗口内的质量加权保留了"少信模糊帧"的原意。
+# 注意与批次一的结论并不冲突：那次实测"窗口均值 vs EMA"在**降低跨身份塌缩**上
+# 没有差别（塌缩的真根因是公共分量，已用中心化修掉）——这里解决的是另一个问题
+# （陈旧主特征导致的重复注册），worklist 1.5 已注明两者是不同的问题。
+#
+# 0 = 质量加权 EMA（**保持为默认**，见下）；N>0 = 有界窗口内质量加权平均。
+#
+# ⚠️ 2026-09-13 对照实验：**没有测出收益，因此默认关闭。**
+#    同语料 / 同参数 / 各 300 秒 / 22 路（scripts/ab_feature_window.py），只改这个策略：
+#      · 空库起步：新建身份 13 (EMA) vs 14 (窗口)，近邻擦肩（≥0.5）4 vs 4
+#      · 从生产库（45 身份）起步：新增身份 1 vs 1，连"新建时最近邻相似度"都是 0.6655
+#        —— 两臂做了**同一个**注册决策
+#    但**不能因此说"陈旧不是原因"**：生产库里存在 **7 对特征字节完全相同**（余弦 1.0000）
+#    的身份 —— 那只能是"该人重新入镜时，旧身份当时存的特征还离得很远（<0.68）于是
+#    又注册了一个，之后旧特征随观测收敛过去"。这正是滞后机制留下的指纹。
+#    300 秒的臂复现不了它：那时候每路只处理约 500 帧、同一个人被观测的次数太少，
+#    收敛还没发生；空库臂里的新建又多是与谁都不同的新人（最近邻 0.24~0.47）。
+#    **要判定这个修复有没有用，需要每臂 ≥30 分钟的长窗口实验，或等跨相机标注集就位**
+#    （自动正样本全是同相机相邻帧，是目前最大的盲区）。
+#    本实现保留（tests/test_feature_aggregation.py 在独立进程里验证两种策略），
+#    缺证据时不要打开。
+FEATURE_WINDOW_SIZE: int = _env_positive_int("LAB_MONITOR_FEATURE_WINDOW", 0)
+
 # 特征塌缩护栏（2026-09-12 新增）：
 # 新身份与已有身份的相似度超过这个值时，几乎不可能是两个人 —— 说明特征空间已退化到
 # 无法区分个体。此时必须告警而不是静默新建身份，否则身份表会无声膨胀。
@@ -33,6 +93,11 @@ _FEATURE_FLUSH_INTERVAL_SECONDS = 30.0
 # 需要靠阈值标定解决，不能一概报警。
 _COLLAPSE_SIMILARITY_ALERT = 0.999
 _COLLAPSE_WARN_INTERVAL = 60.0   # 告警日志节流间隔（秒）
+
+# "擦肩"下限：新建身份时与已有身份最近相似度 ≥ 该值即计入 created_near_miss。
+# 取 0.5 是因为实测同人对的余弦下四分位在 0.5 以上（标定：同人对 p50 0.69~0.75），
+# 而 0.5 以下基本可以认为确实是另一个人。
+_NEAR_MISS_FLOOR = 0.5
 
 # 公共分量中心化（2026-09-12 新增，这是 ReID 识别失效的真正修复）
 # ---------------------------------------------------------------------------
@@ -53,7 +118,29 @@ _COLLAPSE_WARN_INTERVAL = 60.0   # 告警日志节流间隔（秒）
 # 不启用时行为与改造前完全一致，因此冷启动是安全的。
 _CENTER_MIN_FEATURES = 8
 _CENTER_MIN_NORM = 0.35
-logger = logging.getLogger("identity_store")
+
+
+def _aggregate_window_feature(window) -> np.ndarray | None:
+    """
+    窗口内**质量加权平均** + L2 归一化；窗口为空或全零返回 None（调用方保留旧主特征）。
+
+    为什么窗口内还要按质量加权：保留改造前"少信模糊帧"的原意。
+    但与 EMA 的关键区别是**权重只影响窗口内的相对比例**，不会让窗口长度随质量变化 ——
+    质量整体偏低时（本语料 q≈0.2）它退化为普通均值，主特征照样每帧都在更新。
+    """
+    if not window:
+        return None
+    features = np.stack([item[0] for item in window]).astype(np.float64)
+    weights = np.array([max(0.0, float(item[1])) for item in window], dtype=np.float64)
+    total = float(weights.sum())
+    if total <= 1e-12:
+        mean = features.mean(axis=0)
+    else:
+        mean = (features * weights[:, None]).sum(axis=0) / total
+    norm = float(np.linalg.norm(mean))
+    if norm <= 1e-8:
+        return None
+    return (mean / norm).astype(np.float32)
 
 
 class ReIDMetrics:
@@ -64,6 +151,11 @@ class ReIDMetrics:
         self.total_searches = 0
         self.successful_matches = 0
         self.ratio_blocked_count = 0
+        # 新建身份的"擦肩"计数：新建时与已有身份的最近相似度落在 [_NEAR_MISS_FLOOR, 阈值)
+        # 区间 —— 差一点就能认出来。身份表无声膨胀时，这个数字会先涨起来，
+        # 是"主特征陈旧 / 阈值偏紧 / 特征退化"的第一手信号（2026-09-13 新增）。
+        self.created_near_miss = 0
+        self.created_best_sims: deque = deque(maxlen=max_history)
         self.sim_history = deque(maxlen=max_history)
         self.margin_history = deque(maxlen=max_history)
         self.latency_history = deque(maxlen=max_history)
@@ -93,6 +185,13 @@ class ReIDMetrics:
             if latency_ms > 0:
                 self.latency_history.append(latency_ms)
 
+    def record_created(self, best_sim: float) -> None:
+        """记录一次"新建身份"以及当时的最近邻相似度（见 created_near_miss 的说明）。"""
+        with self._lock:
+            self.created_best_sims.append(float(best_sim))
+            if best_sim >= _NEAR_MISS_FLOOR:
+                self.created_near_miss += 1
+
     def record_quality(self, quality: float) -> None:
         with self._lock:
             self.quality_history.append(quality)
@@ -104,6 +203,7 @@ class ReIDMetrics:
             avg_latency = round(float(np.mean(self.latency_history)), 2) if self.latency_history else 0.0
             avg_quality = round(float(np.mean(self.quality_history)), 4) if self.quality_history else 0.0
             match_rate = round(self.successful_matches / max(1, self.total_searches), 4)
+            created_sims = list(self.created_best_sims)
             return {
                 "gallery_size": gallery_size,
                 "total_searches": self.total_searches,
@@ -114,6 +214,12 @@ class ReIDMetrics:
                 "avg_ratio_margin": avg_margin,
                 "avg_latency_ms": avg_latency,
                 "avg_feature_quality": avg_quality,
+                # 新建身份的可观测性（2026-09-13 新增）：身份表在膨胀时，
+                # created_near_miss 会先涨 —— 它数的是"差一点就能认出来，却还是新建了"。
+                "created_near_miss": self.created_near_miss,
+                "avg_created_best_similarity": (
+                    round(float(np.mean(created_sims)), 4) if created_sims else 0.0
+                ),
             }
 
 
@@ -126,6 +232,9 @@ class PersonRecord:
     total_appearances: int = 0
     last_camera: str = ""
     last_seen: float = 0.0
+    # 主特征的聚合窗口：(特征, 质量) 的有界队列，见 FEATURE_WINDOW_SIZE 的说明。
+    # 不落库 —— 重启后只用恢复出来的主特征做一次"种子观测"（它本身就是窗口均值）。
+    feature_window: deque = field(default_factory=deque)
     # 实名绑定（worklist 3.2，能力一）：global_id 是随机编号，"具体是谁"靠这两列。
     # person_id 指向 personnel 表；name_confidence 是绑定时（或底库自动命名时）的相似度。
     person_id: str | None = None
@@ -255,6 +364,10 @@ class IdentityStore:
                     total_appearances=int(item["total_appearances"]),
                     last_camera=item["last_camera"],
                     last_seen=float(item["last_seen"]),
+                    # 窗口不落库：用恢复出来的主特征做一次"种子观测"——
+                    # 它本身就是上次落盘时的窗口均值，是个忠实的起点。
+                    feature_window=deque([(feature.copy(), 1.0)],
+                                         maxlen=max(1, FEATURE_WINDOW_SIZE)),
                     person_id=item.get("person_id"),
                     name_confidence=(
                         float(item["name_confidence"])
@@ -293,6 +406,10 @@ class IdentityStore:
             total_appearances=rec.total_appearances,
             last_camera=rec.last_camera,
             last_seen=rec.last_seen,
+            feature_window=deque(
+                ((feature.copy(), quality) for feature, quality in rec.feature_window),
+                maxlen=rec.feature_window.maxlen,
+            ),
             person_id=rec.person_id,
             name_confidence=rec.name_confidence,
         )
@@ -668,6 +785,9 @@ class IdentityStore:
                 feature=feat_copy,
                 feature_bank=[feat_copy.copy()],
                 appearances=deque(maxlen=_MAX_APPEARANCES),
+                # 主特征窗口的第 1 次观测（见 FEATURE_WINDOW_SIZE 的说明）
+                feature_window=deque([(feat_copy.copy(), 1.0)],
+                                     maxlen=max(1, FEATURE_WINDOW_SIZE)),
             )
             self._records[gid] = rec
             self._feature_flush_state[gid] = [0, time.time()]
@@ -696,6 +816,7 @@ class IdentityStore:
         with self._lock:
             if self._feature_dim is not None and feat_copy.size != self._feature_dim:
                 return IdentityResolution(global_id=None, status="invalid")
+            detail = None
             if self._records:
                 # gallery 与 query 必须用**同一个**中心向量处理，否则两者不在同一
                 # 坐标系，相似度没有意义 —— MatchContext 把两者原子打包。
@@ -760,15 +881,28 @@ class IdentityStore:
                 feature=feat_copy,
                 feature_bank=[feat_copy.copy()],
                 appearances=deque(maxlen=_MAX_APPEARANCES),
+                # 主特征窗口的第 1 次观测（见 FEATURE_WINDOW_SIZE 的说明）
+                feature_window=deque([(feat_copy.copy(), 1.0)],
+                                     maxlen=max(1, FEATURE_WINDOW_SIZE)),
             )
             self._records[gid] = rec
             self._feature_dim = int(feat_copy.size)
             self._feature_flush_state[gid] = [0, time.time()]
             self._invalidate_center_locked()
+            # 新建时的最近邻相似度必须回传：否则"为什么又建了一个身份"完全不可观测
+            # （2026-09-13 新增 —— 身份膨账排查时最需要的正是这个数）
+            created_best = float(detail.best_sim) if detail is not None else 0.0
+            created_second = float(detail.second_sim) if detail is not None else 0.0
+            self.metrics.record_created(created_best)
             payload = self._persist_payload(rec)
         self._write_identity_row(payload)
         self._delete_persisted(evicted)
-        return IdentityResolution(global_id=gid, status="created")
+        return IdentityResolution(
+            global_id=gid,
+            status="created",
+            best_similarity=created_best,
+            second_similarity=created_second,
+        )
 
     def update_appearance(
         self,
@@ -799,12 +933,24 @@ class IdentityStore:
             rec = self._records.get(global_id)
             if rec is None:
                 return
-            
+
             # 1. 更新主平均特征
-            rec.feature = alpha * rec.feature + (1 - alpha) * feat_copy
-            norm = np.linalg.norm(rec.feature)
-            if norm > 1e-8:
-                rec.feature /= norm
+            #    默认走**有界窗口内质量加权平均**（见 FEATURE_WINDOW_SIZE 的说明）：
+            #    质量加权 EMA 在本语料（q≈0.12~0.28）下单次观测权重只有 3%~6%，
+            #    主特征等于冻结在最早几帧，正是重复注册的根因。
+            #    FEATURE_WINDOW_SIZE=0 时回退改造前的 EMA，供对照实验使用。
+            if FEATURE_WINDOW_SIZE > 0:
+                rec.feature_window.append((feat_copy, quality))
+                while len(rec.feature_window) > FEATURE_WINDOW_SIZE:
+                    rec.feature_window.popleft()
+                aggregated = _aggregate_window_feature(rec.feature_window)
+                if aggregated is not None:
+                    rec.feature = aggregated
+            else:
+                rec.feature = alpha * rec.feature + (1 - alpha) * feat_copy
+                norm = np.linalg.norm(rec.feature)
+                if norm > 1e-8:
+                    rec.feature /= norm
 
             # 2. 动态维护多姿态特征库 (Bank)
             if quality > 0.6:

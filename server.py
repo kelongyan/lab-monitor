@@ -163,6 +163,9 @@ _EMPTY_REID_METRICS: dict = {
     "avg_ratio_margin": 0.0,
     "avg_latency_ms": 0.0,
     "avg_feature_quality": 0.0,
+    # 新建身份的可观测性（2026-09-13 新增，见 identity_store.ReIDMetrics.created_near_miss）
+    "created_near_miss": 0,
+    "avg_created_best_similarity": 0.0,
     "collapse_warnings": 0,
     "center_enabled": False,
     "center_norm": 0.0,

@@ -166,9 +166,18 @@ class GalleryDedupTests(unittest.TestCase):
 
 
 class FeatureBankRescueTests(unittest.TestCase):
-    """3. feature_bank（原始特征）必须能救回主特征（EMA 后）匹配不到的查询。"""
+    """3. feature_bank（原始特征）必须能救回主特征匹配不到的查询。"""
 
     def test_bank_row_matches_when_main_feature_has_drifted(self):
+        """
+        场景：查询命中的是**较早入库的某个姿态**，而主特征（最近观测的均值）已经离它很远。
+
+        2026-09-13 调整：原用例只推 1 次正交观测，靠"EMA 只让主特征移动 15%"来制造
+        "主特征匹配不上"。主特征改成**有界窗口均值**（见 FEATURE_WINDOW_SIZE）后，
+        1 次观测在窗口里占 50%，那个前提不再成立 —— 于是改为多推几次，让窗口均值
+        真正离开 raw，前提才重新成立。这正是 feature_bank 存在的意义：
+        主特征记"最近长什么样"，bank 记"曾经长什么样"，检索要走后者。
+        """
         main = unit(1, 0, 0, 0)
         raw = unit(0, 1, 0, 0)
         with temporary_store() as store:
@@ -181,16 +190,23 @@ class FeatureBankRescueTests(unittest.TestCase):
                 len(record.feature_bank), 2,
                 "差异明显的原始特征应进入 feature_bank",
             )
+
+            # 之后这个人一直以另一个姿态出现 → 窗口均值离开 raw
+            for _ in range(8):
+                store.update_appearance(gid, "cam_a", unit(0, 0, 1, 0), [0, 0, 10, 20],
+                                        quality_score=1.0)
+
+            record = store.get(gid)
             main_sim = float(record.feature @ raw)
             self.assertLess(
                 main_sim, REID_MATCH_THRESHOLD,
-                "本用例前提：主特征（EMA 后）已漂移，与查询不相似",
+                "本用例前提：主特征记录的是最近观测，与这次查询不相似",
             )
 
             plain = match_feature_detailed(raw, store.get_gallery())
             self.assertIsNone(
                 plain.matched_id,
-                "只用主特征时应当匹配失败 —— 这正是塌缩后的典型症状",
+                "只用主特征时应当匹配失败 —— 主特征记的是最近外观",
             )
 
             rescued = match_feature_detailed(raw, store.get_match_gallery())
