@@ -1,8 +1,9 @@
 /**
- * 人员档案库前端测试（static/js/modules/personnel.js，批次五 P0-3）
+ * 人员档案库前端测试（static/js/modules/personnel.js + modals.js 身份档案弹窗）
  *
  * 纯 Node 环境跑：最小 DOM 桩件驱动真模块，断言
- * 「列表渲染、SIM 徽标只给 synthetic、头像 URL、分页、检索、详情、删除两步确认」。
+ * 「列表渲染、SIM 徽标只给 synthetic、头像 URL、分页、检索、详情、删除两步确认、
+ *   注册照 multipart 上传、以图搜人 Top-K 渲染」。
  *
  * 重点防的是两个"静默失败"：
  *   1. 头像 URL 自己拼 → 与实际 mount 拼法不符 → 全部 404 且无声降级成首字块
@@ -57,9 +58,11 @@ class FakeEl {
     // <select> 必须有 options：syncControls 会 Array.from(select.options)，
     // 缺了会抛 "undefined is not iterable" 并被 catch 成"加载失败"（桩件坑）
     this.options = [];
-    this._cards = [];
-    this._sourceBtns = [];
-  }
+  this._cards = [];
+  this._sourceBtns = [];
+  this.files = [];          // <input type=file>：上传用例靠它喂"已选文件"
+  this._readyState = 0;
+}
   get innerHTML() { return this._innerHTML; }
   set innerHTML(v) {
     this._innerHTML = String(v);
@@ -79,7 +82,8 @@ class FakeEl {
       });
     }
     if (this.id === 'personnel-detail') {
-      ['personnel-detail-back', 'personnel-detail-delete'].forEach(k => {
+      ['personnel-detail-back', 'personnel-detail-delete',
+       'personnel-photo-upload', 'personnel-photo-input'].forEach(k => {
         const t = els.get(k); if (t) t.handlers = {};
       });
     }
@@ -94,6 +98,7 @@ class FakeEl {
   replaceWith() {}
   remove() { this.isConnected = false; }
   focus() {}
+  click() {}               // file input 的程序化打开；桩件里是 no-op
   closest(sel) {
     // 只支持 [data-*] 这一种：来源筛选靠 event.target.closest('[data-source]')
     const m = /^\[data-([a-z-]+)\]$/.exec(sel);
@@ -149,7 +154,15 @@ const STATIC_IDS = ['personnel-modal', 'personnel-grid', 'personnel-pager',
   'personnel-detail-back', 'personnel-detail-delete', 'personnel-prev', 'personnel-next',
   // P1-1 片段播放器（player / video / label / close 都由 clipsSection 渲染）
   'personnel-player', 'personnel-video', 'personnel-player-label',
-  'personnel-player-close'];
+  'personnel-player-close',
+  // 注册照上传入口（personDetailHtml 渲染的按钮 + 隐藏 file input）
+  'personnel-photo-upload', 'personnel-photo-input',
+  // ReID 身份档案弹窗（modals.js openIdentitySearchModal 渲染）。
+  // trajectory-modal 必须存在：openModal 靠它把 classList 置为 active，
+  // beginModalRequest 的 isCurrent() 再依赖 active 判定 —— 缺了它
+  // openIdentitySearchModal 会在 fetch 后静默 return，body 永远不渲染。
+  'modal-traj-title', 'modal-traj-body', 'trajectory-modal',
+  'btn-by-image-search', 'by-image-input', 'by-image-result'];
 
 const TAG_BY_ID = {
   'personnel-search-input': 'input',
@@ -646,6 +659,119 @@ await check('列表数据里的 HTML 被转义（防 XSS）', async () => {
   assert.ok(!html.includes('<img src=x onerror'), '姓名未转义 → XSS');
   assert.ok(!html.includes('<script>'), '部门未转义 → XSS');
   assert.ok(html.includes('&lt;img'), '应输出转义后的实体');
+});
+
+// --------------------------------------------------------------------------- //
+// 注册照上传 + 以图搜人（批次六 P1 交互入口）                                    //
+// --------------------------------------------------------------------------- //
+
+const modals = await import('../static/js/modules/modals.js');
+
+await check('详情提供上传注册照入口，选文件后 POST multipart 且带守卫头', async () => {
+  await openDetailWithClips({ assets: [] });
+  const input = els.get('personnel-photo-input');
+  assert.ok(els.get('personnel-photo-upload'), '详情缺上传按钮');
+  input.files = [new File([new Uint8Array(8)], 'zhangwei.jpg', { type: 'image/jpeg' })];
+  REQUESTS.length = 0;
+  input.dispatch('change');
+  await tick(40);
+  const req = REQUESTS.find(r => r.url.includes('/photos'));
+  assert.ok(req, `未发出注册照上传请求: ${JSON.stringify(REQUESTS.map(r => r.url))}`);
+  assert.equal(req.options.method, 'POST');
+  assert.ok(req.options.body instanceof FormData, '注册照必须走 multipart');
+  assert.ok(req.options.body.has('image'), '缺 image 字段');
+  assert.equal(req.options.headers['X-Lab-Monitor-Request'], '1', '写请求必须带守卫头');
+});
+
+await check('注册照上传失败：按钮恢复可用、选择框清空以便重试', async () => {
+  await openDetailWithClips({ assets: [] });
+  const input = els.get('personnel-photo-input');
+  const btn = els.get('personnel-photo-upload');
+  // 桩件的 innerHTML 不反映到 textContent，先按真浏览器的渲染结果初始化
+  btn.textContent = '＋ 上传注册照';
+  input.files = [new File([new Uint8Array(8)], 'nobody.jpg', { type: 'image/jpeg' })];
+  failNext = { error: '图中未检测到人员' };
+  try {
+    input.dispatch('change');
+    await tick(40);
+    assert.equal(btn.disabled, false, '失败后按钮必须恢复可用');
+    assert.ok((btn.textContent || '').includes('上传注册照'), `按钮未恢复文案: ${btn.textContent}`);
+    assert.equal(input.value, '', '选择框应被清空以便重试');
+  } finally {
+    failNext = null;   // 断言失败也不能把 500 泄漏给后续用例
+  }
+});
+
+await check('以图搜人：入口常驻、multipart 上传、Top-K 渲染分数与命中态', async () => {
+  // 空库也要有入口：身份网格为空时入口消失，用户会以为功能下线了
+  scenario = () => ({ ids: [] });
+  await modals.openIdentitySearchModal();
+  await tick(20);
+  let body = els.get('modal-traj-body');
+  assert.ok(body.innerHTML.includes('btn-by-image-search'), '空库时以图搜人入口必须还在');
+
+  // 第二次打开会重复 bindByImageSearch：先清掉桩件元素上的旧监听，
+  // 否则 change 会触发两次、请求翻倍
+  ['btn-by-image-search', 'by-image-input', 'by-image-result'].forEach(k => {
+    const t = els.get(k); if (t) t.handlers = {};
+  });
+  scenario = (url) => {
+    if (url.includes('/api/search/by-image')) {
+      return { person_count: 1, galleries_compared: 6, threshold: 0.68,
+               matches: [
+                 { global_id: 'a1b2c3d4', score: 0.812, matched: true,
+                   name: '张伟', asset_count: 3 },
+                 { global_id: 'e5f6a7b8', score: 0.42, matched: false }] };
+    }
+    return { ids: ['a1b2c3d4', 'e5f6a7b8'] };
+  };
+  await modals.openIdentitySearchModal();
+  await tick(20);
+  body = els.get('modal-traj-body');
+  assert.ok(body.innerHTML.includes('a1b2c3d4'), '身份网格应渲染');
+
+  const input = els.get('by-image-input');
+  input.files = [new File([new Uint8Array(8)], 'suspect.jpg', { type: 'image/jpeg' })];
+  REQUESTS.length = 0;
+  input.dispatch('change');
+  await tick(30);
+  const req = REQUESTS.find(r => r.url.includes('/api/search/by-image'));
+  assert.ok(req, '未发出以图搜人请求');
+  assert.equal(req.options.method, 'POST');
+  assert.ok(req.options.body instanceof FormData && req.options.body.has('image'),
+    '必须 multipart 携带 image');
+  assert.equal(req.options.headers['X-Lab-Monitor-Request'], '1', '写请求必须带守卫头');
+  const box = els.get('by-image-result').innerHTML;
+  assert.ok(box.includes('Top1'), '缺 Top1 排名');
+  assert.ok(box.includes('81.2%'), `相似度未按百分比显示: ${box.slice(0, 200)}`);
+  assert.ok(box.includes('命中') && box.includes('未达阈值'),
+    '命中/未达阈值两种状态都要展示');
+  assert.ok(box.includes('张伟'), '底库命中的姓名应显示');
+  assert.ok(box.includes('a1b2c3d4') && box.includes('e5f6a7b8'),
+    'matched=false 的候选也要展示（离线检索不是二值判定）');
+});
+
+await check('以图搜人失败：422 后端人话透传到界面', async () => {
+  failNext = null;
+  // 先清掉上一用例绑定的监听再打开弹窗：重复绑定的第二个 handler 会在
+  // failNext 被消耗后也发一次请求，用成功结果覆盖掉失败提示
+  ['btn-by-image-search', 'by-image-input', 'by-image-result'].forEach(k => {
+    const t = els.get(k); if (t) t.handlers = {};
+  });
+  scenario = () => ({ ids: ['a1b2c3d4'] });
+  await modals.openIdentitySearchModal();
+  await tick(20);
+  const input = els.get('by-image-input');
+  input.files = [new File([new Uint8Array(8)], 'empty.jpg', { type: 'image/jpeg' })];
+  failNext = { error: '图中未检测到人员' };
+  try {
+    input.dispatch('change');
+    await tick(30);
+    assert.ok(els.get('by-image-result').innerHTML.includes('图中未检测到人员'),
+      `应透传后端错误: ${els.get('by-image-result').innerHTML.slice(0, 200)}`);
+  } finally {
+    failNext = null;
+  }
 });
 
 console.log('');

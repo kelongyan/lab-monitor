@@ -31,7 +31,7 @@ Compact guidance for OpenCode sessions. Full detail lives in `CLAUDE.md` — rea
 
 ## Frontend
 
-- Native ES modules, no build step. After editing any `static/css/*.css` or `static/js/**`, **bump `?v=` in `static/index.html`** (currently CSS `?v=12.0`, `app.js?v=12.1`; `main.css` 的 `@import` 子路径也带 `?v=12.0`，bump 时要一起改). `app.js` 里的 `import './modules/*.js'` 不带版本号 — hard refresh (`Ctrl+F5`) to see changes.
+- Native ES modules, no build step. After editing any `static/css/*.css` or `static/js/**`, **bump `?v=` in `static/index.html`** (currently CSS `?v=12.0`, `app.js?v=12.2`; `main.css` 的 `@import` 子路径也带 `?v=12.0`，bump 时要一起改). `app.js` 里的 `import './modules/*.js'` 不带版本号 — hard refresh (`Ctrl+F5`) to see changes.
 - `static/js/modules/stream_manager.js` caps concurrent MJPEG to ~4 and uses IntersectionObserver; respect `resetStreamRegistry()`/`registerStreamImage()` timing or streams leak / never open.
 
 ## Other

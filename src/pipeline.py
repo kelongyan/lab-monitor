@@ -17,6 +17,7 @@ from .tracker import PersonTracker
 from .reid import ReIDExtractor
 from .reid_validator import ReIDValidator
 from .identity_store import IdentityStore
+from .label_render import LabelRenderer
 from .topology import CameraTopology
 from .alerter import AlertManager
 from .frame_hub import FrameHub
@@ -142,6 +143,10 @@ class CameraPipeline(threading.Thread):
             # （可用 LAB_MONITOR_REID_THRESHOLD / _RATIO 覆盖），保证只有一处真相。
             # 历史上这里与另外 5 处各自硬编码 0.75，导致"调阈值"在工程上不可执行。
         )
+        # 人员标签渲染（批次五遗留断点的修复）：实名是中文，cv2 的 Hershey
+        # 字体画不出 CJK 字形（显示成 ?????）。每路一个实例，缓存互不共享、
+        # 无锁竞争；ASCII 标签在 renderer 内部走 cv2 快路径，零额外开销。
+        self._label_renderer = LabelRenderer()
 
         self._reconnect_count = 0
         self._rois = self._load_rois()
@@ -675,7 +680,9 @@ class CameraPipeline(threading.Thread):
             if is_intrusion:
                 color = (0, 0, 239)        # BGR 亮红
                 text_color = (255, 255, 255)
-                label_text = f"🚨 INTRUSION ID: {gid or f'Trk_{tid}'}"
+                # 画面标签保持 ASCII：cv2 路径与部分中文字体都没有 🚨 字形，
+                # emoji 在视频帧上只会渲染成豆腐块（HTML 弹窗里用没问题）
+                label_text = f"!! INTRUSION ID: {gid or f'Trk_{tid}'}"
             elif gid:
                 color = (248, 189, 56)     # BGR 天蓝/金色
                 text_color = (255, 255, 255)
@@ -687,23 +694,15 @@ class CameraPipeline(threading.Thread):
                 color = (129, 185, 16)     # BGR 翡翠绿
                 text_color = (255, 255, 255)
                 buf_len = self._validator.buffer_len(tid)
-                label_text = f"Trk: #{tid} [{buf_len}/3]"
+                # 上限必须是 buffer_size（8），写死 3 会与实际确认条件矛盾
+                label_text = f"Trk: #{tid} [{buf_len}/{self._validator.buffer_size}]"
 
             cv2.rectangle(frame, (x1, y1), (x2, y2), color, 3 if is_intrusion else 2)
 
-            # 超清晰高对比度大字号 ID 标签绘制（黑底 + 亮色描边）
-            font_scale = 0.6
-            font_thick = 2
-            (tw, th), _ = cv2.getTextSize(label_text, cv2.FONT_HERSHEY_SIMPLEX, font_scale, font_thick)
-            text_y = max(th + 10, y1)
-
-            # 1. 绘制带有高亮边框的纯黑底框矩形
-            cv2.rectangle(frame, (x1 - 1, text_y - th - 8), (x1 + tw + 12, text_y + 6), (0, 0, 0), -1)
-            cv2.rectangle(frame, (x1 - 1, text_y - th - 8), (x1 + tw + 12, text_y + 6), color, 1)
-
-            # 2. 绘制黑色外加粗描边 + 内部纯白/彩色高清文字
-            cv2.putText(frame, label_text, (x1 + 5, text_y - 1), cv2.FONT_HERSHEY_SIMPLEX, font_scale, (0, 0, 0), font_thick + 2, cv2.LINE_AA)
-            cv2.putText(frame, label_text, (x1 + 5, text_y - 1), cv2.FONT_HERSHEY_SIMPLEX, font_scale, text_color, font_thick, cv2.LINE_AA)
+            # 标签绘制（批次五遗留断点的修复）：实名是中文，Hershey 画不出
+            # CJK 字形。renderer 内部按文本缓存 PIL 位图 —— 命中缓存时每帧
+            # 只剩一次区块拷贝；纯 ASCII 标签走 cv2 快路径，零额外开销。
+            self._label_renderer.draw(frame, label_text, x1, y1, color, text_color)
 
         # 宽限期内的 track_id 仍算「在场」，否则它下一帧就从 _prev_track_ids 里消失，
         # 缺席计数再也累加不到阈值 —— 宽限期会静默失效，离场事件永远不触发。

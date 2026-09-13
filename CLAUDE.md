@@ -140,6 +140,7 @@ main.py (主线程)
 | `AlertBroadcaster` | `src/alerter.py` | WebSocket 告警推送 | 线程安全（asyncio.Queue / sync queue） |
 | `TransitCalibrator` | `src/calibrator.py` | 相机间穿越时延统计 | 内置锁保护 |
 | `Database` | `src/db.py` | SQLite 数据库持久化（`outputs/lab_monitor.db`，见 `src/db.py:17`） | 单例模式与独立连接 |
+| `LabelRenderer` | `src/label_render.py` | 画面人员标签（支持中文实名：PIL 位图按文本缓存，ASCII 走 cv2 快路径，无字体优雅回退） | 每路 pipeline 独立实例，无共享 |
 | `Floorplan` | `src/floorplan.py` | 平面图点位映射（`config/camera_map.json`） | `RLock` 保护，按 mtime 热重载 |
 
 ### ReID 身份识别流程

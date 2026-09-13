@@ -295,6 +295,10 @@ function personDetailHtml(person, activity, search) {
           ${person.note ? `<div class="person-dept">${escapeHtml(person.note)}</div>` : ''}
         </div>
       </div>
+      <button class="action-btn" id="personnel-photo-upload"
+              title="上传一张清晰单人照：后端检测人体框 → 提 ReID 特征入底库，实时画面将 1:N 自动命名">
+        ＋ 上传注册照</button>
+      <input type="file" id="personnel-photo-input" accept="image/*" hidden>
     </div>
 
     <div class="meta-grid person-stats">
@@ -467,6 +471,36 @@ function bindClipPlayback(scope) {
 }
 
 /**
+ * 上传注册照：multipart 直传后端（POST /api/personnel/{pid}/photos），
+ * 后端检测人体框 → 提 ReID 特征 → 入底库（路径 B 的数据来源）。
+ * 底库一旦有照片，实时画面里该人第一次被检出（第 1 个特征）就会被
+ * 1:N 命中并自动命名 —— 不再需要攒满 8 个特征走匿名注册。
+ */
+async function uploadRegistrationPhoto(personId, input) {
+  const file = input?.files?.[0];
+  if (!file) return;
+  const btn = el('personnel-photo-upload');
+  const prevText = btn ? btn.textContent : '';
+  if (btn) { btn.disabled = true; btn.textContent = '识别入库中…'; }
+  const form = new FormData();
+  form.append('image', file, file.name);
+  try {
+    const res = await fetchJson(
+      `/api/personnel/${encodeURIComponent(personId)}/photos`,
+      { method: 'POST', body: form, timeoutMs: 30000 },
+    );
+    showToast(`注册照已入库（共 ${Number(res.photo_count) || 1} 张），将参与 1:N 自动命名`, 'success');
+  } catch (err) {
+    // 422 = 图中没检出人 / 特征提取失败，后端给的就是人话，直接透传
+    showToast(`注册照上传失败：${err.message}`, 'error');
+  } finally {
+    if (btn) { btn.disabled = false; btn.textContent = prevText; }
+    if (input) input.value = '';   // 清掉选择，允许重传同一张
+  }
+  showPersonDetail(personId);      // 刷新 photo_count（失败时刷新也无妨）
+}
+
+/**
  * 档案详情：档案字段 + 名下匿名身份 + 分相机活动量 + 视频片段。
  * 片段列表按 person_id 聚合（合并名下全部 gid），不是只看第一个身份 ——
  * 一个人常被拆成多个匿名身份，只看一个会漏掉大半轨迹。
@@ -510,6 +544,12 @@ async function showPersonDetail(personId) {
     });
   });
   el('personnel-detail-back')?.addEventListener('click', showListPane);
+  el('personnel-photo-upload')?.addEventListener('click', () => {
+    el('personnel-photo-input')?.click();
+  });
+  el('personnel-photo-input')?.addEventListener('change', (event) => {
+    uploadRegistrationPhoto(personId, event.target);
+  });
   el('personnel-detail-delete')?.addEventListener('click', (event) => {
     const name = detail.querySelector('.person-name')?.textContent || '';
     deletePerson(personId, name, event.target);

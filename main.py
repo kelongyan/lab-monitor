@@ -217,16 +217,20 @@ def main(
     #   - 22 路素材全是 25fps。抽帧到 10fps 时 ByteTrack 相邻处理帧的 IoU 中位 0.87、
     #     关联失败率 0.1%；1~2fps 才是崩塌区。所以 10fps 足够跟踪，比追 25fps 省 2.5 倍算力。
     #   - 单相机内轨迹时长中位 7.1s。ReIDValidator 要攒满 buffer_size=8 个样本才会调
-    #     register_if_new()，填满耗时 = 8 × reid_every_n / **实际达到的** fps 秒：
-    #         10fps + R=3 → 2.4s ✓         25fps + R=5 → 1.6s ✓
-    #          2fps + R=5 → 23.5s ✗（比轨迹本身还长 → 身份永远注册不上）
-    #     所以 R 必须和实际帧率一起看：当前单进程实测只有约 1.7fps，R 取 3 还是 5 都填不满，
-    #     调小只会白烧算力，因此暂时保持 5；等吞吐真上到 8fps 以上再降到 3
-    #     （直接设 LAB_MONITOR_REID_EVERY_N=3 即可，不用改代码）。
+    #     register_if_new()，填满耗时 = 8 × reid_every_n / **实际达到的** fps 秒。
+    #     2026-09-13 的 22 路受控实验（scripts/measure_reid_sampling.py →
+    #     outputs/reports/reid_sampling_sweep.json）实测：R=10 时 50% 轨迹攒不满
+    #     （第 8 特征 25.9s ≫ 7.1s 轨迹中位）；R=1 时 100% 攒满且仅 3.4s，
+    #     帧率代价只有 9%（瓶颈是 GIL，ReID 的 CUDA 推理会释放 GIL）。
+    #     结论：R 取 1；环境变量 LAB_MONITOR_REID_EVERY_N 可覆盖。
     if device == "cuda":
         perf = dict(
             detect_every_n  = 1,     # GPU：每帧检测
-            reid_every_n    = 10,    # L1：5→10，省 ReID 推理次数（约 5ms/次 × 22 路）
+            reid_every_n    = 1,     # 实测（outputs/reports/reid_sampling_sweep.json，22 路 90s×3 配置）：
+                                     # R=10 时 50% 轨迹攒不满 8 特征 → 一半的人永远注册不上，
+                                     # 第 8 特征要 25.9s；R=1 时 100% 轨迹 3.4s 攒满，而帧率只掉 9%
+                                     # （2.48 vs 2.73 fps——瓶颈是 GIL，ReID 的 CUDA 推理释放 GIL，
+                                     # "R 调小白烧算力"的旧假设被实测推翻）。要保守可设 3（83% 注册、8.2s）。
             frame_rate_cap  = 10.0,  # GPU：上限10fps（实测足够跟踪，也给后续优化留头寸）
             mjpeg_fps       = 30.0,  # L1：15→30，浏览器拉流更密，画面"刷新感"更强；服务端未变帧只返同 generation
             jpeg_quality    = 50,    # L1：85→50，编码耗时 8.7ms → ~3.5ms（监控缩略图质量损失可接受）

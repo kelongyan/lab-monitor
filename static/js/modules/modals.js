@@ -364,6 +364,84 @@ async function searchPersonVideos(global_id, button) {
   }
 }
 
+/**
+ * 以图搜人结果渲染（worklist 4.4 前端入口）。
+ * 后端 /api/search/by-image 返回 Top-K：score / matched / name / asset_count。
+ * matched=false 的候选照样要展示 —— 离线检索的阈值语义与实时二值判定独立，
+ * 排名靠后但分数可观的候选对排查有价值（见 src/search.py rank 的说明）。
+ */
+function renderByImageMatches(box, res) {
+  const matches = res.matches || [];
+  if (!matches.length) {
+    box.innerHTML = `<div class="empty-state">库中没有可比对的身份</div>`;
+    return;
+  }
+  const rows = matches.map((m, i) => {
+    const gid = escapeAttr(m.global_id);
+    const gidHtml = escapeHtml(m.global_id);
+    const scorePct = Math.round((Number(m.score) || 0) * 1000) / 10;
+    const hit = m.matched
+      ? '<span style="color: var(--success); font-weight: 700;">命中</span>'
+      : '<span style="color: var(--text-muted);">未达阈值</span>';
+    const nameHtml = m.name ? escapeHtml(m.name)
+      : '<span style="color: var(--text-muted);">未命名</span>';
+    const assets = Number(m.asset_count) || 0;
+    return `
+      <div class="meta-card id-card-btn" style="cursor: pointer;" data-id="${gid}"
+           role="button" tabindex="0" aria-label="查看 ${gidHtml} 的轨迹">
+        <div class="label">Top${i + 1} · 相似度 ${scorePct}% · ${hit}</div>
+        <div class="val" style="color: var(--primary);">#${gidHtml}</div>
+        <div style="font-size: 11px; color: var(--text-muted);">
+          ${nameHtml}${assets ? ` · ${assets} 个视频片段` : ''}
+        </div>
+      </div>`;
+  }).join('');
+  box.innerHTML = `
+    <div style="font-size: 12px; color: var(--text-muted); margin-bottom: 8px;">
+      图中检测到 ${escapeHtml(res.person_count ?? 0)} 人（取最大人体框）
+      · 比对 ${escapeHtml(res.galleries_compared ?? 0)} 个身份 · 阈值 ${escapeHtml(res.threshold ?? '-')}
+    </div>
+    <div style="display: grid; grid-template-columns: repeat(3, 1fr); gap: 10px;">${rows}</div>`;
+  box.querySelectorAll('.id-card-btn').forEach(card => {
+    const open = () => showTrajectoryModal(card.getAttribute('data-id'));
+    card.addEventListener('click', open);
+    card.addEventListener('keydown', event => {
+      if (event.key === 'Enter' || event.key === ' ') {
+        event.preventDefault();
+        open();
+      }
+    });
+  });
+}
+
+function bindByImageSearch() {
+  const btn = document.getElementById('btn-by-image-search');
+  const input = document.getElementById('by-image-input');
+  const box = document.getElementById('by-image-result');
+  if (!btn || !input || !box) return;
+  btn.addEventListener('click', () => input.click());
+  input.addEventListener('change', async () => {
+    const file = input.files && input.files[0];
+    if (!file) return;
+    btn.disabled = true;
+    box.innerHTML = `<div class="empty-state">提取特征并与全库比对中…</div>`;
+    const form = new FormData();
+    form.append('image', file, file.name);
+    try {
+      const res = await fetchJson('/api/search/by-image', {
+        method: 'POST', body: form, timeoutMs: 30000,
+      });
+      renderByImageMatches(box, res);
+    } catch (err) {
+      // 422 = 图中未检出人员 / 特征提取失败；503 = ReID 未就绪 —— 后端给的都是人话
+      box.innerHTML = `<div class="empty-state">以图搜人失败：${escapeHtml(err.message)}</div>`;
+    } finally {
+      btn.disabled = false;
+      input.value = '';
+    }
+  });
+}
+
 export async function openIdentitySearchModal() {
   const title = document.getElementById('modal-traj-title');
   const body = document.getElementById('modal-traj-body');
@@ -374,16 +452,30 @@ export async function openIdentitySearchModal() {
   openModal('trajectory-modal');
   const request = beginModalRequest('trajectory-modal');
 
+  // 以图搜人入口常驻：身份列表为空时它也该可用（虽然结果必然是"没有可比对"，
+  // 但入口消失会让用户以为功能下线了）。
+  const uploadHtml = `
+    <div style="display: flex; gap: 8px; align-items: center; margin-bottom: 10px; flex-wrap: wrap;">
+      <button class="action-btn" id="btn-by-image-search"
+              title="上传一张包含人员的图片，自动检测人体 → 提特征 → 与全库比对">🖼️ 以图搜人（上传图片找身份）</button>
+      <input type="file" id="by-image-input" accept="image/*" hidden>
+      <span style="font-size: 11px; color: var(--text-muted);">多人同框自动取最大人体框</span>
+    </div>
+    <div id="by-image-result" style="margin-bottom: 12px;"></div>`;
+
   try {
     const res = await fetchJson('/api/identities', { signal: request.signal });
     if (!request.isCurrent()) return;
     const ids = res.ids || [];
     if (ids.length === 0) {
-      body.innerHTML = `<div class="empty-state">当前尚未登记任何 ReID 人员身份</div>`;
+      body.innerHTML = `${uploadHtml}
+        <div class="empty-state">当前尚未登记任何 ReID 人员身份</div>`;
+      bindByImageSearch();
       return;
     }
 
     body.innerHTML = `
+      ${uploadHtml}
       <div style="font-size: 12px; color: var(--text-muted); margin-bottom: 12px;">
         系统已自动提炼注册 <b style="color: var(--purple);">${escapeHtml(ids.length)}</b> 个全局独一无二的人员 ID。点击查看其路径：
       </div>
@@ -400,6 +492,7 @@ export async function openIdentitySearchModal() {
       </div>
     `;
 
+    bindByImageSearch();
     body.querySelectorAll('.id-card-btn').forEach(card => {
       const openIdentity = () => {
         showTrajectoryModal(card.getAttribute('data-id'));
