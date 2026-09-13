@@ -14,8 +14,11 @@ personnel.py — 人员档案与底库检索（能力一 路径 B，worklist 3.3
 
 相似度必须**复用** match_feature_detailed()（按身份去重 + Ratio Test），
 不要另写一套 —— 底库检索与实时匹配必须同一套判据，否则"标定"就失去了意义。
+**"同一套判据"包含坐标系**：两边都必须是"减公共分量 + 重新归一化"之后的向量，
+所以 match() 要求调用方传入 IdentityStore 的 MatchContext（见 match() 的文档）。
 
-底库阈值独立于实时匹配阈值（LAB_MONITOR_PERSONNEL_THRESHOLD）：
+底库阈值独立于实时匹配阈值（`REID_PERSONNEL_THRESHOLD`，环境变量
+`LAB_MONITOR_PERSONNEL_THRESHOLD`，默认与实时阈值同值）：
 底库特征来自**标准注册照**（正面、无遮挡、分辨率可控），质量远高于抓拍，
 理论上可以用更严的阈值 —— 但默认先与实时阈值一致，等标注集扩充后再单独标定。
 """
@@ -29,7 +32,7 @@ from pathlib import Path
 import numpy as np
 
 from src.reid import match_feature_detailed
-from src.reid_config import REID_MATCH_THRESHOLD
+from src.reid_config import REID_PERSONNEL_THRESHOLD
 
 logger = logging.getLogger("personnel")
 
@@ -37,7 +40,7 @@ logger = logging.getLogger("personnel")
 class PersonnelGallery:
     """人员底库：实名档案 + 注册照特征 + 1:N 检索。线程安全（内部锁）。"""
 
-    def __init__(self, database, threshold: float = REID_MATCH_THRESHOLD):
+    def __init__(self, database, threshold: float = REID_PERSONNEL_THRESHOLD):
         self._database = database
         self._threshold = float(threshold)
         self._lock_lock = __import__("threading").Lock()
@@ -105,31 +108,44 @@ class PersonnelGallery:
     # 1:N 检索                                                              #
     # ------------------------------------------------------------------ #
 
-    def match(self, feature: np.ndarray) -> dict | None:
+    def match(self, feature: np.ndarray, context=None) -> dict | None:
         """
         底库 1:N 检索。命中（≥ 阈值且过 Ratio Test）返回：
             {"person_id", "name", "score"}
         未命中返回 None（调用方继续走匿名身份流程）。
 
         空底库返回 None —— 这是常态（没建档案就没有自动命名）。
+
+        context：**必须传** IdentityStore.build_match_context() 得到的上下文。
+        底库特征与抓拍特征都是 OSNet 的原始输出，含同一个公共分量；而阈值
+        `REID_MATCH_THRESHOLD` 是在**减去公共分量后**的空间里标定的。不传 context
+        就等于"在 A 空间用 B 空间的阈值"，后果实测（本机 29 身份）：
+        异人对余弦在原始空间 p50 0.689 / 越过 0.68 的比例 **54.9%**，
+        中心化空间 p50 -0.064 / 越阈 **1.7%** —— 相差 30 倍。
+        更糟的是底库只有 1 人时 match_feature_detailed 会跳过 Ratio Test，
+        陌生人几乎必然被判成该人。不传时退化为改造前行为（仅兼容测试与离线调用）。
         """
         with self._lock_lock:
-            gallery = []
-            meta = {}
-            for person_id, person in self._people.items():
-                features = person["features"]
-                if not features:
-                    continue
-                best = max(features, key=lambda vec: float(vec @ feature))
-                gallery.append((person_id, best))
-                meta[person_id] = person["name"]
-        if not gallery:
+            rows = [
+                (person_id, vector)
+                for person_id, person in self._people.items()
+                for vector in person["features"]
+            ]
+            meta = {person_id: person["name"] for person_id, person in self._people.items()}
+        if not rows:
             return None
 
-        detail = match_feature_detailed(
-            np.asarray(feature, dtype=np.float32), gallery,
-            threshold=self._threshold,
-        )
+        if context is not None:
+            # 与实时匹配同一坐标系：query 与 gallery 必须用**同一个中心**（MatchContext 保证）
+            query = context.prepare(feature)
+            gallery = [(person_id, context.prepare(vector)) for person_id, vector in rows]
+        else:
+            query = np.asarray(feature, dtype=np.float32)
+            gallery = rows
+
+        # 按人一行交给 match_feature_detailed：它自己会"按身份取相似度最大值 + Ratio Test"，
+        # 这里不再自己挑 best —— 挑 best 的坐标系与判定的坐标系必须一致。
+        detail = match_feature_detailed(query, gallery, threshold=self._threshold)
         if detail.matched_id is None:
             return None
         return {

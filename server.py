@@ -775,9 +775,16 @@ async def get_media(
        因为转码是后续批量做的、没回填）。所以 Content-Length 必须走 stat(),
        不能读 size_bytes —— 那里是 NULL 会导致长度算错、视频卡在第一帧。
 
-    3. **视频内时间轴以低清片为准。** 原片与低清片时长不同（实测 239.12 vs 239.64），
-       而 identity_appearances.video_ts 是按**低清片**标定的。前端拿
-       video_first_ts 来 seek 时，必须配低清片才准 —— 这也是默认值选它的原因。
+    3. **视频内时间轴来自原片，出片给低清片 —— 两者相差帧数差以内。**
+       `identity_appearances.video_ts` 是 pipeline 按**它实际打开的那个文件**的帧号除以
+       帧率算出来的，而 `config/sources.json` 指向的是 `videos/` 原片，所以 ts 属于
+       **原片**时间轴（2026-09-13 复核修正：此前这里写"按低清片标定"，与代码不符）。
+       低清片是同源 CFR 25fps 重编码，帧数与原片略有差异（实测 22 路中 13 路不同，
+       最坏 +35 帧 = 1.4 s，多数 < 0.5 s），因此拿 ts 去 seek 低清片会有这一档偏差，
+       对"跳到该片段"的用途足够。
+       反过来才是不行的：**原片的容器时间戳不可信**（ffprobe 报 11948~71617 秒、虚高 222 倍），
+       实测 reg_06 / reg_08 的原片按时间戳 seek 会落到完全无关的画面（相关 ≈ 0），
+       低清片 seek 精确（1.000）。这就是默认给出低清片、并且检索结果也归一到低清片的原因。
 
     这是普通文件响应，不占 /stream 的 5 路 MJPEG 预算（stream_manager.js 只管 /stream/）。
     """
@@ -824,7 +831,14 @@ async def get_media(
     media_type = _MEDIA_TYPES.get(target.suffix.lower(), "application/octet-stream")
     headers = {"Accept-Ranges": "bytes", "Cache-Control": "private, max-age=3600"}
     if download:
-        headers["Content-Disposition"] = f'attachment; filename="{target.name}"'
+        # 原片文件名是中文（如 `L2东侧走廊南北向南_20260731….mp4`），而 HTTP 头只能装
+        # latin-1 —— 把 target.name 直接塞进去会抛 UnicodeEncodeError 把 /media 打成 500
+        # （已实测）。按 RFC 6266/5987 给"ASCII 回退名 + filename*=UTF-8''"两个参数。
+        ascii_name = f"media{target.suffix.lower()}"
+        headers["Content-Disposition"] = (
+            f'attachment; filename="{ascii_name}"; '
+            f"filename*=UTF-8''{urllib.parse.quote(target.name, safe='')}"
+        )
 
     range_header = request.headers.get("range")
     if not range_header:

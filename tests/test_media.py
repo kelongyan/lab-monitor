@@ -131,8 +131,12 @@ class MediaEndpointTest(unittest.TestCase):
 
     def test_default_prefers_lowres_transcode(self):
         """
-        同一相机两行时默认给低清片：体积约 1/30，且 identity_appearances.video_ts
-        就是按它标定的 —— 给原片会让 seek 差几十毫秒（实测 239.12 vs 239.64）。
+        同一相机两行时默认给低清片：体积约 1/30，且它是唯一能可靠 seek 的那一片。
+
+        `video_ts` 其实是按**原片**帧号算的（pipeline 读的就是 sources.json 指向的原片），
+        低清片与原片的帧数差 ≤1.4 s（实测 13/22 路不同，多数 <0.5 s），这个偏差对
+        "跳到该片段"够用；而原片的容器时间戳不可信（虚高 222 倍），实测 reg_06/reg_08
+        的原片按时间戳 seek 会落到无关画面（相关 ≈ 0），低清片 seek 精确（1.000）。
 
         两片内容不同，所以能按字节直接断言选了哪一个，
         而不是在测试里重抄一遍选择逻辑（那样只是自证）。
@@ -288,6 +292,33 @@ class MediaEndpointTest(unittest.TestCase):
     def test_download_sets_content_disposition(self):
         res = self.client.get("/media/cam_hi?download=true")
         self.assertEqual(res.status_code, 200)
+        self.assertIn("attachment", res.headers["content-disposition"])
+
+    def test_download_with_chinese_filename_does_not_crash(self):
+        """
+        附件名不能拿 rel_path 里的原始文件名直接拼 —— 原片名是中文
+        （如 `L2东侧走廊南北向南_20260731….mp4`），而 HTTP 头只能装 latin-1，
+        直接塞会抛 UnicodeEncodeError 把 /media 打成 500（已实测）。
+        按 RFC 6266/5987 给"ASCII 回退名 + filename*=UTF-8''"两个参数。
+        """
+        rel_cn = "videos/常规路线/__test_media_中文名__.mp4"
+        _write_media(rel_cn, self.HI)
+        self.addCleanup(lambda: (ROOT / rel_cn).unlink(missing_ok=True))
+        self.db.seed_video_asset(camera_id="cam_cn", rel_path=rel_cn,
+                                 size_bytes=len(self.HI), frames_real=100,
+                                 duration_real=10.0, fps_declared=25.0)
+        res = self.client.get("/media/cam_cn?download=true")
+        self.assertEqual(res.status_code, 200, res.text[:200])
+        disposition = res.headers["content-disposition"]
+        self.assertIn("attachment", disposition)
+        self.assertIn("filename*=UTF-8''", disposition)
+        # "中文名" 的 UTF-8 百分号编码，证明中文是完整传下去的而不是被丢掉
+        self.assertIn("%E4%B8%AD%E6%96%87%E5%90%8D", disposition)
+
+    def test_download_on_paired_camera_still_works(self):
+        """同一相机两行时，附件名走被选中的那一行（低清片）且不炸。"""
+        res = self.client.get("/media/cam_pair?download=true")
+        self.assertEqual(res.status_code, 200, res.text[:200])
         self.assertIn("attachment", res.headers["content-disposition"])
 
     def test_get_is_not_blocked_by_write_guard(self):

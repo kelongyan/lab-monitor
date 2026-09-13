@@ -30,10 +30,21 @@ APPEARANCE_QUERY_LIMIT = 20000
 
 def _asset_index(database) -> tuple[dict, dict]:
     """
-    构建 asset_id → 资产行 与 camera_id → 资产行 的索引。
+    构建 asset_id → 资产行 与 camera_id → **代表资产行** 的索引。
 
-    同一相机可能有两行（源文件 + 低清转码产物），按 camera_id 取时优先返回
-    「有实测帧数」的那一行；trajectory 旧数据没有 asset_id，只能按相机兜底。
+    同一相机在库里有 2 行（原片 + 低清转码产物），本函数为每个相机选出一行代表资产：
+    **低清优先**，其次要求有实测帧数，最后按 asset_id 稳定取大者。两条理由：
+
+    1. `/media` 的默认出片就是低清片（体积 1/30）。检索结果里带的 asset_id 若指向原片，
+       前端点开播放的就是 1080p/1440p 原件（单路最大 183 MB，低清片 4.4 MB），
+       能力三"降分辨率"在回放这条路上等于白做。
+    2. 原片容器元数据不可信（ffprobe 报 11948~71617 秒、虚高 222 倍）。实测 reg_06 /
+       reg_08 的原片**按时间戳 seek 会落到完全无关的画面**（相关系数 ≈ 0），
+       同相机的低清片 seek 精确（1.000）—— 回放定位只能靠低清片。
+
+    ⚠️ 因此同一相机在检索结果里只会出现一行（新老数据归一），代价是 `video_ts`
+    （按 pipeline 实际读取的原片帧号算出）与出片文件之间有帧数差：实测最坏 1.4 s，
+    多数 < 0.5 s。
     """
     assets = database.list_video_assets()
     by_id: dict[int, dict] = {}
@@ -43,17 +54,32 @@ def _asset_index(database) -> tuple[dict, dict]:
             by_id[asset["asset_id"]] = asset
         by_cam.setdefault(asset["camera_id"], []).append(asset)
     for cam in by_cam:
-        by_cam[cam].sort(key=lambda a: (bool(a.get("frames_real")), a["asset_id"] or 0),
-                         reverse=True)
+        by_cam[cam].sort(
+            key=lambda a: (
+                str(a.get("rel_path") or "").startswith("videos_low/"),
+                bool(a.get("frames_real")),
+                a["asset_id"] or 0,
+            ),
+            reverse=True,
+        )
     return by_id, by_cam
 
 
 def _resolve_asset(row: dict, by_id: dict, by_cam: dict) -> dict | None:
+    """
+    把一条轨迹行解析到**该相机的代表资产**。
+
+    新数据带 asset_id（指向原片）、老数据没有（只能按相机兜底）—— 两者都必须归一到同一行，
+    否则同一相机在结果里会出现两条：一条原片带 video_ts、一条低清片没有，
+    用户看到重复的相机，点开还是两个不同文件（实测 gid 23c29863 的 rnd_05 就是如此）。
+    """
     asset_id = row.get("asset_id")
-    if asset_id is not None and asset_id in by_id:
-        return by_id[asset_id]
-    candidates = by_cam.get(row["camera"]) or []
-    return candidates[0] if candidates else None
+    asset = by_id.get(asset_id) if asset_id is not None else None
+    camera = (asset or {}).get("camera_id") or row.get("camera")
+    candidates = by_cam.get(camera) or []
+    if candidates:
+        return candidates[0]
+    return asset
 
 
 def aggregate_identity_assets(

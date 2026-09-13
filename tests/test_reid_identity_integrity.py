@@ -347,15 +347,32 @@ class CommonComponentCenteringTests(unittest.TestCase):
             )
 
     def test_centering_survives_zero_norm_vectors(self):
-        """向量几乎就是公共分量本身时，减完会趋零 —— 不得产生 NaN。"""
+        """
+        向量几乎就是公共分量本身时，减完会趋零 —— 必须退回**原方向**：
+        既不能产生 NaN，也不能返回零向量。
+
+        曾经的实现写成"对已经减完的向量再取一次范数"，那个分支恒等于返回零向量
+        （`fallback_norm == norm == 0`），等于把该行从 gallery 里静默删掉 ——
+        与它的相似度永远是 0，永不命中，且不报任何错。
+        """
         with temporary_store() as store:
             features = self._shared_component_features(8)
             for feature in features:
                 store.register(feature)
             center = store._feature_center_locked()
             prepared = store._prepare_for_match(center.copy(), center)
+
             self.assertFalse(np.isnan(prepared).any())
             self.assertEqual(prepared.shape, center.shape)
+            self.assertAlmostEqual(
+                1.0, float(np.linalg.norm(prepared)), places=5,
+                msg="退回原方向后应当是单位向量，而不是零向量",
+            )
+            cosine_to_center = float(prepared @ center) / float(np.linalg.norm(center))
+            self.assertAlmostEqual(
+                1.0, cosine_to_center, places=5,
+                msg="退回的方向必须与减中心之前一致",
+            )
 
 
 if __name__ == "__main__":

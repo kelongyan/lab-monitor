@@ -177,7 +177,14 @@ class CameraPipeline(threading.Thread):
             self._asset_id = self.store.register_video_asset_stub(
                 self.camera_id, self.source, path.name, size
             )
-            asset = self.store.video_asset_for(self.camera_id)
+            # 必须按 asset_id 取回**刚登记的那一行**：一个相机在库里有原片与低清片两行，
+            # `video_asset_for()` 按 `ORDER BY asset_id DESC` 返回的是低清片那行。
+            # 帧号是在本路实际打开的文件（config/sources.json 指向的原片）上数的，
+            # 帧率却来自另一行 —— 今天两行都是 25.0 所以数值上没暴露，
+            # 一旦转码改了帧率或切了源，video_ts 就会被静默算错。
+            asset = (self.store.video_asset_by_id(self._asset_id)
+                     if self._asset_id is not None
+                     else self.store.video_asset_for(self.camera_id))
             if asset and asset.get("fps_declared"):
                 fps = float(asset["fps_declared"])
                 # 元数据帧率可能损坏（rnd_05 报 351.56），只接受合理区间
@@ -559,12 +566,14 @@ class CameraPipeline(threading.Thread):
                 # 命中且该人名下已有绑定的 global_id → 直接复用那个身份（这就是
                 # "认出熟人"）；命中但未绑定 → 先走正常注册，注册成功后自动命名。
                 # 放在全局身份库检索之前的原因见 src/personnel.py 模块注释。
+                # **必须传 context**：底库检索的阈值是在中心化空间标定的，不传就等于
+                # 在原始空间用中心化阈值判（实测异人越阈率 54.9% vs 1.7%）。
                 personnel_hit = None
                 known_gid = None
                 if self.personnel is not None:
                     avg_feat = self._validator.get_avg_feature(tid)
                     if avg_feat is not None:
-                        personnel_hit = self.personnel.match(avg_feat)
+                        personnel_hit = self.personnel.match(avg_feat, context=context)
                         if personnel_hit is not None:
                             known_gid = self.personnel.bound_gid(
                                 personnel_hit["person_id"], self.store)
@@ -578,50 +587,55 @@ class CameraPipeline(threading.Thread):
                                     self.camera_id, personnel_hit["name"],
                                     personnel_hit["person_id"], personnel_hit["score"])
 
-                confirmed_gid = self._validator.get_confirmed_match(
-                    tid, context.gallery, metrics=self.store.metrics,
-                    prepare=context.prepare,
-                )
+                # 实名优先：底库已解析出绑定身份（gid 非空）时，**不再**走匿名确认/注册，
+                # 否则下面两处赋值会把已命名的 gid 覆盖成匿名编号 ——
+                # 同一个人常背 1~3 个重复匿名身份，validator 一旦确认了其中一个，
+                # 画面标签就会从"张三 (P0007)"退回 "ID: #xxxx"，轨迹也记到重复身份上。
+                if gid is None:
+                    confirmed_gid = self._validator.get_confirmed_match(
+                        tid, context.gallery, metrics=self.store.metrics,
+                        prepare=context.prepare,
+                    )
 
-                if confirmed_gid:
-                    gid = confirmed_gid
-                    # 记录通行时间（校准用）
-                    self._record_arrival(gid)
-                    # 解除预警监听
-                    self.alerter.resolve(gid, self.camera_id)
-                    logger.info("[%s] ✓ 身份确认（多帧）: %s", self.camera_id, gid)
-                else:
-                    # 尚未确认，但缓冲帧够了且完全无匹配 → 注册（或归并）身份
-                    # P2: 使用公开接口 buffer_len()，替代直接访问私有 _buffers
-                    if self._validator.buffer_len(tid) >= self._validator.buffer_size:
-                        avg_feat = self._validator.get_avg_feature(tid)
-                        if avg_feat is not None:
-                            resolution = self.store.register_if_new(avg_feat)
-                            gid = resolution.global_id
-                            if gid is not None:
-                                self._validator.confirm(tid, gid)
-                                if resolution.is_new:
-                                    logger.info("[%s] 注册新身份（多帧平均）: %s", self.camera_id, gid)
-                                    # 底库已命中但名下没有身份 → 自动命名（路径 B 的闭环）
-                                    if personnel_hit is not None and not known_gid:
-                                        self.store.bind_person(
-                                            gid, personnel_hit["person_id"],
-                                            personnel_hit["score"])
-                                        logger.info(
-                                            "[%s] 自动命名: %s -> %s (相似度 %.3f)",
-                                            self.camera_id, gid,
-                                            personnel_hit["person_id"],
-                                            personnel_hit["score"])
-                                else:
-                                    self._record_arrival(gid)
-                                    self.alerter.resolve(gid, self.camera_id)
-                                    logger.info("[%s] 跨摄归并身份: %s", self.camera_id, gid)
-                            elif resolution.status == "ambiguous":
-                                logger.debug(
-                                    "[%s] Track %s ReID 结果有歧义，继续积累特征",
-                                    self.camera_id,
-                                    tid,
-                                )
+                    if confirmed_gid:
+                        gid = confirmed_gid
+                        # 记录通行时间（校准用）
+                        self._record_arrival(gid)
+                        # 解除预警监听
+                        self.alerter.resolve(gid, self.camera_id)
+                        logger.info("[%s] ✓ 身份确认（多帧）: %s", self.camera_id, gid)
+                    else:
+                        # 尚未确认，但缓冲帧够了且完全无匹配 → 注册（或归并）身份
+                        # P2: 使用公开接口 buffer_len()，替代直接访问私有 _buffers
+                        if self._validator.buffer_len(tid) >= self._validator.buffer_size:
+                            avg_feat = self._validator.get_avg_feature(tid)
+                            if avg_feat is not None:
+                                resolution = self.store.register_if_new(avg_feat)
+                                gid = resolution.global_id
+                                if gid is not None:
+                                    self._validator.confirm(tid, gid)
+                                    if resolution.is_new:
+                                        logger.info("[%s] 注册新身份（多帧平均）: %s", self.camera_id, gid)
+                                        # 底库已命中但名下没有身份 → 自动命名（路径 B 的闭环）
+                                        if personnel_hit is not None and not known_gid:
+                                            self.store.bind_person(
+                                                gid, personnel_hit["person_id"],
+                                                personnel_hit["score"])
+                                            logger.info(
+                                                "[%s] 自动命名: %s -> %s (相似度 %.3f)",
+                                                self.camera_id, gid,
+                                                personnel_hit["person_id"],
+                                                personnel_hit["score"])
+                                    else:
+                                        self._record_arrival(gid)
+                                        self.alerter.resolve(gid, self.camera_id)
+                                        logger.info("[%s] 跨摄归并身份: %s", self.camera_id, gid)
+                                elif resolution.status == "ambiguous":
+                                    logger.debug(
+                                        "[%s] Track %s ReID 结果有歧义，继续积累特征",
+                                        self.camera_id,
+                                        tid,
+                                    )
 
                 if gid:
                     self._track_to_global[tid] = gid

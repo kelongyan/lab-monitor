@@ -83,6 +83,77 @@ class SearchFixture(unittest.TestCase):
         self._temp.cleanup()
 
 
+class CanonicalAssetTests(unittest.TestCase):
+    """
+    同一相机在库里有两行（原片 + 低清转码产物），检索结果里**只能出现一条**，
+    且必须归一到低清片（2026-09-13 新增）。
+
+    缺陷（实测 gid 23c29863）：新数据的 asset_id 指向原片、老数据没有 asset_id
+    只能按相机兜底（旧排序取到低清片），两者 key 不同 → 同一相机在结果里出现两次，
+    一条带 video_ts 指向 1080p 原片、一条没有 ts 指向 videos_low，用户点开是两个文件。
+    同时回放走原片还架空了能力三：低清语料 29 MB 白转，原片单路最大 183 MB。
+    """
+
+    def setUp(self):
+        self._temp = tempfile.TemporaryDirectory()
+        self.database = Database(Path(self._temp.name) / "canonical.db")
+        self.hi = self.database.seed_video_asset(
+            camera_id="rnd_08", rel_path="videos/随机路线/rnd_08.mp4",
+            fps_declared=25.0, frames_real=957, duration_real=38.28)
+        self.lo = self.database.seed_video_asset(
+            camera_id="rnd_08", rel_path="videos_low/rnd_08.mp4",
+            fps_declared=25.0, frames_real=978, duration_real=39.12)
+        self.gid = "person-canonical"
+        for k in range(4):
+            frame = k * 10
+            self.database.record_appearance(
+                self.gid, "rnd_08", 1000.0 + k, [0, 0, 50, 100], k + 1,
+                asset_id=self.hi, video_frame=frame, video_ts=frame / 25.0)
+        # 老数据：同相机、同时间窗、asset_id 为空
+        for k in range(4, 8):
+            self.database.record_appearance(
+                self.gid, "rnd_08", 1000.0 + k, [0, 0, 50, 100], k + 1)
+
+    def tearDown(self):
+        self.database.close()
+        self._temp.cleanup()
+
+    def _assets(self):
+        return aggregate_identity_assets(
+            self.database, self.gid, known_cameras={"rnd_08", "rnd_01"})["assets"]
+
+    def test_same_camera_appears_exactly_once(self):
+        assets = self._assets()
+        self.assertEqual(1, len(assets),
+                         "同一相机的新老数据必须合并成一条，不能出现重复行")
+        self.assertEqual("rnd_08", assets[0]["camera_id"])
+
+    def test_tagged_rows_are_canonicalised_to_lowres(self):
+        """带 asset_id（指向原片）的数据也必须归一到低清片 —— 回放/体积/可 seek 都靠它。"""
+        entry = self._assets()[0]
+        self.assertEqual(self.lo, entry["asset_id"])
+        self.assertEqual("videos_low/rnd_08.mp4", entry["file"])
+
+    def test_canonical_entry_keeps_video_coordinates(self):
+        """归一不能把视频内坐标弄丢：它来自轨迹行，与选哪一行资产无关。"""
+        entry = self._assets()[0]
+        self.assertTrue(entry["position_known"])
+        self.assertAlmostEqual(0.0, entry["video_first_ts"], places=2)
+        self.assertAlmostEqual(1.2, entry["video_last_ts"], places=2)
+
+    def test_falls_back_to_original_when_no_lowres_row_exists(self):
+        """只索引了原片的相机（未转码）不能被弄坏。"""
+        self.database.seed_video_asset(
+            camera_id="rnd_01", rel_path="videos/随机路线/rnd_01.mp4",
+            fps_declared=25.0, frames_real=833, duration_real=33.32)
+        self.database.record_appearance(
+            self.gid, "rnd_01", 2000.0, [0, 0, 50, 100], 9,
+            asset_id=self.database.get_video_asset("rnd_01")["asset_id"],
+            video_frame=5, video_ts=0.2)
+        entry = next(a for a in self._assets() if a["camera_id"] == "rnd_01")
+        self.assertEqual("videos/随机路线/rnd_01.mp4", entry["file"])
+
+
 class AggregateTests(SearchFixture):
     def test_assets_are_grouped_by_file(self):
         result = aggregate_identity_assets(

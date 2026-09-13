@@ -579,16 +579,16 @@ class IdentityStore:
     @staticmethod
     def _prepare_for_match(vector: np.ndarray, center: np.ndarray | None) -> np.ndarray:
         """减去公共分量并重新 L2 归一化。center 为 None 时退化为普通归一化。"""
-        vector = np.asarray(vector, dtype=np.float32)
-        if center is not None:
-            vector = vector - center
-        norm = float(np.linalg.norm(vector))
+        original = np.asarray(vector, dtype=np.float32)
+        prepared = original - center if center is not None else original
+        norm = float(np.linalg.norm(prepared))
         if norm <= 1e-8:
-            # 减完趋零（该向量几乎就是公共分量本身）→ 退回原方向，避免产生 NaN
-            fallback = np.asarray(vector, dtype=np.float32)
-            fallback_norm = float(np.linalg.norm(fallback))
-            return fallback / fallback_norm if fallback_norm > 1e-8 else fallback
-        return vector / norm
+            # 减完趋零（该向量几乎就是公共分量本身）→ 退回**原方向**，避免产生 NaN。
+            # 注意必须用 original：曾误写成对 prepared 再取一次范数，那个分支恒等于
+            # "返回零向量"，等于把该行从 gallery 里静默删掉（比对结果全是 0）。
+            original_norm = float(np.linalg.norm(original))
+            return original / original_norm if original_norm > 1e-8 else original
+        return prepared / norm
 
     def _build_match_context_locked(self) -> MatchContext:
         """
@@ -877,10 +877,20 @@ class IdentityStore:
         return self._database
 
     def video_asset_for(self, camera_id: str) -> dict | None:
-        """读取该相机的视频资产行（含实测帧数/时长/编码）。无数据库时返回 None。"""
+        """读取该相机的视频资产行（含实测帧数/时长/编码）。无数据库时返回 None。
+
+        ⚠️ 一个相机可能有两行（原片 + 低清转码产物），本方法返回 asset_id 最大的那行。
+        需要"是哪一行"的调用方（如登记后取帧率）请改用 `video_asset_by_id()`。
+        """
         if self._database is None:
             return None
         return self._database.get_video_asset(camera_id)
+
+    def video_asset_by_id(self, asset_id: int | None) -> dict | None:
+        """按 asset_id 精确取资产行。无数据库 / asset_id 为空时返回 None。"""
+        if self._database is None or asset_id is None:
+            return None
+        return self._database.get_video_asset_by_id(int(asset_id))
 
     def register_video_asset_stub(self, camera_id: str, rel_path: str,
                                   file_name: str | None = None,

@@ -22,7 +22,8 @@
   - 基于 **YOLOv8** 模型完成高精度人员检测（`PersonDetector`）。
   - 单相机内追踪基于 ultralytics 内置 **BYTETracker** 的轻量封装（`src/tracker.py`），实现轨迹平滑与目标连贯标识。
 - 🆔 **跨视角 ReID 身份重识别**
-  - 基于 **OSNet-x0.25** 骨干网络（`ReIDExtractor`）提取 512 维特征向量。当前加载的是 **ImageNet 预训练权重（非 ReID 专用权重）**，跨镜头判别力有限，替换为 ReID 数据集权重是已知待办项。
+  - 基于 **OSNet-x0.25** 骨干网络（`ReIDExtractor`）提取 512 维特征向量。加载的是 **Market-1501 度量学习权重**（`src/reid_config.py` 的 `DEFAULT_REID_WEIGHTS`，可切 msmt17），匹配阈值 0.68 由自动标注集标定（P=0.913 / R=0.639）。
+  - 匹配前会减去全体特征共同的方向（**公共分量**）并重新归一化 —— OSNet 输出的单位特征彼此余弦高达 0.98 的根因就是这个公共分量；减掉后异人越阈比例从 54.9% 降到 1.7%（`src/identity_store.py:_feature_center_locked`）。
   - 跨不同摄像头视角建立全局身份库（`IdentityStore`），解决视角遮挡与离场重进识别难题。
   - 多帧确认机制（`ReIDValidator`）结合 Ratio Test，有效降低误识别率。
 - 🗺️ **相机拓扑与穿越时延校验**

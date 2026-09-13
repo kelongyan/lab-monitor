@@ -82,6 +82,13 @@ REID_MATCH_THRESHOLD: float = _env_unit_float(
 )
 REID_RATIO_TEST: float = _env_unit_float("LAB_MONITOR_REID_RATIO", _DEFAULT_RATIO)
 
+# 底库（注册照 1:N 自动命名）阈值，默认与实时匹配一致 —— 见 src/personnel.py 的说明：
+# 底库特征来自标准注册照，质量高于抓拍，理论上可以用更严的阈值，但**尚未单独标定**，
+# 所以先与实时阈值同值，等注册照留出集做出来再分开。**不要**在 personnel.py 里写死数字。
+REID_PERSONNEL_THRESHOLD: float = _env_unit_float(
+    "LAB_MONITOR_PERSONNEL_THRESHOLD", REID_MATCH_THRESHOLD
+)
+
 
 # --------------------------------------------------------------------------- #
 # 权重注册表                                                                    #

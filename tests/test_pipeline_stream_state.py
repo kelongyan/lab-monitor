@@ -19,18 +19,138 @@ from src.pipeline import CameraPipeline
 GRACE = 3
 
 
-def _build_pipeline(source: str = "videos/none.mp4") -> CameraPipeline:
+def _build_pipeline(source: str = "videos/none.mp4",
+                    identity_store=None, personnel=None) -> CameraPipeline:
     return CameraPipeline(
         camera_id="cam_test",
         source=source,
         detector=Mock(),
         reid_extractor=Mock(),
-        identity_store=Mock(),
+        identity_store=identity_store if identity_store is not None else Mock(),
         topology=Mock(),
         alert_manager=Mock(),
         screenshot_dir=Path("outputs"),
         frame_hub=None,
+        personnel=personnel,
     )
+
+
+class AssetFpsRegistrationTests(unittest.TestCase):
+    """登记视频资产后，帧率必须取自**刚登记的那一行**（2026-09-13 新增）。
+
+    一个相机在库里有原片与低清片两行，`video_asset_for()` 按 `ORDER BY asset_id DESC`
+    返回低清片那行；而 `_file_frame_idx` 数的是本路实际打开的文件（config/sources.json
+    指向的原片）。帧率若来自另一行，`video_ts` 就会被静默算错 ——
+    今天 44 行都是 25.0 fps 所以数值上看不出来。
+    """
+
+    def _store(self, fps_registered, fps_other):
+        store = Mock()
+        store.register_video_asset_stub.return_value = 7
+        store.video_asset_by_id.return_value = {"fps_declared": fps_registered}
+        store.video_asset_for.return_value = {"fps_declared": fps_other}
+        return store
+
+    def test_fps_comes_from_the_registered_row(self):
+        store = self._store(fps_registered=30.0, fps_other=25.0)
+        pipeline = _build_pipeline(identity_store=store)
+        self.assertEqual(30.0, pipeline._video_fps)
+        store.video_asset_by_id.assert_called_with(7)
+
+    def test_insane_fps_falls_back_to_default(self):
+        """损坏读数（rnd_05 报 351.56）必须被区间护栏挡住，回落到 25.0。"""
+        store = self._store(fps_registered=351.56, fps_other=25.0)
+        pipeline = _build_pipeline(identity_store=store)
+        self.assertEqual(25.0, pipeline._video_fps)
+
+    def test_falls_back_to_camera_row_when_registration_failed(self):
+        """登记失败（返回 None）时退回按相机取，不能因此丢掉帧率。"""
+        store = Mock()
+        store.register_video_asset_stub.return_value = None
+        store.video_asset_for.return_value = {"fps_declared": 30.0}
+        pipeline = _build_pipeline(identity_store=store)
+        self.assertEqual(30.0, pipeline._video_fps)
+        store.video_asset_by_id.assert_not_called()
+
+
+class NamedIdentityPriorityTests(unittest.TestCase):
+    """
+    底库命中并解析出"已绑定的实名身份"后，匿名匹配与注册**不得**覆盖它
+    （2026-09-13 新增）。
+
+    原实现里 `gid = known_gid` 之后，下面两处赋值（匿名确认 `confirmed_gid`、
+    注册结果 `resolution.global_id`）都是无条件写回 `gid`，把"实名优先"这条
+    写在注释里的契约架空了。同一个人常背 1~3 个重复匿名身份，
+    validator 一旦确认了其中一个，画面标签就会从"张三 (P0007)"退回 "ID: #xxxx"。
+    """
+
+    TID = 7
+    FEATURE = np.array([1.0] + [0.0] * 15, dtype=np.float32)
+
+    def _pipeline(self):
+        store = Mock()
+        context = Mock()
+        context.gallery = []
+        context.prepare = lambda vector: vector
+        store.build_match_context.return_value = context
+
+        personnel = Mock()
+        personnel.match.return_value = {"person_id": "P0001", "name": "张三",
+                                        "score": 0.91}
+        personnel.bound_gid.return_value = "gid-named"
+
+        pipeline = _build_pipeline(identity_store=store, personnel=personnel)
+        pipeline._detect_every_n = 1000          # 走"非检测帧"分支，不碰 detector/tracker
+        pipeline._frame_idx = 1
+        pipeline.reid.extract = Mock(return_value=self.FEATURE)
+        pipeline._on_person_leave = Mock()
+
+        validator = Mock()
+        validator.get_avg_feature.return_value = self.FEATURE
+        validator.get_confirmed_match.return_value = "gid-anon"   # 匿名库有"意见"
+        validator.buffer_len.return_value = 8
+        validator.buffer_size = 8
+        pipeline._validator = validator
+        return pipeline
+
+    def _drive(self, pipeline):
+        pipeline._last_tracks = [{"track_id": self.TID,
+                                  "bbox": [1.0, 1.0, 20.0, 50.0],
+                                  "conf": 0.9}]
+        pipeline._process_frame(np.zeros((64, 64, 3), dtype=np.uint8))
+
+    def test_named_identity_is_not_overwritten_by_anonymous_match(self):
+        pipeline = self._pipeline()
+        self._drive(pipeline)
+        self.assertEqual("gid-named", pipeline._track_to_global.get(self.TID),
+                         "底库已解析出实名身份，匿名确认不得覆盖它")
+
+    def test_anonymous_path_is_not_even_consulted(self):
+        """既然已认出实名，就不该再走匿名确认/注册那条路（无事发生好过做错事）。"""
+        pipeline = self._pipeline()
+        self._drive(pipeline)
+        pipeline._validator.get_confirmed_match.assert_not_called()
+        pipeline.store.register_if_new.assert_not_called()
+
+    def test_auto_naming_still_happens_when_person_has_no_bound_identity(self):
+        """
+        反向护栏：底库命中但名下还没有身份时，仍要走"注册 + 自动命名"闭环，
+        否则路径 B 就只在"已绑过"的情况下有效，新人员永远进不了档。
+        """
+        pipeline = self._pipeline()
+        pipeline.personnel.bound_gid.return_value = None
+        pipeline._validator.get_confirmed_match.return_value = None
+        resolution = Mock()
+        resolution.global_id = "gid-new"
+        resolution.is_new = True
+        pipeline.store.register_if_new.return_value = resolution
+
+        self._drive(pipeline)
+
+        pipeline.store.register_if_new.assert_called_once()
+        pipeline.store.bind_person.assert_called_once()
+        self.assertEqual("P0001", pipeline.store.bind_person.call_args[0][1])
+        self.assertEqual("gid-new", pipeline._track_to_global.get(self.TID))
 
 
 class StreamStateResetTests(unittest.TestCase):

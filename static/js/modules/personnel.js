@@ -353,9 +353,12 @@ function assetClipRows(asset) {
     ? `<span class="person-badge loop" title="素材循环播放，同一段像素被记录多遍">循环 ×${escapeHtml(String(asset.loop_factor))}</span>`
     : '';
   const frames = `<span class="person-clip-frames">${Number(asset.hit_count) || 0} 帧</span>`;
-  // asset_id 必须带上：同一相机在库里有"原片 + 低清转码"两行，时长不同
-  // （实测 239.12 vs 239.64），而 video_ts 是按低清片标定的。不带 asset_id
-  // 就可能拿到原片，seek 会差几十毫秒 —— 在循环素材里就是错帧。
+  // 必须带上 asset_id：检索结果里的 asset_id 是后端归一后的"该相机代表资产"
+  // （低清转码片，见 src/search.py:_asset_index）。省掉它 /media 会按相机自己再选一次，
+  // 同一相机的选择逻辑就散到前后端两处了。
+  // video_ts 是按**原片**帧号算的，低清片与原片帧数差 ≤1.4 s（多数 <0.5 s），
+  // 对"跳到该片段"够用；反过来不行 —— 原片容器时间戳损坏（虚高 222 倍），
+  // 实测 reg_06/reg_08 的原片按时间 seek 会落到完全无关的画面。
   const url = `/media/${encodeURIComponent(asset.camera_id)}${asset.asset_id != null
     ? `?asset_id=${encodeURIComponent(asset.asset_id)}` : ''}`;
   return segments.map((seg, i) => {
