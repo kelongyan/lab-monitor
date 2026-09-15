@@ -686,7 +686,12 @@ async def get_alert_history(
             global_id,
             risk_level,
         )
-        summary = await run_in_threadpool(db.get_alert_summary)
+        # 必须用本函数已取到的 `database`（第 679 行的 _get_database()）。
+        # 这里原先写的是 `db.get_alert_summary` —— 而 `db` 只在另一个函数里
+        # 以 `from src.db import db` 惰性导入过，模块级并不存在该名字，
+        # 于是本接口**每次都抛 NameError 被吞成 500**，告警历史面板一直拿不到
+        # summary（total/alerts 已查到，却在下一步整体失败）。
+        summary = await run_in_threadpool(database.get_alert_summary)
         return JSONResponse({
             "total": total,
             "limit": limit,
