@@ -53,3 +53,16 @@ videos_low/
 # 切源时的原片配置备份（scripts/transcode_lowres.py --switch-sources 生成）。
 # 派生产物：内容与未切源时的 config/sources.json 相同，需要时脚本会自己生成。
 config/sources_high.json
+
+# —— 保留本地不入库 ——
+# docs/ 整体转为本地化：已入库的 .md / png 仍随 git 历史可见，新加文件将被忽略；
+# 若需"从库里把某个文件出库"，必须 git rm --cached <path>（gitignore 不会反向 untrack）。
+# 三条规则组合：
+#   docs/*    匹配直接子文件（docs/foo.md）
+#   docs/**   匹配子目录（docs/images）
+#   docs/**/* 匹配子目录里的文件（docs/images/foo.png）
+# docs/** 单写只匹配目录不匹配文件，必须配合其他两条
+docs/*
+docs/**
+docs/**/*
+!docs/.gitkeep
