@@ -83,6 +83,35 @@ except Exception:
     logger.warning("人员头像目录不可用: %s", _personnel_crops)
 
 
+# 跨相机抓拍序列（/identity-snapshots/<gid>_<cam>.jpg 与 <gid>_strip.jpg）
+# 由 GET /api/identities/{gid}/snapshots 生成；同样走 StaticFiles，
+# 避免每次打开弹窗都重新解码视频。目录可用 LAB_MONITOR_IDENTITY_SNAPSHOTS 覆盖。
+IDENTITY_SNAPSHOTS_MOUNT = "/identity-snapshots"
+_snapshots_env = os.getenv("LAB_MONITOR_IDENTITY_SNAPSHOTS", "").strip()
+_identity_snapshots_dir = (Path(_snapshots_env) if _snapshots_env
+                           else Path(__file__).parent / "outputs" / "identity_snapshots")
+try:
+    _identity_snapshots_dir.mkdir(parents=True, exist_ok=True)
+    app.mount(IDENTITY_SNAPSHOTS_MOUNT,
+              StaticFiles(directory=_identity_snapshots_dir), name="identity-snapshots")
+except Exception:
+    logger.warning("跨相机抓拍目录不可用: %s", _identity_snapshots_dir)
+
+
+def _snapshots_out_dir() -> Path:
+    """抓拍落盘目录（调用时解析环境变量，测试可指向临时目录）。"""
+    override = os.getenv("LAB_MONITOR_IDENTITY_SNAPSHOTS", "").strip()
+    return Path(override) if override else Path(__file__).parent / "outputs" / "identity_snapshots"
+
+
+def snapshot_url(file_path: str | None) -> str | None:
+    """抓拍图的磁盘路径 → 可直接给 <img src> 的 URL（只取文件名，防路径穿越）。"""
+    if not file_path:
+        return None
+    name = PurePosixPath(str(file_path).replace("\\", "/")).name
+    return f"{IDENTITY_SNAPSHOTS_MOUNT}/{name}" if name else None
+
+
 def personnel_thumb_url(thumb_path: str | None) -> str | None:
     """
     personnel.thumb_path（磁盘路径）→ 可直接给 <img src> 的 URL。
@@ -1027,7 +1056,40 @@ from src.trajectory import (  # noqa: E402
     collapse_by_fingerprint as _collapse_by_fingerprint,
     collapse_loop_segments as _collapse_loop_segments,
     detect_loop_period as _collapse_loop_period,
+    merge_flicker_segments,
+    summarize_per_camera,
 )
+from src.snapshots import build_identity_snapshots  # noqa: E402
+
+
+def _repo_root() -> Path:
+    """仓库根目录。素材（videos/、videos_low/）与 outputs/ 都相对它定位。"""
+    return Path(__file__).parent.resolve()
+
+
+def _lowres_dir() -> Path:
+    """抓拍取帧用的低清素材目录（默认 `videos_low/`）。
+
+    在**调用时**解析环境变量而不是 import 期定常量：测试需要把它指到临时目录
+    放一段合成素材，否则用例会依赖仓库里 `videos_low/` 是否存在（该目录已 gitignore，
+    新克隆的仓库里没有）。
+    """
+    override = os.getenv("LAB_MONITOR_LOWRES_DIR", "").strip()
+    return Path(override) if override else _repo_root() / "videos_low"
+
+
+def _camera_desc_map() -> dict[str, str]:
+    """camera_id → 中文描述（来自 config/camera_map.json）。
+
+    描述是演示时最有用的信息（「L2中间走廊东东向西」一眼能对上位置），
+    读不到时返回空 dict，不阻塞抓拍生成。
+    """
+    try:
+        raw = json.loads((_repo_root() / "config" / "camera_map.json").read_text(encoding="utf-8"))
+    except (OSError, json.JSONDecodeError):
+        logger.debug("读取 camera_map.json 失败，抓拍将无中文描述", exc_info=True)
+        return {}
+    return {k: (v.get("desc") or "") for k, v in raw.items() if isinstance(v, dict)}
 
 
 def _collapse_loop_period(seq: list[str]) -> int | None:
@@ -1175,6 +1237,15 @@ async def get_identity_trajectory(
             "bbox": row["bbox"],
         })
 
+    # 视图组与每相机汇总（供「通行链」列表直接渲染）。
+    #
+    # segments 是「连续停留段」的原始形态，实测里两条走廊相机并行确认会使同一身份
+    # 在 A/B 之间每 0.2~0.5 秒交替写入一段（段时长几乎全为 0）。前端若直接连折线
+    # 会得到锯齿，因此这里再输出一层压好的视图组：一组 = 一个连续时间窗内可见到的
+    # 相机集合。语义对数据如实（"该时段内在两路相机交替可见"），不做过度归并。
+    groups, flicker_info = merge_flicker_segments(segments)
+    per_camera = summarize_per_camera(segments)
+
     payload = {
         "global_id": global_id,
         "start": start,
@@ -1185,11 +1256,61 @@ async def get_identity_trajectory(
         "truncated": truncated,
         "segment_count": len(segments),
         "segments": segments,
+        "groups": groups,
+        "per_camera": per_camera,
+        "flicker": flicker_info,
         "path": path,
         "loop": loop_info,
         "floorplan": fp.payload(camera_ids=_known_camera_ids() or None) if fp else _empty_floorplan_payload(),
     }
     return JSONResponse(payload)
+
+
+_SNAPSHOT_GID_SAFE = re.compile(r"^[A-Za-z0-9_-]{1,64}$")
+
+
+@app.get("/api/identities/{global_id}/snapshots")
+async def get_identity_snapshots(
+    global_id: str,
+    force: bool = Query(default=False, description="忽略缓存重新生成"),
+    max_cameras: int = Query(default=8, ge=1, le=22, description="最多取几路相机的抓拍"),
+):
+    """某身份在各路相机上的真实抓拍序列（「跨相机是同一人」的直观证据）。
+
+    图像由 `videos_low/` 的真实帧按 `video_ts` 解码并裁出人体框，**不含任何合成**；
+    素材本身已烧录相机名与时间，因此拼图可直接作为证据使用。
+
+    生成结果落盘并带侧车元数据，重复请求命中缓存不重新解码（解码是本链路最重的操作）。
+    走 run_in_threadpool：解码是阻塞 I/O，放在事件循环里会拖住 MJPEG 与 WS。
+
+    返回 `cameras[]` 每项含相机、中文描述、视频内秒数、墙钟时间、框、候选帧数与图片 URL。
+    注意 `rnd_21`/`rnd_22` 等**描述完全相同**的相机对属同一视点，前端展示时应说明。
+    """
+    if not _SNAPSHOT_GID_SAFE.match(global_id or ""):
+        return JSONResponse({"error": "Invalid global_id"}, status_code=400)
+
+    database = _get_database()
+    try:
+        result = await run_in_threadpool(
+            build_identity_snapshots,
+            database,
+            global_id,
+            _snapshots_out_dir(),
+            _lowres_dir(),
+            _camera_desc_map(),
+            force=force,
+            max_cameras=max_cameras,
+        )
+    except Exception:
+        logger.exception("生成跨相机抓拍失败: %s", global_id)
+        return JSONResponse({"error": "Snapshot generation failed"}, status_code=500)
+
+    for item in result.get("cameras", []):
+        item["url"] = snapshot_url(item.get("file"))
+        item.pop("file", None)
+    result["strip_url"] = snapshot_url(result.get("strip_file"))
+    result.pop("strip_file", None)
+    return JSONResponse(result)
 
 
 def _known_camera_set() -> set[str]:

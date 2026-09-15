@@ -162,7 +162,12 @@ const STATIC_IDS = ['personnel-modal', 'personnel-grid', 'personnel-pager',
   // beginModalRequest 的 isCurrent() 再依赖 active 判定 —— 缺了它
   // openIdentitySearchModal 会在 fetch 后静默 return，body 永远不渲染。
   'modal-traj-title', 'modal-traj-body', 'trajectory-modal',
-  'btn-by-image-search', 'by-image-input', 'by-image-result'];
+  'btn-by-image-search', 'by-image-input', 'by-image-result',
+  // 跨相机抓拍证据区块（modals.js loadCrossCameraEvidence 渲染的目标容器）。
+  // 桩件里 innerHTML 只是字符串，真实 DOM 里这个 div 由 showTrajectoryModal
+  // 写入；不预先注册的话 getElementById 返回 null，函数会静默 return，
+  // 面板内容永远测不到。
+  'cross-camera-panel'];
 
 const TAG_BY_ID = {
   'personnel-search-input': 'input',
@@ -772,6 +777,121 @@ await check('以图搜人失败：422 后端人话透传到界面', async () => 
   } finally {
     failNext = null;
   }
+});
+
+/**
+ * 跨相机抓拍证据（modals.js loadCrossCameraEvidence）。
+ *
+ * 这块是把「同一个人出现在多路相机」用真实画面摆出来，两个静默失败要防住：
+ *   1. 拼图 URL 拼错 → <img> 404，面板看起来"空空的"却没有任何报错
+ *   2. 描述相同的相机（rnd_21/rnd_22 都叫「L2高性能机房04通道西南向北」）不提示
+ *      → 用户会把"跨 4 路相机"误读成 4 个不同位置
+ */
+function snapshotPayload(over = {}) {
+  return {
+    global_id: 'a1b2c3d4', camera_count: 2, cached: true, skipped: {},
+    strip_url: '/identity-snapshots/a1b2c3d4_strip.jpg',
+    cameras: [
+      { camera: 'rnd_04', desc: 'L2中间走廊东东向西', video_ts: 3.8,
+        wall_time: 1789305409.9, bbox: [1, 2, 3, 4], frames: 246,
+        url: '/identity-snapshots/a1b2c3d4_rnd_04.jpg' },
+      { camera: 'rnd_22', desc: 'L2高性能机房04通道西南向北', video_ts: 21.3,
+        wall_time: 1789305410.5, bbox: [5, 6, 7, 8], frames: 58,
+        url: '/identity-snapshots/a1b2c3d4_rnd_22.jpg' },
+    ],
+    ...over,
+  };
+}
+
+function trajectoryDetailPayload(over = {}) {
+  return {
+    global_id: 'a1b2c3d4', total_appearances: 1506, last_camera: 'rnd_06',
+    trajectory: [{ camera: 'rnd_04', time_str: '17:24:53',
+                   end_time_str: '17:27:05', bbox: [1, 2, 3, 4] }],
+    ...over,
+  };
+}
+
+function trajectoryGroupsPayload() {
+  return {
+    groups: [
+      { cameras: ['rnd_04'], enter: 1789305409, exit: 1789305542,
+        duration_s: 133, frames: 269, segment_count: 1, multi_view: false },
+      { cameras: ['rnd_04', 'rnd_22'], enter: 1789305542, exit: 1789305551,
+        duration_s: 9, frames: 6, segment_count: 4, multi_view: true },
+    ],
+    per_camera: {},
+    flicker: { raw_segments: 21, groups: 2, absorbed_segments: 19,
+               multi_view_groups: 1, rounds: 3 },
+  };
+}
+
+await check('跨相机抓拍证据：拼图 + 每相机卡片 + 通行链视图组', async () => {
+  scenario = (url) => {
+    if (url.includes('/snapshots')) return snapshotPayload();
+    if (url.includes('/trajectory')) return trajectoryGroupsPayload();
+    return trajectoryDetailPayload();
+  };
+  await modals.showTrajectoryModal('a1b2c3d4');
+  await tick(40);
+  const html = els.get('cross-camera-panel').innerHTML;
+  assert.ok(html.includes('/identity-snapshots/a1b2c3d4_strip.jpg'),
+    `必须渲染服务端拼图: ${html.slice(0, 200)}`);
+  assert.ok(html.includes('RND_04') && html.includes('RND_22'), '每路相机都要列出');
+  assert.ok(html.includes('L2中间走廊东东向西'), '相机中文描述要展示');
+  assert.ok(html.includes('3.8') && html.includes('21.3'), '视频内秒数要展示');
+  assert.ok(html.includes('246') && html.includes('58'), '按相机的命中帧数要展示');
+  assert.ok(html.includes('墙钟'), '墙钟时间要与视频内时间区分开');
+  assert.ok(html.includes('2 路相机'), '要说明覆盖了几路相机');
+  // 视图组：多视角必须显式标注，否则两条相机交替会被当成"来回跑"
+  assert.ok(html.includes('多视角'), '多视角视图组必须标注');
+  assert.ok(html.includes('21 段') && html.includes('2 个视图组'),
+    `抖动合并说明缺失: ${html.slice(-300)}`);
+  assert.ok(html.includes('已合并'), '合并掉的段数要说明');
+});
+
+await check('跨相机抓拍：描述相同的相机要提示同一视点', async () => {
+  scenario = (url) => {
+    if (url.includes('/snapshots')) {
+      const base = snapshotPayload();
+      return { ...base, cameras: base.cameras.map(c => ({ ...c, desc: 'L2高性能机房04通道西南向北' })) };
+    }
+    if (url.includes('/trajectory')) return trajectoryGroupsPayload();
+    return trajectoryDetailPayload();
+  };
+  await modals.showTrajectoryModal('a1b2c3d4');
+  await tick(40);
+  const html = els.get('cross-camera-panel').innerHTML;
+  assert.ok(html.includes('同一视点'),
+    `描述重复时必须提示，否则跨相机数量会被误读: ${html.slice(0, 300)}`);
+});
+
+await check('跨相机抓拍：无抓拍时给空状态而非静默留白', async () => {
+  scenario = (url) => {
+    if (url.includes('/snapshots')) return snapshotPayload({ camera_count: 0, cameras: [], strip_url: null });
+    if (url.includes('/trajectory')) return trajectoryGroupsPayload();
+    return trajectoryDetailPayload();
+  };
+  await modals.showTrajectoryModal('a1b2c3d4');
+  await tick(40);
+  const html = els.get('cross-camera-panel').innerHTML;
+  assert.ok(html.includes('未生成跨相机抓拍'),
+    `无抓拍时必须说明原因: ${html.slice(0, 200)}`);
+});
+
+await check('跨相机抓拍：接口失败只影响该区块，不拖垮弹窗', async () => {
+  scenario = (url) => {
+    if (url.includes('/snapshots')) throw new Error('boom');
+    if (url.includes('/trajectory')) return trajectoryGroupsPayload();
+    return trajectoryDetailPayload();
+  };
+  await modals.showTrajectoryModal('a1b2c3d4');
+  await tick(40);
+  const html = els.get('cross-camera-panel').innerHTML;
+  assert.ok(html.includes('加载失败'), `失败要显式提示: ${html.slice(0, 200)}`);
+  // 主弹窗内容必须已经渲染（说明抓拍失败没有中断主流程）
+  assert.ok(els.get('modal-traj-body').innerHTML.includes('移动路线时序链'),
+    '抓拍失败不应中断主弹窗渲染');
 });
 
 console.log('');

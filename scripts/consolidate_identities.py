@@ -43,6 +43,10 @@ from src.reid_config import DEFAULT_REID_WEIGHTS, REID_MATCH_THRESHOLD, get_reid
 
 DB = ROOT / "outputs" / "lab_monitor.db"
 
+# 候选对占全部身份对的比例超过该值即判定 gallery 已塌缩，拒绝执行归并。
+# 健康的库里重复注册只应是极少数对；超过 5% 说明"几乎任意两个身份都相似"。
+_COLLAPSE_GUARD_RATIO = 0.05
+
 
 def main() -> int:
     parser = argparse.ArgumentParser(description="对正式身份库执行身份归并")
@@ -50,16 +54,15 @@ def main() -> int:
                         help=f"归并阈值（默认与线上匹配阈值一致 {REID_MATCH_THRESHOLD}）")
     parser.add_argument("--dry-run", action="store_true", help="只列出候选，不修改")
     parser.add_argument("--no-backup", action="store_true")
+    parser.add_argument(
+        "--force", action="store_true",
+        help="跳过候选占比护栏。仅在确认身份库处于塌缩状态、且已接受结果时使用",
+    )
     args = parser.parse_args()
 
     if not DB.exists():
         print(f"身份库不存在: {DB}")
         return 1
-
-    if not args.dry_run and not args.no_backup:
-        target = DB.with_name(f"{DB.name}.bak-consolidate-{time.strftime('%Y%m%d-%H%M%S')}")
-        shutil.copy2(DB, target)
-        print(f"已备份: {target}")
 
     database = Database(DB)
     weight = get_reid_weight()
@@ -67,6 +70,38 @@ def main() -> int:
     print(f"特征空间 {weight.feature_space}（权重 {weight.key}）| 归并阈值 {args.threshold}")
 
     before = len(store.all_ids())
+    candidates = store.consolidation_candidates(args.threshold)
+    pair_total = before * (before - 1) // 2
+
+    # ── 护栏：候选占比异常说明 gallery 已塌缩，归并会把它并成极少数身份 ──
+    #
+    # 背景（2026-09-15 实测）：生产库 165 个身份、13,530 对，即使把阈值提到 1.0
+    # 仍有 6,340 组候选 —— 说明大量不同身份的**中心化特征在数值上完全相同**，
+    # 特征空间对多数身份已退化。这种状态下任何阈值都会把整个库并成一团，
+    # 而归并结果毫无意义（"所有人都是同一个人"）。
+    # 健康的库里重复注册只应是极少数对，因此用"候选占全部身份对的比例"做判据。
+    ratio = len(candidates) / pair_total if pair_total else 0.0
+    if not args.dry_run and ratio > _COLLAPSE_GUARD_RATIO and not args.force:
+        print(
+            f"\n[拒绝执行] 候选 {len(candidates)} 组 / 全部身份对 {pair_total} 对 "
+            f"= {ratio:.1%}，超过护栏 {_COLLAPSE_GUARD_RATIO:.0%}。\n"
+            "这说明身份库处于**特征塌缩**状态：大量不同身份的中心化特征数值相同，\n"
+            "任何阈值下的归并都会把库并成极少数身份，结果不可用。\n"
+            "\n"
+            "这类库**无法用归并修复**，正确做法是重建（见 docs/TODO_2026-09-12_worklist.md 项 1.5），\n"
+            "并同时解决重复注册的成因。\n"
+            "\n"
+            "若要查看候选明细：加 --dry-run。\n"
+            "若确实要强行归并：加 --force（会先备份，后果自负）。",
+        )
+        database.close()
+        return 2
+
+    if not args.dry_run and not args.no_backup:
+        target = DB.with_name(f"{DB.name}.bak-consolidate-{time.strftime('%Y%m%d-%H%M%S')}")
+        shutil.copy2(DB, target)
+        print(f"已备份: {target}")
+
     result = store.consolidate(threshold=args.threshold, dry_run=args.dry_run)
     store.flush()
     database.close()

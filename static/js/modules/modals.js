@@ -244,6 +244,10 @@ export async function showTrajectoryModal(global_id) {
 
       ${window.__bindHtml || ''}
 
+      <div id="cross-camera-panel" style="margin: 12px 0;">
+        <div class="empty-state" style="padding: 8px;">加载跨相机抓拍证据中...</div>
+      </div>
+
       <div style="font-size: 12px; font-weight: 700; color: var(--text-muted);">📍 移动路线时序链:</div>
       <div class="timeline">
         ${nodesHtml}
@@ -260,6 +264,8 @@ export async function showTrajectoryModal(global_id) {
     if (searchBtn) {
       searchBtn.addEventListener('click', () => searchPersonVideos(global_id, searchBtn));
     }
+    // 跨相机抓拍证据：与主弹窗并行加载，失败只影响本区块，不拖垮整个弹窗
+    loadCrossCameraEvidence(global_id, request);
     const bindBtn = document.getElementById('btn-bind-name');
     const nameInput = document.getElementById('bind-name-input');
     if (bindBtn && nameInput) {
@@ -299,6 +305,136 @@ export async function showTrajectoryModal(global_id) {
     if (!request.isCurrent()) return;
     body.innerHTML = `<div class="empty-state">获取轨迹失败: ${e.message}</div>`;
   }
+}
+
+/**
+ * 跨相机抓拍证据面板。
+ *
+ * 灵感来源：把「同一个人出现在多路相机」直接用**真实画面**摆出来，比任何折线图
+ * 都更容易被接受 —— 素材本身烧录了相机名与时间，图不含任何合成成分。
+ *
+ * 两个数据源：
+ *   GET /api/identities/{gid}/snapshots  各路相机的代表帧（服务端已缓存，不重复解码）
+ *   GET /api/identities/{gid}/trajectory 视图组（通行链）与每相机驻留汇总
+ *
+ * 关于「视图组」：原始 segments 是「连续停留段」，两条走廊相机并行确认会让同一身份
+ * 在 A/B 之间每 0.2~0.5 秒交替写一段。后端已把它们压成视图组（一组 = 一个连续
+ * 时间窗内可见到的相机集合），前端直接展示即可，不要自己再连折线。
+ *
+ * @param {string} global_id
+ * @param {{signal: AbortSignal, isCurrent: () => boolean}} request 弹窗请求令牌，
+ *        弹窗被关掉/切换后据此放弃渲染，避免把已废弃的内容写进 DOM。
+ */
+async function loadCrossCameraEvidence(global_id, request) {
+  const panel = document.getElementById('cross-camera-panel');
+  if (!panel) return;
+  const gid = encodeURIComponent(global_id);
+
+  try {
+    const [snaps, traj] = await Promise.all([
+      fetchJson(`/api/identities/${gid}/snapshots`, { signal: request.signal }),
+      fetchJson(`/api/identities/${gid}/trajectory?max_points=200`, { signal: request.signal })
+        .catch(() => null),
+    ]);
+    if (!request.isCurrent()) return;
+
+    const cams = snaps.cameras || [];
+    if (cams.length === 0) {
+      panel.innerHTML = `
+        <div class="empty-state" style="padding: 8px;">
+          未生成跨相机抓拍（可能只有单一机位，或低清素材缺失）
+        </div>`;
+      return;
+    }
+
+    // 描述完全相同的相机对（如 rnd_21/rnd_22 都叫「L2高性能机房04通道西南向北」）
+    // 属同一视点，需提示用户，否则「跨 4 路相机」会被误读成 4 个不同位置。
+    const descCount = {};
+    cams.forEach((c) => { descCount[c.desc] = (descCount[c.desc] || 0) + 1; });
+    const dupDesc = cams.some((c) => descCount[c.desc] > 1);
+
+    const strip = snaps.strip_url
+      ? `<img src="${escapeHtml(snaps.strip_url)}" alt="跨相机抓拍对比"
+              style="width: 100%; border-radius: 8px; border: 1px solid var(--border-color); display: block;" />`
+      : '';
+
+    const cards = cams.map((c) => {
+      const wall = c.wall_time
+        ? new Date(c.wall_time * 1000).toLocaleTimeString('zh-CN', { hour12: false })
+        : '—';
+      return `
+        <div class="meta-card" style="padding: 6px 8px;">
+          <div class="label">${escapeHtml(String(c.camera).toUpperCase())}</div>
+          <div style="font-size: 11px; color: var(--text-muted); margin: 2px 0;">
+            ${escapeHtml(c.desc || '—')}
+          </div>
+          <div style="font-size: 11px;">
+            视频内 <b>${Number(c.video_ts).toFixed(1)}s</b> ／ 墙钟 ${escapeHtml(wall)}
+          </div>
+          <div style="font-size: 11px; color: var(--text-muted);">命中 ${escapeHtml(c.frames)} 帧</div>
+        </div>`;
+    }).join('');
+
+    const groups = (traj && traj.groups) || [];
+    const chainHtml = groups.length
+      ? groups.slice(0, 12).map((g, i) => {
+        const camsLabel = (g.cameras || []).map((x) => String(x).toUpperCase()).join(' + ');
+        const t0 = fmtClock(g.enter);
+        const t1 = fmtClock(g.exit);
+        return `
+          <div class="timeline-node">
+            <div class="timeline-dot"${g.multi_view ? ' style="background: var(--warning, #d97706);"' : ''}></div>
+            <div class="timeline-content">
+              <div class="timeline-header">
+                <span class="timeline-cam">${i + 1}. ${escapeHtml(camsLabel)}${g.multi_view ? ' （多视角）' : ''}</span>
+                <span class="timeline-time">${escapeHtml(t0)} ➔ ${escapeHtml(t1)} ／ 驻留 ${Math.round(g.duration_s)}s</span>
+              </div>
+              <div style="font-size: 11px; color: var(--text-muted);">
+                该时段命中 ${escapeHtml(g.frames)} 帧${g.segment_count > 1 ? `，原始 ${escapeHtml(g.segment_count)} 段（已合并）` : ''}
+              </div>
+            </div>
+          </div>`;
+      }).join('')
+      : '<div class="empty-state" style="padding: 6px;">无视图组数据</div>';
+
+    const flicker = (traj && traj.flicker) || null;
+    const flickerNote = flicker && flicker.absorbed_segments > 0
+      ? `<div style="font-size: 11px; color: var(--text-muted); margin-bottom: 6px;">
+           原始 ${escapeHtml(flicker.raw_segments)} 段 → ${escapeHtml(flicker.groups)} 个视图组
+           （合并 ${escapeHtml(flicker.absorbed_segments)} 段：循环素材与多相机并行确认造成的交替）
+         </div>`
+      : '';
+
+    panel.innerHTML = `
+      <div style="font-size: 12px; font-weight: 700; color: var(--text-muted); margin-bottom: 6px;">
+        📸 跨相机抓拍证据（${escapeHtml(cams.length)} 路相机）
+      </div>
+      ${strip}
+      <div style="display: grid; grid-template-columns: repeat(auto-fill, minmax(150px, 1fr));
+                  gap: 8px; margin-top: 10px;">
+        ${cards}
+      </div>
+      ${dupDesc ? `<div style="font-size: 11px; color: var(--warning, #d97706); margin-top: 6px;">
+        提示：存在描述相同的相机（同一视点），实际覆盖位置少于相机数量。</div>` : ''}
+      <div style="font-size: 12px; font-weight: 700; color: var(--text-muted);
+                  margin: 12px 0 4px;">🧭 通行链（视图组）</div>
+      ${flickerNote}
+      <div class="timeline">${chainHtml}</div>
+    `;
+  } catch (e) {
+    if (!request.isCurrent()) return;
+    panel.innerHTML = `
+      <div class="empty-state" style="padding: 8px;">
+        跨相机抓拍加载失败：${escapeHtml(e.message)}
+      </div>`;
+  }
+}
+
+/** Unix 秒 → HH:MM:SS（本地时区）。 */
+function fmtClock(ts) {
+  const n = Number(ts);
+  if (!Number.isFinite(n) || n <= 0) return '—';
+  return new Date(n * 1000).toLocaleTimeString('zh-CN', { hour12: false });
 }
 
 /**

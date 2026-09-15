@@ -1221,6 +1221,87 @@ class Database:
             })
         return int(total), appearances
 
+    def top_appearances_by_area(
+        self,
+        global_id: str,
+        limit: int = 200,
+        camera_id: str | None = None,
+    ) -> list[dict]:
+        """取某身份「人体框面积最大」的若干条出现记录（跨相机的抓拍选样用）。
+
+        为什么在 SQL 里排序而不是取回 Python 再排：单个身份的轨迹可达 14 万行
+        （见 query_trajectory 的说明），全读进内存只为挑几张图不划算。
+        面积用 json_extract 在库内计算，只返回前 limit 行。
+
+        返回项：camera / time / bbox / video_ts / area。
+        注意 `video_ts`（视频内秒数）才是回放定位用的时间轴；
+        `time`（墙钟）只用于展示与排序。
+        """
+        limit = max(1, min(int(limit), 2000))
+        with self._get_conn() as conn:
+            rows = conn.execute(
+                """
+                SELECT camera_id, timestamp, bbox_json, video_ts,
+                       (json_extract(bbox_json, '$[2]') - json_extract(bbox_json, '$[0]')) *
+                       (json_extract(bbox_json, '$[3]') - json_extract(bbox_json, '$[1]')) AS area
+                FROM identity_appearances
+                WHERE global_id = ?
+                  AND (? IS NULL OR camera_id = ?)
+                  AND video_ts IS NOT NULL
+                  AND bbox_json IS NOT NULL
+                ORDER BY area DESC, id ASC
+                LIMIT ?
+                """,
+                (global_id, camera_id, camera_id, limit),
+            ).fetchall()
+        out = []
+        for row in rows:
+            try:
+                bbox = json.loads(row["bbox_json"] or "[]")
+            except json.JSONDecodeError:
+                continue
+            if len(bbox) < 4:
+                continue
+            out.append({
+                "camera": row["camera_id"],
+                "time": row["timestamp"],
+                "bbox": [float(v) for v in bbox[:4]],
+                "video_ts": row["video_ts"],
+                "area": row["area"],
+            })
+        return out
+
+    def identity_cameras(self, global_id: str) -> list[dict]:
+        """列出某身份出现过的相机及其时间范围（轻量，供抓拍选样与通行链用）。
+
+        不做 bbox 排序，只走索引的 GROUP BY；抓拍选样再按相机逐个取最大框 ——
+        不能反过来「全局取前 N 大框再分组」，那样小框相机（远距离机位）会被
+        大框相机挤掉，表现为「该身份明明跨 4 路相机却只出 2 路图」。
+        """
+        with self._get_conn() as conn:
+            rows = conn.execute(
+                """
+                SELECT camera_id,
+                       MIN(timestamp) AS first_time,
+                       MAX(timestamp) AS last_time,
+                       COUNT(*)       AS frames
+                FROM identity_appearances
+                WHERE global_id = ?
+                GROUP BY camera_id
+                ORDER BY first_time
+                """,
+                (global_id,),
+            ).fetchall()
+        return [
+            {
+                "camera": row["camera_id"],
+                "first_time": row["first_time"],
+                "last_time": row["last_time"],
+                "frames": row["frames"],
+            }
+            for row in rows
+        ]
+
     def gids_for_person(self, person_id: str) -> list[str]:
         """
         某档案名下全部匿名身份的 global_id（P1-1 按档案检索的入口）。
