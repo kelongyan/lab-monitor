@@ -21,9 +21,8 @@ dist/
 videos/*
 !videos/.gitkeep
 
-# Output Logs, Screenshots & Cache
+# Output Logs, Screenshots & Cache（outputs/ 已整体本地化，无需 .gitkeep）
 outputs/*
-!outputs/.gitkeep
 *.log
 *.jsonl
 
@@ -62,10 +61,10 @@ config/sources_high.json
 #   docs/**   匹配子目录（docs/images）
 #   docs/**/* 匹配子目录里的文件（docs/images/foo.png）
 # docs/** 单写只匹配目录不匹配文件，必须配合其他两条
+# docs/ 已整体本地化，无需 .gitkeep 反转
 docs/*
 docs/**
 docs/**/*
-!docs/.gitkeep
 
 # Agent 规划草稿（中间产物，本地保留不入库）
 .plans/
