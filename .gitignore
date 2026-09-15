@@ -66,3 +66,9 @@ docs/*
 docs/**
 docs/**/*
 !docs/.gitkeep
+
+# Agent 规划草稿（中间产物，本地保留不入库）
+.plans/
+
+# 自动标注对实验数据（需重新标注时可再生成）
+config/labeled/pairs.json
