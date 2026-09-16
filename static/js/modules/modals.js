@@ -5,6 +5,7 @@ import { BASE, fetchJson, showToast } from '../utils/api.js';
 import { escapeHtml, escapeAttr } from '../utils/formatter.js';
 import { getCachedCameras } from './grid.js';
 import { BLANK_IMAGE, setStreamsSuspended } from './stream_manager.js';
+import { buildSiteGraph, renderTrajGraph, destroyTrajGraph } from './traj_graph.js';
 
 const SVG_NS = 'http://www.w3.org/2000/svg';
 const modalRequests = new Map();
@@ -95,6 +96,10 @@ export function closeModal(id) {
     // 而且不保证立刻中止 multipart 长连接。
     if (img.src.includes('/stream/')) img.src = BLANK_IMAGE;
   });
+  // 轨迹路线图有自己的播放定时器与 hover 监听，必须显式销毁，
+  // 否则反复开关弹窗会累积定时器（与 MJPEG 流需显式释放同源）。
+  const graphPanel = el.querySelector('#traj-graph-panel');
+  if (graphPanel) destroyTrajGraph(graphPanel);
   syncModalStreamSuspend(id, false);
   el.dispatchEvent(new CustomEvent('modal:closed'));
   const opener = modalOpeners.get(id);
@@ -248,6 +253,10 @@ export async function showTrajectoryModal(global_id) {
         <div class="empty-state" style="padding: 8px;">加载跨相机抓拍证据中...</div>
       </div>
 
+      <div id="traj-graph-panel" style="margin: 12px 0;">
+        <div class="empty-state" style="padding: 8px;">加载轨迹路线图中...</div>
+      </div>
+
       <div style="font-size: 12px; font-weight: 700; color: var(--text-muted);">📍 移动路线时序链:</div>
       <div class="timeline">
         ${nodesHtml}
@@ -266,6 +275,8 @@ export async function showTrajectoryModal(global_id) {
     }
     // 跨相机抓拍证据：与主弹窗并行加载，失败只影响本区块，不拖垮整个弹窗
     loadCrossCameraEvidence(global_id, request);
+    // 轨迹路线图（图形化）：同样并行加载，与抓拍证据、文字时间轴三者互相独立
+    loadTrajGraph(global_id, request);
     const bindBtn = document.getElementById('btn-bind-name');
     const nameInput = document.getElementById('bind-name-input');
     if (bindBtn && nameInput) {
@@ -381,8 +392,10 @@ async function loadCrossCameraEvidence(global_id, request) {
         const camsLabel = (g.cameras || []).map((x) => String(x).toUpperCase()).join(' + ');
         const t0 = fmtClock(g.enter);
         const t1 = fmtClock(g.exit);
+        // data-tg-cams 供路线图节点点击时反查联动（见 highlightChainForSite）
+        const camsAttr = escapeAttr((g.cameras || []).join(','));
         return `
-          <div class="timeline-node">
+          <div class="timeline-node" data-tg-cams="${camsAttr}">
             <div class="timeline-dot"${g.multi_view ? ' style="background: var(--warning, #d97706);"' : ''}></div>
             <div class="timeline-content">
               <div class="timeline-header">
@@ -427,6 +440,73 @@ async function loadCrossCameraEvidence(global_id, request) {
       <div class="empty-state" style="padding: 8px;">
         跨相机抓拍加载失败：${escapeHtml(e.message)}
       </div>`;
+  }
+}
+
+/**
+ * 轨迹路线图（图形化视图）：把该身份走过的摄像头画成「站点图」。
+ *
+ * 与 loadCrossCameraEvidence 的分工：
+ *   - 抓拍证据 → 「同一个人确实出现在这些相机」的真实画面证据
+ *   - 路线图   → 「这些位置之间的空间关系与走法」的结构化表达
+ * 两者吃同一个 /trajectory 响应但关注字段不同：前者看 snapshots，后者看
+ * groups（视图组）+ floorplan（相机点位）。
+ *
+ * **必须用 groups 而不是原始 segments**：两条走廊相机并行确认会让同一身份在
+ * A/B 之间每 0.2~0.5 秒交替写一段，直接连折线会得到锯齿（后端已压成视图组）。
+ */
+async function loadTrajGraph(global_id, request) {
+  const panel = document.getElementById('traj-graph-panel');
+  if (!panel) return;
+  const gid = encodeURIComponent(global_id);
+
+  try {
+    const [traj, topology] = await Promise.all([
+      fetchJson(
+        `/api/identities/${gid}/trajectory?collapse_loops=true&max_points=500`,
+        { signal: request.signal },
+      ),
+      fetchJson('/api/topology', { signal: request.signal }),
+    ]);
+    if (!request.isCurrent()) return;
+
+    const graph = buildSiteGraph(traj.floorplan, topology, traj.groups);
+    if (!graph.sites.length) {
+      panel.innerHTML = `<div class="empty-state" style="padding: 8px;">
+        暂无可绘制的站点（摄像头点位表为空）</div>`;
+      return;
+    }
+    renderTrajGraph(panel, graph, {
+      loop: traj.loop,
+      onNodeClick: (site) => highlightChainForSite(site),
+    });
+  } catch (e) {
+    if (!request.isCurrent()) return;
+    panel.innerHTML = `<div class="empty-state" style="padding: 8px;">
+      轨迹路线图加载失败：${escapeHtml(e.message)}</div>`;
+  }
+}
+
+/**
+ * 点击路线图节点 → 高亮「通行链」里所有包含该站点相机的条目并滚动到位。
+ * 这是图与文字时间轴的联动：图上看「在哪」，时间轴上看「什么时候」。
+ */
+function highlightChainForSite(site) {
+  const nodes = document.querySelectorAll('#cross-camera-panel .timeline-node');
+  if (!nodes.length) return;
+  const wanted = new Set((site.cameras || []).map((c) => String(c).toLowerCase()));
+  let first = null;
+  nodes.forEach((node) => {
+    const raw = node.getAttribute('data-tg-cams') || '';
+    const hit = raw
+      .split(',')
+      .map((s) => s.trim().toLowerCase())
+      .some((c) => wanted.has(c));
+    node.classList.toggle('tg-linked', hit);
+    if (hit && !first) first = node;
+  });
+  if (first && typeof first.scrollIntoView === 'function') {
+    first.scrollIntoView({ block: 'nearest', behavior: 'smooth' });
   }
 }
 

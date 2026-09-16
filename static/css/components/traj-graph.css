@@ -1,0 +1,248 @@
+/* ==================================================================
+   轨迹路线图（人员跨站点通行图）
+   ------------------------------------------------------------------
+   颜色一律取 variables.css 的自定义属性：硬编码 hex 会让 light 主题失效
+   （项目前端硬约定）。节点底色用 --bg-card、画布底色用 --bg-base，
+   两级底色在明暗两套主题下都能形成层次。
+   ================================================================== */
+
+.tg-head {
+  display: flex;
+  align-items: baseline;
+  justify-content: space-between;
+  gap: 10px;
+  flex-wrap: wrap;
+  margin-bottom: 6px;
+}
+
+.tg-title {
+  font-size: 12px;
+  font-weight: 700;
+  color: var(--text-muted);
+}
+
+.tg-stat {
+  font-size: 11px;
+  color: var(--text-dim);
+}
+
+.tg-loop-note {
+  margin-bottom: 8px;
+  padding: 5px 8px;
+  border-radius: 6px;
+  border: 1px solid var(--warning-glow);
+  background: var(--warning-glow);
+  color: var(--warning);
+  font-size: 11px;
+  line-height: 1.5;
+}
+
+.tg-stage {
+  position: relative;
+  border: 1px solid var(--border-card);
+  border-radius: 10px;
+  background: var(--bg-base);
+  padding: 4px;
+  overflow: hidden;
+}
+
+.tg-svg {
+  display: block;
+  width: 100%;
+  height: auto;
+  max-height: 520px;
+}
+
+/* ---------------- 节点 ---------------- */
+
+.tg-node {
+  cursor: pointer;
+  outline: none;
+}
+
+.tg-node rect {
+  fill: var(--bg-card);
+  stroke: var(--border-card);
+  stroke-width: 1;
+  transition: stroke 0.15s ease, fill 0.15s ease;
+}
+
+.tg-node .tg-node-region {
+  fill: var(--text-muted);
+  font-size: 11px;
+  font-family: inherit;
+}
+
+.tg-node .tg-node-cams {
+  fill: var(--text-main);
+  font-size: 12px;
+  font-weight: 500;
+  font-family: ui-monospace, SFMono-Regular, Menlo, Consolas, monospace;
+}
+
+.tg-node.tg-visited rect {
+  stroke: var(--primary);
+  stroke-width: 2;
+}
+
+.tg-node.tg-current rect {
+  stroke: var(--warning);
+  stroke-width: 2;
+  fill: var(--bg-card-hover);
+}
+
+/* 未经过的站点：虚线描边 + 中灰描边色，既不抢视线又能看出「拓扑可达但没去过」。
+   描边必须用 --text-dim 而不是 --border-card：后者在 light 主题下是极浅的
+   rgba(203,213,225,.9)，配白底节点几乎看不见（实测截图确认）。 */
+.tg-node.tg-unvisited rect {
+  opacity: 0.8;
+  stroke: var(--text-dim);
+  stroke-dasharray: 5 4;
+}
+
+.tg-node.tg-unvisited .tg-node-cams {
+  fill: var(--text-muted);
+}
+
+.tg-node:hover rect,
+.tg-node:focus-visible rect {
+  stroke: var(--primary-light);
+  fill: var(--bg-card-hover);
+}
+
+/* 播放动线时把尚未到达的站点压暗，视线集中到当前进度 */
+.tg-node.tg-dim {
+  opacity: 0.16;
+}
+
+/* ---------------- 边 ---------------- */
+
+.tg-edge {
+  fill: none;
+  stroke-linejoin: round;
+  stroke-linecap: round;
+}
+
+.tg-edge.tg-idle {
+  stroke: var(--text-dim);
+  stroke-width: 1;
+  opacity: 0.25;
+}
+
+.tg-edge.tg-traversed {
+  stroke: var(--primary);
+  stroke-width: 2;
+}
+
+.tg-edge.tg-traversed.tg-flowing {
+  stroke: var(--primary-light);
+  stroke-dasharray: 10 8;
+  animation: tg-flow 1.4s linear infinite;
+}
+
+.tg-edge-label {
+  fill: var(--text-dim);
+  font-size: 11px;
+  font-family: inherit;
+}
+
+@keyframes tg-flow {
+  to {
+    stroke-dashoffset: -36;
+  }
+}
+
+@media (prefers-reduced-motion: reduce) {
+  .tg-edge.tg-traversed.tg-flowing {
+    animation: none;
+  }
+}
+
+/* ---------------- 悬浮提示 ---------------- */
+
+.tg-tip {
+  position: absolute;
+  z-index: 5;
+  min-width: 168px;
+  max-width: 230px;
+  padding: 7px 9px;
+  border-radius: 8px;
+  border: 1px solid var(--border-card-glow);
+  background: var(--bg-card-hover);
+  box-shadow: 0 6px 18px rgba(0, 0, 0, 0.25);
+  pointer-events: none;
+}
+
+.tg-tip-row {
+  display: flex;
+  justify-content: space-between;
+  gap: 10px;
+  font-size: 11px;
+  line-height: 1.7;
+  color: var(--text-muted);
+}
+
+.tg-tip-row b {
+  color: var(--text-main);
+  font-weight: 500;
+  font-family: ui-monospace, SFMono-Regular, Menlo, Consolas, monospace;
+}
+
+/* ---------------- 控制条与提示 ---------------- */
+
+.tg-controls {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  flex-wrap: wrap;
+  margin-top: 8px;
+}
+
+.tg-btn {
+  font-size: 12px;
+  padding: 5px 10px;
+}
+
+.tg-progress {
+  font-size: 11px;
+  color: var(--text-dim);
+}
+
+.tg-hint {
+  margin-top: 6px;
+  font-size: 11px;
+  color: var(--text-dim);
+  line-height: 1.6;
+}
+
+/* ---------------- 与「通行链」文字时间轴的联动 ----------------
+   点击路线图节点后，通行链里包含该站点的条目会被打上 tg-linked，
+   让「图上的位置」与「时间轴上的时刻」对上号。 */
+
+.timeline-node.tg-linked {
+  background: var(--primary-glow);
+  border-radius: 6px;
+  box-shadow: inset 3px 0 0 0 var(--primary);
+}
+
+.timeline-node.tg-linked .timeline-cam {
+  color: var(--primary-light);
+}
+
+/* ---------------- 浅色主题补充 ---------------- */
+
+/* 白底上 --bg-base(#f1f5f9) 与节点 --bg-card(#fff) 只差一点，
+   给画布加一层更明确的衬底才分得出边界 */
+html[data-theme="light"] .tg-stage {
+  background: #e5eaf1;
+}
+
+html[data-theme="light"] .tg-tip {
+  box-shadow: 0 6px 18px rgba(15, 23, 42, 0.12);
+}
+
+/* 「未经过的边」在浅色下要抬一点不透明度：深色主题靠亮底承托 0.25 尚可读，
+   浅色下 0.25 的灰线配灰底几乎消失，会丢掉「拓扑可达」这条信息 */
+html[data-theme="light"] .tg-edge.tg-idle {
+  opacity: 0.55;
+}
