@@ -146,11 +146,44 @@ class GalleryDedupTests(unittest.TestCase):
         self.assertAlmostEqual(detail.best_sim, 1.0, places=5)
 
     def test_two_identities_with_similar_features_still_blocked(self):
-        """去重不能削弱既有语义：真的是两个身份且过于相似时仍须拒绝归并。"""
+        """去重不能削弱既有语义：真的是两个身份且过于相似时仍须拒绝归并。
+
+        ⚠️ 2026-10-07：构造的相似度必须落在旁路门限**之下**（< 0.95），
+        否则触发 Ratio Test 高相似旁路（见下一条用例）。
+        """
         query = unit(1, 0, 0, 0)
         gallery = [
-            ("gid-a", unit(1, 0.02, 0, 0)),
-            ("gid-b", unit(1, 0.03, 0, 0)),
+            ("gid-a", unit(0.8, 0.6, 0, 0)),   # sim(query) = 0.8
+            ("gid-b", unit(0.79, 0.6, 0, 0)),  # sim(query) ≈ 0.79 → ratio ≈ 0.99
+        ]
+        detail = match_feature_detailed(query, gallery)
+        self.assertIsNone(detail.matched_id)
+        self.assertTrue(detail.is_ratio_blocked)
+
+    def test_duplicate_identities_above_bypass_are_matched(self):
+        """两个候选同时 ≥ REID_RATIO_BYPASS_SIMILARITY（默认 0.95）时必须匹配最佳值。
+
+        这是身份库死亡螺旋的修复（2026-10-07）：重复身份彼此相似度 ≈1.0 时，
+        Ratio Test 的 second/best ≈ 1.0 必然判歧义 → track 永远拿不到身份、
+        旧重复身份永远无法回收。此时"两个候选"只可能是同一人的重复注册，
+        匹配任意一个都是正确决策。安全性依据标定集：异人对 p95 只有 0.671。
+        """
+        query = unit(1, 0, 0, 0)
+        gallery = [
+            ("gid-a", unit(1, 0.02, 0, 0)),   # sim(query) ≈ 0.99980
+            ("gid-b", unit(1, 0.03, 0, 0)),   # sim(query) ≈ 0.99955
+        ]
+        detail = match_feature_detailed(query, gallery)
+        self.assertEqual("gid-a", detail.matched_id)
+        self.assertFalse(detail.is_ratio_blocked,
+                         "≥0.95 的歧义不是'谨慎'而是死亡螺旋")
+
+    def test_bypass_boundary_just_below_is_still_blocked(self):
+        """边界锁定：best = 0.94（< 0.95 门限）且 second贴近时仍须判歧义。"""
+        query = unit(1, 0, 0, 0)
+        gallery = [
+            ("gid-a", unit(0.94, 0.34, 0, 0)),   # sim(query) = 0.94
+            ("gid-b", unit(0.92, 0.38, 0, 0)),   # sim(query) ≈ 0.92
         ]
         detail = match_feature_detailed(query, gallery)
         self.assertIsNone(detail.matched_id)
@@ -167,6 +200,56 @@ class GalleryDedupTests(unittest.TestCase):
 
 class FeatureBankRescueTests(unittest.TestCase):
     """3. feature_bank（原始特征）必须能救回主特征匹配不到的查询。"""
+
+    def test_bank_rescues_reacquisition_at_unseen_position(self):
+        """
+        生产失效场景的回归（2026-10-07 修复 _BANK_MIN_QUALITY）：
+
+        一个人沿走廊行走，轨迹不同位置的特征 raw 相似度只有 0.5~0.6（实测），
+        而旧的质量门限（q > 0.6）只放行近相机位置的特征入库 —— 远位置
+        永远无 bank 覆盖 → track 断裂重新获取时判"新人"→ 重复注册
+        （rnd_04 一路 115 个身份的来源）。
+
+        本用例构造同一人的两个"位置"特征（正交），先以高质量观测位置 A，
+        再以**低质量**（q=0.05，旧门限下被拒）观测位置 B，然后模拟重新
+        获取：register_if_new(位置 B) 必须命中同一身份，而不是新建。
+        """
+        position_a = unit(1, 0, 0, 0)   # 近相机位置（高质量）
+        position_b = unit(0, 1, 0, 0)   # 远位置（低质量，q=0.05）
+        with temporary_store() as store:
+            gid = store.register(position_a)
+            # 低质量的位置 B 观测：旧代码 q>0.6 会拒绝入库 → bank 无覆盖
+            store.update_appearance(gid, "cam_a", position_b, [0, 0, 30, 15],
+                                    quality_score=0.05)
+            record = store.get(gid)
+            self.assertGreaterEqual(
+                len(record.feature_bank), 2,
+                "低质量但姿态不同的特征必须进入 bank —— 这是远位置重新获取"
+                "唯一的匹配来源（旧 q>0.6 门限正是重复注册的根因）",
+            )
+
+            # 模拟 track 断裂后重新获取：对位置 B 的特征重新注册
+            resolution = store.register_if_new(position_b)
+            self.assertEqual(
+                "matched", resolution.status,
+                "远位置重新获取必须命中同一身份，不允许重复注册",
+            )
+            self.assertEqual(gid, resolution.global_id)
+            self.assertEqual(1, len(store.all_ids()))
+
+    def test_degenerate_quality_feature_rejected_by_bank(self):
+        """质量低于退化门限（0.02）的裁剪不应入库 —— 那是噪声，不是姿态。"""
+        main = unit(1, 0, 0, 0)
+        degenerate = unit(0, 1, 0, 0)
+        with temporary_store() as store:
+            gid = store.register(main)
+            store.update_appearance(gid, "cam_a", degenerate, [0, 0, 5, 3],
+                                    quality_score=0.005)
+            bank = store.get(gid).feature_bank
+            self.assertEqual(
+                1, len(bank),
+                "退化级质量（q=0.005）的特征不得进入 bank",
+            )
 
     def test_bank_row_matches_when_main_feature_has_drifted(self):
         """
@@ -240,12 +323,22 @@ class CollapseGuardrailTests(unittest.TestCase):
             store.register(near_identical / np.linalg.norm(near_identical))
 
     def test_guardrail_counts_and_exposes_collapse_warning(self):
+        """塌缩护栏：在 Ratio 旁路被关闭时仍须告警并可观测。
+
+        ⚠️ 2026-10-07：默认路径下高相似查询会走旁路**匹配**（见
+        test_duplicate_identities_above_bypass_are_matched），不再经过
+        ambiguous 分支；护栏因此只在显式关闭旁路
+        （LAB_MONITOR_RATIO_BYPASS_SIM≥1.0）时可达。保留它是为了
+        "环境变量回退到旧行为"时仍有可观测性。
+        """
+        from unittest import mock
         with temporary_store() as store:
             self._force_collapsed_identities(store, count=3)
             before = len(store.all_ids())
 
-            # 与所有已存在身份几乎完全一致 → Ratio Test 会判歧义
-            resolution = store.register_if_new(unit(1, 0, 0, 0))
+            # 与所有已存在身份几乎完全一致 → 关闭旁路后 Ratio Test 判歧义
+            with mock.patch("src.reid.REID_RATIO_BYPASS_SIMILARITY", 1.0):
+                resolution = store.register_if_new(unit(1, 0, 0, 0))
 
             self.assertEqual(resolution.status, "ambiguous")
             self.assertGreaterEqual(
@@ -326,13 +419,22 @@ class CommonComponentCenteringTests(unittest.TestCase):
             self.assertTrue(metrics["center_enabled"], "身份足够时应启用中心化")
             self.assertGreater(metrics["center_norm"], 0.35)
 
-            # 对照：不中心化时所有身份余弦都 ~0.99，Ratio Test 必然判歧义
-            raw_detail = match_feature_detailed(query, store.get_gallery())
-            self.assertIsNone(raw_detail.matched_id)
-            self.assertTrue(
-                raw_detail.is_ratio_blocked,
-                "未中心化时应当因歧义而被拒绝 —— 这正是线上'永远认不出'的成因",
-            )
+            # 对照（独立小库）：未中心化时，共享**中等**公共分量（0.65，
+            # 彼此 raw ≈ 0.78）的家族"新成员"会被 Ratio Test 判歧义 ——
+            # 这正是线上"永远认不出"的成因。注意：旁路门限 0.95 之上的
+            # 查询现在会直接匹配（重复身份修复），所以对照必须用 best 落在
+            # 门限之下的新成员才能复现歧义路径。
+            family = self._shared_component_features(9, common=0.65)
+            with temporary_store() as raw_store:
+                for feature in family[:8]:
+                    raw_store.register(feature)
+                newcomer = family[8]  # 同一基构造的家族新成员，与已注册成员 raw ≈ 0.78
+                raw_detail = match_feature_detailed(newcomer, raw_store.get_gallery())
+                self.assertIsNone(raw_detail.matched_id)
+                self.assertTrue(
+                    raw_detail.is_ratio_blocked,
+                    "未中心化时应当因歧义而被拒绝 —— 这正是线上'永远认不出'的成因",
+                )
 
             # 中心化后应当命中正确身份。注意 query 必须用 context.prepare 变换，
             # 与 gallery 用同一个中心 —— 这是 MatchContext 存在的意义。

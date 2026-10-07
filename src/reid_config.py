@@ -82,6 +82,22 @@ REID_MATCH_THRESHOLD: float = _env_unit_float(
 )
 REID_RATIO_TEST: float = _env_unit_float("LAB_MONITOR_REID_RATIO", _DEFAULT_RATIO)
 
+# 高相似度 Ratio Test 旁路门限（2026-10-07 新增，重复注册死亡螺旋的修复）。
+# ---------------------------------------------------------------------------
+# 背景（已实测证实）：一旦库里累积了同一人的重复身份，它们的存储特征彼此
+# 相似度 ≈1.0，任何新观测的 best 与 second 会同时 ≈1.0，Ratio Test
+# （second/best > 0.85）必然判"歧义"→ 返回 ambiguous → 该 track **永远拿不到
+# 身份**（生产库实测 rnd_04 上出现过连续 17 分钟无身份的死区）。而"两个身份
+# 同时 ≥0.95"恰恰意味着它们是同一人的重复注册，此时任意选一个都是对的。
+#
+# 安全性：标定集（scripts/tune_reid_threshold.py）里异人对 p95 = 0.671、
+# 误报率 ≤5% 约束下选出的阈值才 0.68；异人分布的尾部不会到 0.95 —— 能到
+# 0.95 的只可能是同人（含重复注册）。设为 ≥1.0 等价于关闭旁路（回退旧行为）。
+_DEFAULT_RATIO_BYPASS = 0.95
+REID_RATIO_BYPASS_SIMILARITY: float = _env_unit_float(
+    "LAB_MONITOR_RATIO_BYPASS_SIM", _DEFAULT_RATIO_BYPASS
+)
+
 # 底库（注册照 1:N 自动命名）阈值，默认与实时匹配一致 —— 见 src/personnel.py 的说明：
 # 底库特征来自标准注册照，质量高于抓拍，理论上可以用更严的阈值，但**尚未单独标定**，
 # 所以先与实时阈值同值，等注册照留出集做出来再分开。**不要**在 personnel.py 里写死数字。

@@ -11,7 +11,7 @@ test_feature_aggregation.py — 主特征聚合策略（2026-09-13 新增，work
 单次观测权重仅 3%~6%，主特征被最早的观测主导（30 次观测后最初的仍占 25%~40%）。
 机制上这会让"同一个人重新入镜时新鲜特征与陈旧主特征差到阈值之外"。
 
-⚠️ **但这次对照没有测出收益，因此有界窗口默认关闭**（`LAB_MONITOR_FEATURE_WINDOW=0`）。
+⚠️ **2026-09-13 的 300 秒对照没有测出收益，曾因此默认关闭**（LAB_MONITOR_FEATURE_WINDOW=0）。
 对照实验（scripts/ab_feature_window.py，同语料 / 同参数 / 各 300 秒 / 22 路）：
 
 | | EMA(N=0) | 窗口(N=20) |
@@ -21,17 +21,22 @@ test_feature_aggregation.py — 主特征聚合策略（2026-09-13 新增，work
 | 从生产库 45 身份起步：新增身份 | 1 | 1 |
 | 从生产库起步：新建时最近邻相似度 | 0.6655 | 0.6655 |
 
-两臂做了**同一个**注册决策。**但不能因此断定滞后机制无罪**：生产库里存在
-**7 对特征字节完全相同**（余弦 1.0000）的身份 —— 那只能是"该人重新入镜时旧身份存的
-特征还离得很远（<0.68）于是又注册了一个，之后旧特征随观测收敛过去"，正是滞后机制
-留下的指纹。300 秒的臂复现不了它（每路仅约 500 帧，同一个人被观测次数太少，
-收敛还没发生）。**要判定这个修复有没有用，需要每臂 ≥30 分钟的长窗口实验，
-或等跨相机标注集就位**。
+两臂做了**同一个**注册决策 —— 因为 300 秒的臂每路只处理约 500 帧，同一人的观测
+次数不足以让 EMA 收敛到吸引子，复现不了失效机制。
 
-本文件的定位：锁定**两种策略各自的行为**，并锁定"默认必须是 EMA"这条决定。
-窗口策略必须在**独立进程**里验证 —— `FEATURE_WINDOW_SIZE` 是 import 期常量，
-同进程改不了（这也顺带证明环境变量真的生效）。为控制测试耗时，
-窗口侧的检查全部塞进**一次**子进程启动（每启动一次要重新 import torch，约 8 秒）。
+**2026-10-07 生产库取证补上了证据，默认已翻转为 20**：
+  - rnd_04 一路累积 115 个身份、39 个 byte-identical（生产库 direct 测量）；
+  - 重提该身份 appearance 记录的同帧特征（原 bbox/原视频/顺序解码），与存储主特征
+    相似度只有 0.42~0.78 raw / **centered -0.31~-0.53** —— EMA 吸引子已漂移到
+    "谁也认不出"的方向（数学本质：宽锥分布的长程平均落在锥心，与任何成员近正交）；
+  - 同一人轨迹跨位置特征 raw 只有 0.5~0.6，而相邻位置 0.97 → 单向量表示必然失败，
+    必须靠 bank 分层覆盖（见 _BANK_MIN_QUALITY）+ 窗口主特征保持在分布内。
+
+本文件的定位：锁定**两种策略各自的行为**，并锁定"默认是有界窗口（20）"这条决定
+（如需回退对照：LAB_MONITOR_FEATURE_WINDOW=0）。窗口策略必须在**独立进程**里
+验证 —— `FEATURE_WINDOW_SIZE` 是 import 期常量，同进程改不了（这也顺带证明环境
+变量真的生效）。为控制测试耗时，窗口侧的检查全部塞进**一次**子进程启动
+（每启动一次要重新 import torch，约 8 秒）。
 """
 
 import os
@@ -149,14 +154,15 @@ class WindowRecordShapeTests(unittest.TestCase):
 
 
 class ProductionDefaultTests(unittest.TestCase):
-    """未验证收益的改动不得默认开启；同时锁定 EMA 的行为特征供将来对照。"""
+    """聚合策略的默认值锁定（2026-10-07 翻转为有界窗口）。"""
 
-    def test_production_default_is_ema(self):
+    def test_production_default_is_windowed(self):
         values = run_probe("", "print('DEFAULT', FEATURE_WINDOW_SIZE)")
         self.assertEqual(
-            0, int(values["DEFAULT"]),
-            "有界窗口实测没有收益，默认必须是 0（EMA）；"
-            "要用请显式设 LAB_MONITOR_FEATURE_WINDOW",
+            20, int(values["DEFAULT"]),
+            "2026-10-07 取证后默认必须是有界窗口（20）：EMA 吸引子在生产库被"
+            "实测证明与自身观测负相关（-0.53 centered），是重复注册与 26% "
+            "match_rate 的根源。回退对照请显式设 LAB_MONITOR_FEATURE_WINDOW=0",
         )
 
     def test_ema_keeps_initial_observation_dominant(self):

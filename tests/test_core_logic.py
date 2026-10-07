@@ -107,16 +107,42 @@ class TransitCalibratorTests(unittest.TestCase):
 
 class IdentityResolutionTests(unittest.TestCase):
     def test_ambiguous_match_is_not_merged_or_registered(self):
+        """真正"介于两个可区分身份之间"的查询仍须判歧义（不归并不新建）。
+
+        ⚠️ 2026-10-07 语义变更：原用例的两个库身份彼此相似度 0.99（近重复态），
+        在 Ratio Test 高相似旁路（REID_RATIO_BYPASS_SIMILARITY=0.95）下这类
+        查询现在会**匹配最佳值**而不是判歧义 —— 两个候选同时 ≥0.95 只可能
+        是同一人的重复注册，永久歧义正是身份库死亡螺旋的成因（见
+        reid_config.py 注释）。要测"歧义"必须用彼此可区分的身份。
+        """
         store = IdentityStore()
         first_id = store.register(normalized([1.0, 0.0, 0.0]))
-        second_id = store.register(normalized([0.99, 0.1, 0.0]))
-        query = normalized([0.997, 0.05, 0.0])
+        second_id = store.register(normalized([0.10, 0.995, 0.0]))
+        query = normalized([0.75, 0.66, 0.0])
 
         result = store.register_if_new(query)
 
         self.assertEqual("ambiguous", result.status)
         self.assertIsNone(result.global_id)
         self.assertEqual({first_id, second_id}, set(store.all_ids()))
+
+    def test_near_duplicate_gallery_is_matched_not_blocked(self):
+        """库内近重复身份（同一人被重复注册）的查询必须匹配，不许永久歧义。
+
+        这就是 2026-10-07 修复的生产库死亡螺旋：rnd_04 上 115 个身份彼此
+        相似度 ≈1.0，任何新观测 best≈second≈1.0 → Ratio Test 判歧义 →
+        track 永远拿不到身份（实测连续 17 分钟死区）。
+        """
+        store = IdentityStore()
+        first_id = store.register(normalized([1.0, 0.0, 0.0]))
+        store.register(normalized([0.99, 0.1, 0.0]))
+        query = normalized([0.997, 0.05, 0.0])
+
+        result = store.register_if_new(query)
+
+        self.assertEqual("matched", result.status)
+        self.assertEqual(first_id, result.global_id)
+        self.assertEqual(2, len(store.all_ids()), "近重复库不应因匹配而再新建")
 
     def test_clear_match_reuses_existing_identity(self):
         store = IdentityStore()

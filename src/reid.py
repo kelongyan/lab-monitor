@@ -33,6 +33,7 @@ from .reid_config import (
     IMAGENET_WEIGHT,
     REID_MATCH_THRESHOLD,
     REID_RATIO_TEST,
+    REID_RATIO_BYPASS_SIMILARITY,
     ReIDWeight,
     ReIDWeightUnavailable,
     describe as describe_reid_config,
@@ -300,6 +301,12 @@ def match_feature_detailed(
        取 max 可以绕开 EMA 塌缩。主匹配路径必须把 bank 用起来。
 
     单身份时跳过 Ratio Test 的判定按**去重后的身份数**计算，不是按行数。
+
+    **高相似度旁路**（2026-10-07）：当 best_sim ≥ `REID_RATIO_BYPASS_SIMILARITY`
+    （默认 0.95）时跳过 Ratio Test。理由与安全性见 `reid_config.py` 里该常量的
+    注释 —— 一言以蔽之：两个候选同时 ≥0.95 只可能是同一人的重复身份，
+    ratio 阻断在此处不是"谨慎"而是"死亡螺旋"（新观测永远拿不到身份，
+    旧重复身份永远不会被回收）。
     """
     if not gallery:
         return MatchDetail(matched_id=None)
@@ -329,8 +336,13 @@ def match_feature_detailed(
         return MatchDetail(matched_id=None, best_sim=best_sim, second_sim=second_sim)
 
     # Ratio Test：若第二名相似度与最佳相似度过于接近，说明有歧义，拒绝匹配
-    if best_sim > 0 and second_sim / best_sim > ratio:
-        return MatchDetail(matched_id=None, best_sim=best_sim, second_sim=second_sim, is_ratio_blocked=True)
+    # 高相似度旁路：见函数 docstring 与 reid_config.REID_RATIO_BYPASS_SIMILARITY。
+    # 注意 ≥1.0 的门限语义是"关闭旁路、回退旧行为"：门限取到 1.0 时余弦不可能
+    # 越过它 → 恒不旁路（塌缩护栏测试靠这条路径复现旧行为）。
+    _bypass_active = REID_RATIO_BYPASS_SIMILARITY < 1.0
+    if not _bypass_active or best_sim < REID_RATIO_BYPASS_SIMILARITY:
+        if best_sim > 0 and second_sim / best_sim > ratio:
+            return MatchDetail(matched_id=None, best_sim=best_sim, second_sim=second_sim, is_ratio_blocked=True)
 
     return MatchDetail(matched_id=best_id, best_sim=best_sim, second_sim=second_sim)
 
