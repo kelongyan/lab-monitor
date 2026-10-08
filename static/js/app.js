@@ -4,13 +4,14 @@
 import { initTheme } from './modules/theme.js';
 import { setGridMode, setFocusCamera } from './modules/grid.js';
 import { connectWS, pollStatus, pollCalibStats, pollReidMetrics, clearAlerts, hydrateAlerts } from './modules/websocket.js';
-import { 
-  closeModal, 
-  openIdentitySearchModal, 
-  openTopologyModal, 
+import {
+  closeModal,
+  openIdentitySearchModal,
+  openTopologyModal,
   openHistoryExportModal,
   openFocusModal,
-  closeFocusModal
+  closeFocusModal,
+  openTrajectoryQuickModal
 } from './modules/modals.js';
 import { 
   initRoiCanvas, 
@@ -105,6 +106,12 @@ function bindEvents() {
   const btnTopology = document.getElementById('btn-open-topology');
   if (btnTopology) {
     btnTopology.addEventListener('click', openTopologyModal);
+  }
+
+  // 顶栏「轨迹路线图」→ 一击直达站点图（默认打开跨站点最多的身份）
+  const btnTrajGraph = document.getElementById('btn-open-trajgraph');
+  if (btnTrajGraph) {
+    btnTrajGraph.addEventListener('click', openTrajectoryQuickModal);
   }
 
   const btnHistory = document.getElementById('btn-open-history');

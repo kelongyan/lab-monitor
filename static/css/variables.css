@@ -19,6 +19,12 @@
   --text-main: #f8fafc;
   --text-muted: #94a3b8;
   --text-dim: #64748b;
+
+  /* 轨迹路线图的区域带衬底（traj-graph.css）：两层极淡灰做「车道」隔行，
+     颜色必须极弱——它只是空间结构的衬底，不能和节点抢戏 */
+  --tg-band-fill: rgba(148, 163, 184, 0.07);
+  --tg-band-fill-alt: rgba(148, 163, 184, 0.035);
+  --tg-band-stroke: rgba(148, 163, 184, 0.16);
 }
 
 /* 大厂正规浅色主题 (Enterprise Executive Light Theme) */
@@ -43,6 +49,11 @@ html[data-theme="light"] {
   --text-main: #0f172a;
   --text-muted: #475569;
   --text-dim: #94a3b8;
+
+  /* 浅色下区域带要加深一档才在白底画布上分得出边界 */
+  --tg-band-fill: rgba(100, 116, 139, 0.09);
+  --tg-band-fill-alt: rgba(100, 116, 139, 0.045);
+  --tg-band-stroke: rgba(100, 116, 139, 0.22);
 }
 
 html[data-theme="light"] body {

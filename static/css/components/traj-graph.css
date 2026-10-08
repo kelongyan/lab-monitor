@@ -1,40 +1,65 @@
 /* ==================================================================
-   轨迹路线图（人员跨站点通行图）
+   轨迹路线图（人员跨站点通行图）—— 巡检站点图样式
    ------------------------------------------------------------------
-   颜色一律取 variables.css 的自定义属性：硬编码 hex 会让 light 主题失效
-   （项目前端硬约定）。节点底色用 --bg-card、画布底色用 --bg-base，
-   两级底色在明暗两套主题下都能形成层次。
+   设计取向：
+   - 站点是圆形徽章（泊位），走廊是粗「线路」，区域画成横向「车道」
+     带衬底；让「站点在哪个区域」成为视觉信息而不是节点内小字。
+   - 全图只有一个常驻动效：当前站点的脉冲光环。其余状态靠填色、
+     描边、大小区分，全部静止。
+   - 颜色一律取 variables.css 的自定义属性：硬编码 hex 会让 light
+     主题失效（项目前端硬约定）。区域带衬底用新增的 --tg-band-* token。
    ================================================================== */
 
 .tg-head {
   display: flex;
   align-items: baseline;
   justify-content: space-between;
-  gap: 10px;
+  gap: 12px;
   flex-wrap: wrap;
-  margin-bottom: 6px;
+  margin-bottom: 8px;
 }
 
 .tg-title {
-  font-size: 12px;
+  font-size: 13px;
   font-weight: 700;
+  letter-spacing: 0.04em;
   color: var(--text-muted);
 }
 
+/* 统计行：数字立起来，分隔符压暗 —— 不做渐变卡片，那是默认套路 */
 .tg-stat {
-  font-size: 11px;
+  font-size: 12px;
   color: var(--text-dim);
+}
+
+.tg-stat strong {
+  color: var(--text-main);
+  font-weight: 600;
+  font-family: ui-monospace, SFMono-Regular, Menlo, Consolas, monospace;
+}
+
+.tg-stat .tg-sep {
+  margin: 0 6px;
+  color: var(--text-dim);
+  opacity: 0.6;
 }
 
 .tg-loop-note {
   margin-bottom: 8px;
-  padding: 5px 8px;
+  padding: 6px 10px;
   border-radius: 6px;
   border: 1px solid var(--warning-glow);
   background: var(--warning-glow);
   color: var(--warning);
   font-size: 11px;
   line-height: 1.5;
+}
+
+/* 弹窗加宽：默认 modal-container max-width 780px 会把 1000 宽的
+   viewBox 压到 74%，12px 字渲染成 9px —— 那是这张图「第一眼丑」的
+   物理根源。轨迹弹窗内容密集，单独放宽到 1120px。 */
+#trajectory-modal .modal-container {
+  max-width: 1120px;
 }
 
 .tg-stage {
@@ -50,64 +75,135 @@
   display: block;
   width: 100%;
   height: auto;
-  max-height: 520px;
+  max-height: 560px;
 }
 
-/* ---------------- 节点 ---------------- */
+/* ---------------- 区域带衬底（「车道」） ---------------- */
+
+.tg-band rect {
+  fill: var(--tg-band-fill);
+  stroke: var(--tg-band-stroke);
+  stroke-width: 1;
+}
+
+.tg-band.tg-band-alt rect {
+  fill: var(--tg-band-fill-alt);
+}
+
+.tg-band-name {
+  fill: var(--text-dim);
+  font-size: 10.5px;
+  letter-spacing: 0.12em;
+  opacity: 0.85;
+}
+
+/* ---------------- 节点：圆形徽章 ---------------- */
 
 .tg-node {
   cursor: pointer;
   outline: none;
 }
 
-.tg-node rect {
+.tg-badge {
   fill: var(--bg-card);
-  stroke: var(--border-card);
-  stroke-width: 1;
+  stroke: var(--text-dim);
+  stroke-width: 1.5;
   transition: stroke 0.15s ease, fill 0.15s ease;
 }
 
-.tg-node .tg-node-region {
-  fill: var(--text-muted);
-  font-size: 11px;
-  font-family: inherit;
+/* 已访问站点：电光蓝实心 */
+.tg-node.tg-visited .tg-badge {
+  fill: var(--primary-glow);
+  stroke: var(--primary-light);
+  stroke-width: 2;
 }
 
-.tg-node .tg-node-cams {
+/* 当前所在站点：琥珀 + 脉冲光环（全图唯一常驻动效） */
+.tg-node.tg-current .tg-badge {
+  fill: var(--warning-glow);
+  stroke: var(--warning);
+  stroke-width: 2.5;
+}
+
+/* 未经过：空心灰圈，压低视觉权重但保留「拓扑可达」的存在感 */
+.tg-node.tg-unvisited .tg-badge {
+  fill: var(--bg-card);
+  stroke: var(--text-dim);
+  stroke-width: 1.5;
+  stroke-dasharray: 5 4;
+  opacity: 0.85;
+}
+
+/* 徽章内部：经过序号 or 摄像机 glyph */
+.tg-badge-num {
   fill: var(--text-main);
-  font-size: 12px;
-  font-weight: 500;
+  font-size: 22px;
+  font-weight: 700;
+  text-anchor: middle;
   font-family: ui-monospace, SFMono-Regular, Menlo, Consolas, monospace;
 }
 
-.tg-node.tg-visited rect {
-  stroke: var(--primary);
-  stroke-width: 2;
-}
-
-.tg-node.tg-current rect {
-  stroke: var(--warning);
-  stroke-width: 2;
-  fill: var(--bg-card-hover);
-}
-
-/* 未经过的站点：虚线描边 + 中灰描边色，既不抢视线又能看出「拓扑可达但没去过」。
-   描边必须用 --text-dim 而不是 --border-card：后者在 light 主题下是极浅的
-   rgba(203,213,225,.9)，配白底节点几乎看不见（实测截图确认）。 */
-.tg-node.tg-unvisited rect {
-  opacity: 0.8;
-  stroke: var(--text-dim);
-  stroke-dasharray: 5 4;
-}
-
-.tg-node.tg-unvisited .tg-node-cams {
+.tg-node.tg-unvisited .tg-badge-num {
   fill: var(--text-muted);
 }
 
-.tg-node:hover rect,
-.tg-node:focus-visible rect {
+.tg-cam rect,
+.tg-cam circle {
+  fill: var(--bg-card);
+  stroke: var(--text-muted);
+  stroke-width: 1.6;
+}
+
+.tg-cam circle:last-child {
+  fill: var(--text-muted);
+  stroke: none;
+}
+
+.tg-node:hover .tg-badge,
+.tg-node:focus-visible .tg-badge {
   stroke: var(--primary-light);
   fill: var(--bg-card-hover);
+}
+
+/* 外置标签：主标题（相机名）+ 副标题（区域） */
+.tg-node-label {
+  fill: var(--text-main);
+  font-size: 12px;
+  font-weight: 600;
+  font-family: ui-monospace, SFMono-Regular, Menlo, Consolas, monospace;
+  paint-order: stroke;
+  stroke: var(--bg-base);
+  stroke-width: 3px;
+  stroke-linejoin: round;
+}
+
+.tg-node-region {
+  fill: var(--text-dim);
+  font-size: 10.5px;
+  paint-order: stroke;
+  stroke: var(--bg-base);
+  stroke-width: 3px;
+  stroke-linejoin: round;
+}
+
+.tg-node.tg-unvisited .tg-node-label {
+  fill: var(--text-muted);
+  font-weight: 500;
+}
+
+/* 当前站点的扩散脉冲：唯一记忆点 */
+.tg-pulse {
+  fill: none;
+  stroke: var(--warning);
+  stroke-width: 2;
+  transform-box: fill-box;
+  transform-origin: center;
+  animation: tg-pulse 2.2s ease-out infinite;
+}
+
+@keyframes tg-pulse {
+  0% { transform: scale(1); opacity: 0.7; }
+  100% { transform: scale(1.65); opacity: 0; }
 }
 
 /* 播放动线时把尚未到达的站点压暗，视线集中到当前进度 */
@@ -115,7 +211,7 @@
   opacity: 0.16;
 }
 
-/* ---------------- 边 ---------------- */
+/* ---------------- 边：走廊线路 + 时延药丸 ---------------- */
 
 .tg-edge {
   fill: none;
@@ -123,39 +219,85 @@
   stroke-linecap: round;
 }
 
+/* 可达但未走的走廊：粗灰线 —— 粗了才有「线路」感，压低透明度避免抢戏 */
 .tg-edge.tg-idle {
   stroke: var(--text-dim);
-  stroke-width: 1;
-  opacity: 0.25;
+  stroke-width: 3;
+  opacity: 0.4;
 }
 
+/* 动线：电光蓝，更粗，流动虚线 */
 .tg-edge.tg-traversed {
-  stroke: var(--primary);
-  stroke-width: 2;
+  stroke: var(--primary-light);
+  stroke-width: 3.5;
 }
 
 .tg-edge.tg-traversed.tg-flowing {
-  stroke: var(--primary-light);
   stroke-dasharray: 10 8;
   animation: tg-flow 1.4s linear infinite;
 }
 
-.tg-edge-label {
-  fill: var(--text-dim);
-  font-size: 11px;
-  font-family: inherit;
-}
-
 @keyframes tg-flow {
-  to {
-    stroke-dashoffset: -36;
-  }
+  to { stroke-dashoffset: -36; }
 }
 
-@media (prefers-reduced-motion: reduce) {
-  .tg-edge.tg-traversed.tg-flowing {
-    animation: none;
-  }
+/* 时延药丸：数字不压在线上 */
+.tg-edge-pill rect {
+  fill: var(--bg-card);
+  stroke: var(--border-card-glow);
+  stroke-width: 1;
+}
+
+.tg-edge-pill text {
+  fill: var(--text-muted);
+  font-size: 10.5px;
+  text-anchor: middle;
+  font-family: ui-monospace, SFMono-Regular, Menlo, Consolas, monospace;
+}
+
+/* 标签与药丸都带描边底（paint-order: stroke），在带衬底与线上都读得清 */
+
+/* ---------------- 目标切换条（站点图上方） ---------------- */
+
+.tg-switcher {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  margin-bottom: 8px;
+}
+
+.tg-switcher-label {
+  font-size: 11px;
+  color: var(--text-dim);
+}
+
+.tg-gid-select {
+  flex: 1;
+  min-width: 0;
+  font-size: 12px;
+  padding: 5px 8px;
+  border-radius: 6px;
+  border: 1px solid var(--border-card);
+  background: var(--bg-card);
+  color: var(--text-main);
+  font-family: ui-monospace, SFMono-Regular, Menlo, Consolas, monospace;
+  outline: none;
+  cursor: pointer;
+}
+
+.tg-gid-select:focus-visible {
+  border-color: var(--primary-light);
+}
+
+.tg-switcher .tg-btn {
+  padding: 5px 10px;
+  font-size: 13px;
+  line-height: 1.2;
+}
+
+html[data-theme="light"] .tg-gid-select {
+  background: #ffffff;
+  border-color: rgba(203, 213, 225, 0.9);
 }
 
 /* ---------------- 悬浮提示 ---------------- */
@@ -186,6 +328,60 @@
   color: var(--text-main);
   font-weight: 500;
   font-family: ui-monospace, SFMono-Regular, Menlo, Consolas, monospace;
+}
+
+/* ---------------- 图例 ---------------- */
+
+.tg-legend {
+  display: flex;
+  align-items: center;
+  gap: 18px;
+  flex-wrap: wrap;
+  margin-top: 8px;
+  padding: 6px 10px;
+  border: 1px solid var(--border-card);
+  border-radius: 8px;
+  background: var(--bg-card);
+}
+
+.tg-lg {
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+  font-size: 11px;
+  color: var(--text-muted);
+}
+
+.tg-lg-dot {
+  width: 11px;
+  height: 11px;
+  border-radius: 50%;
+  border: 1.5px solid var(--text-dim);
+  background: var(--bg-card);
+  flex: none;
+}
+
+.tg-lg-dot.tg-lg-visited {
+  background: var(--primary-glow);
+  border-color: var(--primary-light);
+}
+
+.tg-lg-dot.tg-lg-current {
+  background: var(--warning-glow);
+  border-color: var(--warning);
+}
+
+.tg-lg-line {
+  width: 22px;
+  height: 0;
+  border-top: 3px solid var(--text-dim);
+  opacity: 0.4;
+  flex: none;
+}
+
+.tg-lg-line.tg-lg-flow {
+  border-top-color: var(--primary-light);
+  opacity: 1;
 }
 
 /* ---------------- 控制条与提示 ---------------- */
@@ -231,18 +427,38 @@
 
 /* ---------------- 浅色主题补充 ---------------- */
 
-/* 白底上 --bg-base(#f1f5f9) 与节点 --bg-card(#fff) 只差一点，
-   给画布加一层更明确的衬底才分得出边界 */
+/* 白底上 --bg-base(#f1f5f9) 与区域带衬底对比要抬一档，否则带消失 */
 html[data-theme="light"] .tg-stage {
   background: #e5eaf1;
+}
+
+html[data-theme="light"] .tg-band rect {
+  fill: var(--tg-band-fill);
+  stroke: var(--tg-band-stroke);
+}
+
+/* 「未经过的边」在浅色下要抬一点不透明度：深色主题靠亮底承托 0.4 尚可读，
+   浅色下 0.4 的灰线配灰底几乎消失，会丢掉「拓扑可达」这条信息 */
+html[data-theme="light"] .tg-edge.tg-idle {
+  opacity: 0.55;
+}
+
+/* 标签描边用画布底色：浅色画布上要跟着换，否则描边成了深色描边 */
+html[data-theme="light"] .tg-node-label,
+html[data-theme="light"] .tg-node-region {
+  stroke: #e5eaf1;
 }
 
 html[data-theme="light"] .tg-tip {
   box-shadow: 0 6px 18px rgba(15, 23, 42, 0.12);
 }
 
-/* 「未经过的边」在浅色下要抬一点不透明度：深色主题靠亮底承托 0.25 尚可读，
-   浅色下 0.25 的灰线配灰底几乎消失，会丢掉「拓扑可达」这条信息 */
-html[data-theme="light"] .tg-edge.tg-idle {
-  opacity: 0.55;
+@media (prefers-reduced-motion: reduce) {
+  .tg-edge.tg-traversed.tg-flowing {
+    animation: none;
+  }
+  .tg-pulse {
+    animation: none;
+    opacity: 0.35;
+  }
 }

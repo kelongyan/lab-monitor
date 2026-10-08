@@ -443,6 +443,105 @@ async function loadCrossCameraEvidence(global_id, request) {
   }
 }
 
+/* gid 列表缓存：切换条与快捷入口共用，避免每次打开/切换都拉一次全表。
+   60 秒 TTL——身份库在运行期会新增，但也不能每次切换都重新查库。 */
+let _identityIdCache = null;
+let _identityIdCacheAt = 0;
+const IDENTITY_CACHE_TTL_MS = 60000;
+
+async function listIdentityIds(signal) {
+  const now = Date.now();
+  if (_identityIdCache && now - _identityIdCacheAt < IDENTITY_CACHE_TTL_MS) {
+    return _identityIdCache;
+  }
+  const res = await fetchJson('/api/identities', { signal, timeoutMs: 6000 });
+  const ids = Array.isArray(res && res.ids) ? res.ids.filter(Boolean) : [];
+  if (ids.length) {
+    _identityIdCache = ids;
+    _identityIdCacheAt = now;
+  }
+  return ids;
+}
+
+/**
+ * 快捷入口的默认目标：并发取前 12 个身份的 per_camera，选跨站点最多的人
+ * （跨站越多路线图越有的看）。max_points=1 只读摘要，不付完整折叠的代价。
+ * 全部失败时返回 null，调用方兜底退到列表第一个——快捷入口不能因选人失败而打不开。
+ */
+async function pickFeaturedGid(ids) {
+  const candidates = ids.slice(0, 12);
+  const scored = await Promise.all(
+    candidates.map((gid) =>
+      fetchJson(
+        `/api/identities/${encodeURIComponent(gid)}/trajectory?max_points=1`,
+        { timeoutMs: 8000 },
+      )
+        .then((t) => ({ gid, cameras: Object.keys((t && t.per_camera) || {}).length }))
+        .catch(() => ({ gid, cameras: -1 })),
+    ),
+  );
+  scored.sort((a, b) => b.cameras - a.cameras);
+  const best = scored[0];
+  return best && best.cameras > 0 ? best.gid : null;
+}
+
+/**
+ * 顶栏「轨迹路线图」快捷入口：一击直达路线图弹窗。
+ * 点击时并不知道要看谁——默认打开跨站点最多的身份，进弹窗后可用
+ * 站点图上方的切换条（‹ select ›）换人。
+ */
+export async function openTrajectoryQuickModal() {
+  try {
+    const ids = await listIdentityIds();
+    if (!ids.length) {
+      showToast('暂无身份记录，无法展示轨迹路线图', 'error');
+      return;
+    }
+    const gid = (await pickFeaturedGid(ids)) || ids[0];
+    showTrajectoryModal(gid);
+  } catch (e) {
+    showToast('加载身份列表失败：' + e.message, 'error');
+  }
+}
+
+/**
+ * 站点图上方的目标切换条。切换即重载整个弹窗（showTrajectoryModal）：
+ * 代际请求会取消上一次的加载，状态全重置，不会残留旧目标的轨迹/抓拍数据。
+ *
+ * 切换条在 renderTrajGraph 之后 prepend —— renderTrajGraph 用 innerHTML
+ * 重写整个 panel，先挂会被覆盖掉。
+ */
+function mountGidSwitcher(panel, currentGid, ids) {
+  let bar = panel.querySelector('.tg-switcher');
+  if (!bar) {
+    bar = document.createElement('div');
+    bar.className = 'tg-switcher';
+    panel.prepend(bar);
+  }
+  const options = ids
+    .map((id) => `<option value="${escapeAttr(id)}">#${escapeHtml(id)}</option>`)
+    .join('');
+  bar.innerHTML = `
+    <button class="action-btn tg-btn" data-tg-step="-1" type="button" aria-label="上一个目标">‹</button>
+    <label class="tg-switcher-label" for="tg-gid-select">目标</label>
+    <select class="tg-gid-select" id="tg-gid-select" aria-label="选择要查看轨迹的目标">${options}</select>
+    <button class="action-btn tg-btn" data-tg-step="1" type="button" aria-label="下一个目标">›</button>`;
+
+  const select = bar.querySelector('#tg-gid-select');
+  select.value = currentGid;
+  select.addEventListener('change', () => {
+    if (select.value && select.value !== currentGid) showTrajectoryModal(select.value);
+  });
+  bar.querySelectorAll('[data-tg-step]').forEach((btn) => {
+    btn.addEventListener('click', () => {
+      const idx = ids.indexOf(currentGid);
+      const step = Number(btn.getAttribute('data-tg-step')) || 0;
+      const next = ids[(idx + step + ids.length) % ids.length];
+      if (next && next !== currentGid) showTrajectoryModal(next);
+    });
+  });
+}
+
 /**
  * 轨迹路线图（图形化视图）：把该身份走过的摄像头画成「站点图」。
  *
@@ -480,6 +579,16 @@ async function loadTrajGraph(global_id, request) {
       loop: traj.loop,
       onNodeClick: (site) => highlightChainForSite(site),
     });
+    // 目标切换条：与图同域，失败不阻断图本身
+    try {
+      const ids = await listIdentityIds(request.signal);
+      if (ids.length && request.isCurrent()) {
+        mountGidSwitcher(panel, global_id, ids);
+      }
+    } catch (switchErr) {
+      if (!request.isCurrent()) return;
+      console.warn('目标切换条加载失败:', switchErr);
+    }
   } catch (e) {
     if (!request.isCurrent()) return;
     panel.innerHTML = `<div class="empty-state" style="padding: 8px;">

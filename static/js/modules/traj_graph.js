@@ -39,12 +39,24 @@ export const COPLANAR_MAX_SECONDS = 10;
 const VIEW_W = 1000;
 const VIEW_H = 720;
 
-/** 站点节点尺寸（像素，viewBox 单位）。
- *  宽 158 是实测定的：最长站点名 `RND_04 + RND_05` 共 15 字符，12px 等宽
- *  在 viewBox 单位下约占 108，加左右各 16 内边距后 140，留出余量；
- *  再宽会挤压「中间走廊」3 站点的带内间距（带宽 0.50 / 3 站，间距已接近节点宽）。 */
-export const NODE_W = 158;
-export const NODE_H = 54;
+/**
+ * 节点几何：圆形徽章 + 外置标签。
+ *
+ * 路由钳制以 NODE_W/NODE_H 为包围盒（正方形 64 = 2×32，稍大于半径），
+ * layoutSites / 越界测试都以它为界。标签外置后节点本体只剩徽章，
+ * 相邻站点可以靠得更近，14 站点在 1000 宽画布上不挤。
+ */
+export const NODE_W = 64;
+export const NODE_H = 64;
+
+/** 徽章半径：经过的站点更大更醒目，未经过的压低视觉权重。 */
+const VISITED_R = 30;
+const IDLE_R = 24;
+
+/** 区域带衬底高度（viewBox 单位）。取 116 是为了让 7 条带在 720 高的
+ *  画布上不重叠（带间距见布局注释）：中间走廊 y=0.50 ±0.08、南侧 y=0.68
+ *  ±0.08，最近的两条带还留 ~14px 空隙，像道路之间的隔离带。 */
+const BAND_H = 116;
 
 /**
  * 区域带：`[x_start, x_end, y]`，区域内站点在该带中水平等距展开。
@@ -468,19 +480,27 @@ export function roundedPath(points, radius = CORNER_RADIUS) {
   return d;
 }
 
+/** 节点徽章半径（渲染层与路由层共用，保证线连到圆边缘而不是旧矩形包围盒）。 */
+function nodeRadius(site) {
+  return site && site.visited ? VISITED_R : IDLE_R;
+}
+
 /**
  * 生成两个站点之间的正交（曼哈顿）路由。
  *
  * 为什么不用直线：15 个节点规模下斜线会大面积交叉。正交路由让边贴着网格走，
  * 拐角数量可控，可读性高得多。
  *
+ * 连接点取圆形边缘：节点是徽章圆，halfW=halfW=半径时 rectBorderPoint
+ * 退化为圆边界交点；若沿用旧的矩形包围盒（158×54），线会连到圆外 ~50px 处飘着。
+ *
  * 返回 `{d, label: [x, y]}`，label 是时延标注的落点。
  */
 export function routeBetween(from, to, options = {}) {
-  const halfW = NODE_W / 2;
-  const halfH = NODE_H / 2;
-  const p1 = rectBorderPoint(from.x, from.y, halfW, halfH, to.x, to.y);
-  const p2 = rectBorderPoint(to.x, to.y, halfW, halfH, from.x, from.y);
+  const r1 = nodeRadius(from);
+  const r2 = nodeRadius(to);
+  const p1 = rectBorderPoint(from.x, from.y, r1, r1, to.x, to.y);
+  const p2 = rectBorderPoint(to.x, to.y, r2, r2, from.x, from.y);
 
   const dx = Math.abs(p2[0] - p1[0]);
   const dy = Math.abs(p2[1] - p1[1]);
@@ -525,9 +545,10 @@ function siteCaption(site) {
  * 站点主标题：站点内并列的相机名。
  *
  * 共位反向相机的编号通常成对（rnd_04 / rnd_05），完整写 `RND_04 + RND_05`
- * 有 15 个字符，会被迫降字号到 10px —— 未访问站点的文字本来就淡，再缩小就难读。
- * 同前缀时压成 `RND_04/05`（10 字符），即可统一用 12px。
+ * 有 15 个字符，外置标签会被挤到相邻节点上。同前缀时压成 `RND_04/05`
+ * （10 字符），给标签留出呼吸空间。
  * 精确的完整列表在悬浮提示里给出（见 buildTooltipHtml）。
+ * ⚠️ 前端测试断言 `RND_11/12` 格式且拒绝 `RND_11 + RND_12`，改格式要同步改测试。
  */
 function siteTitle(site) {
   const names = site.cameras.map((camera) => String(camera).toUpperCase());
@@ -560,6 +581,100 @@ function buildTooltipHtml(site) {
   return rows
     .map(([label, value]) => `<div class="tg-tip-row"><span>${label}</span><b>${value}</b></div>`)
     .join('');
+}
+
+/**
+ * 站点徽章内部图形：
+ * - 已访问站点 = 经过序号（轨迹经过顺序本身是序列，序号标记在这里传达信息而非装饰）
+ * - 未访问站点 = 摄像机简笔 glyph（机身 + 镜头），点明「这是一台相机所在的泊位」
+ */
+function badgeInner(site) {
+  if (site.order !== null) {
+    return `<text class="tg-badge-num" x="${site.x.toFixed(1)}" y="${(site.y + 1).toFixed(1)}">${site.order}</text>`;
+  }
+  return `<g class="tg-cam" transform="translate(${site.x.toFixed(1)},${site.y.toFixed(1)})">
+    <rect x="-8" y="-5" width="11" height="10" rx="2"></rect>
+    <circle cx="-2.6" cy="0" r="2.8"></circle>
+    <circle cx="2" cy="0" r="0.9"></circle>
+  </g>`;
+}
+
+/**
+ * 站点节点：圆形徽章 + 外置标签。
+ *
+ * 当前所在站点带一圈扩散脉冲（全图唯一的常驻动效，刻意只给它：
+ * 「这个人现在在这里」是监控图最该被一眼看到的信息）。其余状态靠
+ * 填色与描边区分，全部静止。
+ */
+function renderNode(site) {
+  const r = nodeRadius(site);
+  const cls = ['tg-node', `tg-${site.state}`].join(' ');
+  const title = siteTitle(site);
+  const region = site.region === UNKNOWN_REGION ? '未识别区域' : site.region;
+  const pulse = site.state === 'current'
+    ? `<circle class="tg-pulse" cx="${site.x.toFixed(1)}" cy="${site.y.toFixed(1)}" r="${r}"></circle>`
+    : '';
+  return `<g class="${cls}" data-site="${escapeHtml(site.id)}" data-order="${site.order === null ? '' : site.order}" tabindex="0" role="button" aria-label="${escapeHtml(`站点 ${site.id} ${region}`)}">
+  ${pulse}
+  <circle class="tg-badge" cx="${site.x.toFixed(1)}" cy="${site.y.toFixed(1)}" r="${r}"></circle>
+  ${badgeInner(site)}
+  <text class="tg-node-label" x="${site.x.toFixed(1)}" y="${(site.y + r + 18).toFixed(1)}" text-anchor="middle">${escapeHtml(title)}</text>
+  <text class="tg-node-region" x="${site.x.toFixed(1)}" y="${(site.y + r + 34).toFixed(1)}" text-anchor="middle">${escapeHtml(region)}</text>
+</g>`;
+}
+
+/**
+ * 通行边：走廊线路 + 时延药丸。
+ *
+ * 时延只标注长位移边（>60s）——短边标数字会糊成一片。药丸带底色，
+ * 避免数字压在走廊线上读不出来。
+ */
+function renderEdge(edge, arrowId) {
+  const cls = ['tg-edge', edge.traversed ? 'tg-traversed' : 'tg-idle'].join(' ');
+  let pill = '';
+  if (edge.seconds > 60) {
+    const text = `${Math.round(edge.seconds)}s`;
+    const w = Math.max(36, text.length * 7.5 + 14);
+    const [lx, ly] = edge.label;
+    pill = `<g class="tg-edge-pill" transform="translate(${lx.toFixed(0)},${ly.toFixed(0)})">
+  <rect x="${(-w / 2).toFixed(0)}" y="-11" width="${w.toFixed(0)}" height="22" rx="11"></rect>
+  <text y="4">${escapeHtml(text)}</text>
+</g>`;
+  }
+  return `<path class="${cls}" d="${edge.d}" marker-end="url(#${arrowId})" data-edge="${escapeHtml(edge.id)}"></path>${pill}`;
+}
+
+/**
+ * 区域带衬底：把 REGION_BANDS 画成横向「车道」，站点所属走廊一眼可见。
+ *
+ * 奇偶带交替两层极淡的灰，像道路之间的路面区分；区域名落在带内左上角。
+ * 坐标全在画布内裁剪（北侧走廊带中心 y=0.08，上缘会出画布，钳到 0）。
+ */
+function renderBandLayer() {
+  return Object.entries(REGION_BANDS)
+    .map(([name, band], i) => {
+      const bx = band[0] * VIEW_W;
+      const bw = Math.max(0, (band[1] - band[0]) * VIEW_W);
+      const by = Math.max(0, band[2] * VIEW_H - BAND_H / 2);
+      const bh = Math.min(BAND_H, VIEW_H - by);
+      const alt = i % 2 ? ' tg-band-alt' : '';
+      return `<g class="tg-band${alt}">
+  <rect x="${bx.toFixed(0)}" y="${by.toFixed(0)}" width="${bw.toFixed(0)}" height="${bh.toFixed(0)}" rx="16"></rect>
+  <text class="tg-band-name" x="${(bx + 16).toFixed(0)}" y="${(by + 26).toFixed(0)}">${escapeHtml(name)}</text>
+</g>`;
+    })
+    .join('');
+}
+
+/** 图例：颜色编码不自解释的监控图是自嗨。样本用纯 CSS 画，不引额外资源。 */
+function renderLegend() {
+  return `<div class="tg-legend">
+  <span class="tg-lg"><i class="tg-lg-dot tg-lg-visited"></i>经过</span>
+  <span class="tg-lg"><i class="tg-lg-dot tg-lg-current"></i>当前所在</span>
+  <span class="tg-lg"><i class="tg-lg-dot tg-lg-unvisited"></i>未经过</span>
+  <span class="tg-lg"><i class="tg-lg-line tg-lg-flow"></i>动线</span>
+  <span class="tg-lg"><i class="tg-lg-line tg-lg-idle"></i>可达</span>
+</div>`;
 }
 
 /**
@@ -599,44 +714,31 @@ export function renderTrajGraph(container, graph, options = {}) {
     // 未走过的边先画，避免压在动线之上
     .sort((a, b) => Number(a.traversed) - Number(b.traversed));
 
+  const bandSvg = renderBandLayer();
+
   const edgeSvg = renderedEdges
-    .map((edge) => {
-      const cls = ['tg-edge', edge.traversed ? 'tg-traversed' : 'tg-idle'].join(' ');
-      // 时延只标注长位移边（>60s）：短边密密麻麻全是数字反而看不清
-      const label = edge.seconds > 60
-        ? `<text class="tg-edge-label" x="${edge.label[0].toFixed(0)}" y="${edge.label[1].toFixed(0)}" text-anchor="middle">${Math.round(edge.seconds)}s</text>`
-        : '';
-      return `<path class="${cls}" d="${edge.d}" marker-end="url(#${arrowId})" data-edge="${escapeHtml(edge.id)}"></path>${label}`;
-    })
+    .map((edge) => renderEdge(edge, arrowId))
     .join('');
 
-  const nodeSvg = sites
-    .map((site) => {
-      const x = site.x - NODE_W / 2;
-      const y = site.y - NODE_H / 2;
-      const cls = ['tg-node', `tg-${site.state}`].join(' ');
-      const title = siteTitle(site);
-      // 相机名过长时缩字号，避免溢出节点（节点宽 158，12px 等宽约容 13 字符后收窄）
-      const camFont = title.length > 13 ? 10 : 12;
-      return `<g class="${cls}" data-site="${escapeHtml(site.id)}" data-order="${site.order === null ? '' : site.order}" tabindex="0" role="button" aria-label="${escapeHtml(`站点 ${site.id}`)}">
-  <rect x="${x.toFixed(1)}" y="${y.toFixed(1)}" width="${NODE_W}" height="${NODE_H}" rx="10" stroke-width="${site.visited ? 2 : 1}"></rect>
-  <text class="tg-node-region" x="${(x + 16).toFixed(1)}" y="${(y + 19).toFixed(1)}">${escapeHtml(siteCaption(site))}</text>
-  <text class="tg-node-cams" x="${(x + 16).toFixed(1)}" y="${(y + 37).toFixed(1)}" style="font-size:${camFont}px">${escapeHtml(title)}</text>
-</g>`;
-    })
-    .join('');
+  const nodeSvg = sites.map((site) => renderNode(site)).join('');
 
   const loop = options.loop || null;
   const loopNote = loop && loop.detected
     ? `<div class="tg-loop-note">素材循环播放，已折叠 ${loop.loops && loop.loops > 1 ? loop.loops : ''} 轮（策略：${escapeHtml(loop.method || 'period')}）—— 不折叠会得到「来回跑几百次」的假象</div>`
     : '';
 
-  const stat = `共 ${graph.meta.siteCount} 个站点（${graph.meta.cameraCount} 台相机）· 该身份经过 ${graph.meta.visitedCount} 站 · 走过 ${graph.meta.traversedEdgeCount} 段路径`;
-
   container.innerHTML = `
     <div class="tg-head">
       <div class="tg-title">轨迹路线图</div>
-      <div class="tg-stat">${escapeHtml(stat)}</div>
+      <div class="tg-stat">
+        <strong>${graph.meta.siteCount}</strong> 站点
+        <span class="tg-sep">/</span>
+        <strong>${graph.meta.cameraCount}</strong> 台相机
+        <span class="tg-sep">·</span>
+        经过 <strong>${graph.meta.visitedCount}</strong> 站
+        <span class="tg-sep">·</span>
+        走过 <strong>${graph.meta.traversedEdgeCount}</strong> 段路径
+      </div>
     </div>
     ${loopNote}
     <div class="tg-stage">
@@ -644,16 +746,18 @@ export function renderTrajGraph(container, graph, options = {}) {
            aria-label="人员跨站点通行路线图">
         <defs>
           <marker id="${arrowId}" viewBox="0 0 10 10" refX="8" refY="5"
-                  markerWidth="6" markerHeight="6" orient="auto-start-reverse">
-            <path d="M2 1L8 5L2 9" fill="none" stroke="context-stroke" stroke-width="1.5"
+                  markerWidth="7" markerHeight="7" orient="auto-start-reverse">
+            <path d="M2 1L8 5L2 9" fill="none" stroke="context-stroke" stroke-width="1.8"
                   stroke-linecap="round" stroke-linejoin="round"></path>
           </marker>
         </defs>
+        ${bandSvg}
         ${edgeSvg}
         ${nodeSvg}
       </svg>
       <div class="tg-tip" hidden></div>
     </div>
+    ${renderLegend()}
     ${options.enablePlay === false ? '' : `
     <div class="tg-controls">
       <button class="action-btn tg-btn" data-tg-action="play" type="button">▶ 播放动线</button>
