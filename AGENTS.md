@@ -7,7 +7,7 @@ Compact guidance for OpenCode sessions. Full detail lives in `CLAUDE.md` — rea
 - Use the venv interpreter **always**: `./.venv/Scripts/python.exe`. The system `python` is a Microsoft Store stub that silently exits. It does not accept `/c/...` paths and prints GBK — wrap stdout in UTF-8 if printing Chinese.
 - Install deps in order: `pip install torch torchvision --index-url https://download.pytorch.org/whl/cu126` (or `cpu`) **first**, then `pip install -r requirements.txt`. `torch`/`torchvision` are intentionally absent from `requirements.txt`.
 - Run server: `./start.ps1` (PowerShell only) / stop: `./stop.ps1`. Foreground: `./.venv/Scripts/python.exe main.py`.
-- Tests: stdlib `unittest` only (no pytest). `./.venv/Scripts/python.exe -m unittest discover -s tests -t .`. Single case: `./.venv/Scripts/python.exe -m unittest tests.test_core_logic` (dot-path, not file path). Frontend: `node tests/test_stream_manager_frontend.mjs` and `node tests/test_personnel_frontend.mjs`.
+- Tests: stdlib `unittest` only (no pytest). `./.venv/Scripts/python.exe -m unittest discover -s tests -t .`. Single case: `./.venv/Scripts/python.exe -m unittest tests.test_core_logic` (dot-path, not file path). Frontend (Node, no deps): `node tests/test_stream_manager_frontend.mjs`, `node tests/test_personnel_frontend.mjs`, `node tests/test_traj_graph_frontend.mjs` — 25 .py + 3 .mjs files, 359 assertions total.
 
 ## API / write requests
 
@@ -18,10 +18,11 @@ Compact guidance for OpenCode sessions. Full detail lives in `CLAUDE.md` — rea
 ## Code landmines (verified in CLAUDE.md)
 
 - **ReID match threshold is single-sourced as `REID_MATCH_THRESHOLD` in `src/reid_config.py`** (default `0.68`, env override `LAB_MONITOR_REID_THRESHOLD`). The old "0.75 duplicated in 5 places" landmine is resolved — never hardcode threshold numbers at call sites.
-- **Never rebuild `PersonTracker` inside `_reset_stream_state()`** (`src/pipeline.py:222-229`): `BaseTrack._count` is class-level, so rebuilding zeroes every camera's track ids → identity collisions. Reset tracker state on stream reopen/file-loop instead by clearing absent streaks, not by reconstructing.
+- **Never rebuild `PersonTracker` inside `_reset_stream_state()`** (`src/pipeline.py:272-287`): `BaseTrack._count` is class-level, so rebuilding zeroes every camera's track ids → identity collisions. Reset tracker state on stream reopen/file-loop instead by clearing absent streaks, not by reconstructing.
 - **`src/db.py` global singleton is lazy (PEP 562)**: `from src.db import Database` does NOT connect (safe for scripts/tests); `from src.db import db` / attribute access creates it and opens production `outputs/lab_monitor.db`. Server code must take the DB via `server._get_database()` (store → gallery → global fallback) — never import the global directly in new endpoints. Tests use temp DBs only (verified: full suite leaves production mtime/WAL untouched).
 - `LAB_MONITOR_MODEL_POOL=1` reverts only pool size, **not** the `cv2.setNumThreads(1)` / `torch.set_num_threads(2)` clamping.
 - ReID features are throttled to disk (50 updates / 30s). New shutdown paths must call `flush_identity_features()` or lose recent averages.
+- **Galleries live in a common-component-centered space**: every matcher call (`PersonnelGallery.match`, `ReIDValidator.get_confirmed_match`, `rank_identities_by_feature`) must take the `MatchContext` from `IdentityStore.build_match_context()` (gallery + center + prepare atomically packed). Two separate getters → silent mismatch when another thread registers an identity in between. Splitting real-time / gallery / by-image matching into different coordinate systems also fails silently (wrong-but-plausible similarities).
 
 ## Startup degradations (no crash, just silent feature loss)
 
@@ -31,12 +32,12 @@ Compact guidance for OpenCode sessions. Full detail lives in `CLAUDE.md` — rea
 
 ## Frontend
 
-- Native ES modules, no build step. After editing any `static/css/*.css` or `static/js/**`, **bump `?v=` in `static/index.html`** (currently CSS `?v=12.0`, `app.js?v=12.2`; `main.css` 的 `@import` 子路径也带 `?v=12.0`，bump 时要一起改). `app.js` 里的 `import './modules/*.js'` 不带版本号 — hard refresh (`Ctrl+F5`) to see changes.
-- `static/js/modules/stream_manager.js` caps concurrent MJPEG to ~4 and uses IntersectionObserver; respect `resetStreamRegistry()`/`registerStreamImage()` timing or streams leak / never open.
+- Native ES modules, no build step. After editing any `static/css/*.css` or `static/js/**`, **bump `?v=` in `static/index.html`** (currently CSS `?v=12.1`, `app.js?v=12.5`; `main.css` 的 `@import` 子路径也带版本号，bump 时要一起改). `app.js` 里的 `import './modules/*.js'` 不带版本号 — hard refresh (`Ctrl+F5`) to see changes.
+- `static/js/modules/stream_manager.js` caps concurrent MJPEG at 5 (`MAX_CONCURRENT_STREAMS`) and uses IntersectionObserver; respect `resetStreamRegistry()`/`registerStreamImage()` timing or streams leak / never open.
 
 ## Other
 
-- `INTRUSION` fences come only from `config/roi.json` (normalized `[0,1]` coords); only `rnd_16` has one today. `POST /api/roi` hot-reloads; hand-edits need a restart.
+- `INTRUSION` fences come only from `config/roi.json` (normalized `[0,1]` coords); two today — `rnd_16`「机房02通道尽端受限区」 and `rnd_01`「核心机房防护区」. `POST /api/roi` hot-reloads; hand-edits need a restart.
 - Git: branch `main`, semantic prefixes (`feat:`/`fix:`/`docs:`/`style:`/`refactor:`). Never commit `*.pt`, `videos/`, `*.7z`, `docs/*.xlsx` (gitignored).
 
 See `CLAUDE.md` for full architecture, perf tiers, and the `P0-1`/`F5` audit-ticket dictionary in `docs/CODE_AUDIT_2026-07-28.md`.
