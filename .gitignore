@@ -71,3 +71,6 @@ docs/**/*
 
 # 自动标注对实验数据（需重新标注时可再生成）
 config/labeled/pairs.json
+
+# Claude Code 本地工作区配置（预览服务器 launch.json 等，纯工具文件）
+.claude/
